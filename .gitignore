@@ -1,0 +1,11 @@
+node_modules/
+outputs/
+work/
+
+.DS_Store
+*.log
+npm-debug.log*
+
+.env
+.env.*
+!.env.example

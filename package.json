@@ -1,0 +1,17 @@
+{
+  "name": "local-sound-library",
+  "version": "0.1.0",
+  "private": true,
+  "productName": "Sound Shelf",
+  "description": "Local sound library manager with drag-and-drop support for DaVinci Resolve",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/renderer.js",
+    "build:mac": "electron-packager . 'Sound Shelf' --platform=darwin --arch=arm64 --out=outputs --overwrite --asar --download.cacheRoot=/private/tmp/soundly-electron-cache --ignore='^/(outputs|work)($|/)'"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.0.3",
+    "electron": "^43.1.1"
+  }
+}
