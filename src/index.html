@@ -15,25 +15,30 @@
           <button class="nav-item active" data-filter="all"><span>▦</span> 모든 사운드 <b id="allCount">0</b></button>
           <button class="nav-item" data-filter="favorites"><span>★</span> 즐겨찾기 <b id="favoriteCount">0</b></button>
         </nav>
-        <div class="section-label">카테고리</div>
-        <div id="categoryList" class="category-list"></div>
+        <div class="sidebar-groups">
+          <div class="section-label">카테고리 폴더</div>
+          <div id="categoryList" class="category-list"></div>
+          <div class="section-label">태그</div>
+          <div id="tagList" class="category-list tag-list"></div>
+        </div>
         <div class="sidebar-bottom">
           <button id="addFolderBtn" class="primary-button">＋ 폴더 추가</button>
           <button id="addFilesBtn" class="subtle-button">파일 추가</button>
+          <button id="settingsBtn" class="subtle-button">⚙ 단축키 설정</button>
         </div>
       </aside>
 
       <main class="main-pane">
-        <header class="toolbar">
+        <header class="toolbar library-only">
           <div class="search-wrap">
             <span>⌕</span>
             <input id="searchInput" type="search" placeholder="이름, 태그, 카테고리 검색" autofocus />
-            <kbd>⌘ K</kbd>
+            <kbd id="searchShortcutHint">⌘S</kbd>
           </div>
           <button id="rescanBtn" class="icon-button" title="폴더 다시 스캔">↻</button>
         </header>
 
-        <section class="content-header">
+        <section class="content-header library-only">
           <div>
             <div class="eyebrow">LOCAL LIBRARY</div>
             <h1 id="viewTitle">모든 사운드</h1>
@@ -42,7 +47,7 @@
           <div class="resolve-hint"><span class="pulse"></span>이름 선택 → 아래 파형에서 구간 편집</div>
         </section>
 
-        <section class="sound-table-wrap">
+        <section class="sound-table-wrap library-only">
           <div class="sound-table-head">
             <span></span><span>이름</span><span>파형</span><span>카테고리</span><span>길이</span><span>포맷</span><span>채널</span><span>태그</span><span></span>
           </div>
@@ -55,7 +60,7 @@
           </div>
         </section>
 
-        <section id="auditionPanel" class="audition-panel">
+        <section id="auditionPanel" class="audition-panel library-only">
           <div class="audition-toolbar">
             <button id="detailPlayButton" class="detail-play" title="재생/정지 (Space)">▶</button>
             <div class="audition-title">
@@ -74,6 +79,18 @@
             <div id="detailPlayhead" class="detail-playhead"></div>
           </div>
         </section>
+
+        <section id="settingsPanel" class="settings-panel hidden">
+          <div class="settings-heading">
+            <div><div class="eyebrow">PREFERENCES</div><h1>단축키 설정</h1><p>단축키 버튼을 누른 뒤 원하는 키 조합을 입력하세요.</p></div>
+            <button id="closeSettingsBtn" class="subtle-button">완료</button>
+          </div>
+          <div id="shortcutList" class="shortcut-list"></div>
+          <div class="settings-footer">
+            <button id="resetShortcutsBtn" class="subtle-button">기본값으로 복원</button>
+            <p>추천: 검색 ⌘S · 카테고리 이동 ⌘M · 태그 편집 ⌘T · 실제 삭제 ⌘⌫</p>
+          </div>
+        </section>
       </main>
 
       <aside id="inspector" class="inspector hidden">
@@ -87,11 +104,23 @@
         <div class="facts" id="soundFacts"></div>
         <div class="inspector-actions">
           <button id="revealBtn" class="subtle-button">Finder에서 보기</button>
+          <button id="moveBtn" class="subtle-button">다른 폴더로 이동…</button>
           <button id="removeBtn" class="danger-button">라이브러리에서 삭제</button>
+          <button id="trashBtn" class="danger-button">원본 파일을 휴지통으로</button>
         </div>
       </aside>
     </div>
 
+    <div id="dropOverlay" class="drop-overlay hidden"><div>＋ 사운드 파일 또는 폴더 추가</div></div>
+    <div id="inputDialog" class="dialog-backdrop hidden">
+      <form id="inputDialogForm" class="input-dialog">
+        <h2 id="inputDialogTitle">입력</h2>
+        <p id="inputDialogDescription"></p>
+        <input id="inputDialogField" autocomplete="off" />
+        <datalist id="inputDialogOptions"></datalist>
+        <div class="dialog-actions"><button type="button" id="inputDialogCancel" class="subtle-button">취소</button><button type="submit" class="primary-button">확인</button></div>
+      </form>
+    </div>
     <div id="scanToast" class="toast hidden"></div>
     <audio id="audioPlayer"></audio>
     <script src="renderer.js"></script>

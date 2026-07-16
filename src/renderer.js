@@ -1,3 +1,21 @@
+const DEFAULT_SHORTCUTS = {
+  search: 'Meta+S', moveCategory: 'Meta+M', editTags: 'Meta+T', addFiles: 'Meta+O',
+  addFolder: 'Meta+Shift+O', trash: 'Meta+Backspace', reveal: 'Meta+Shift+R',
+  favorite: 'Meta+Shift+F', settings: 'Meta+Comma', playPause: 'Space'
+};
+const SHORTCUT_LABELS = {
+  search: ['사운드 검색', '검색창으로 이동'],
+  moveCategory: ['카테고리 폴더로 이동', '선택 파일을 실제 카테고리 폴더로 이동'],
+  editTags: ['태그 편집', '선택 사운드의 태그 입력'],
+  addFiles: ['파일 추가', '오디오 파일 선택'],
+  addFolder: ['폴더 추가', '오디오 폴더 등록'],
+  trash: ['원본 파일 삭제', '선택 파일을 macOS 휴지통으로 이동'],
+  reveal: ['Finder에서 보기', '선택 파일 위치 열기'],
+  favorite: ['즐겨찾기 전환', '선택 사운드 별표 켜기/끄기'],
+  settings: ['단축키 설정', '이 설정 화면 열기'],
+  playPause: ['재생/일시정지', '선택 사운드 미리 듣기']
+};
+
 const state = {
   sounds: [],
   categories: [],
@@ -10,7 +28,9 @@ const state = {
   playRangeEnd: null,
   waveforms: new Map(),
   waveformLoading: new Set(),
-  selections: new Map()
+  selections: new Map(),
+  shortcuts: { ...DEFAULT_SHORTCUTS },
+  view: 'library'
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -81,6 +101,7 @@ function filteredSounds() {
   return state.sounds.filter((sound) => {
     if (state.filter === 'favorites' && !sound.favorite) return false;
     if (state.filter.startsWith('category:') && sound.category !== state.filter.slice(9)) return false;
+    if (state.filter.startsWith('tag:') && !(sound.tags || []).includes(state.filter.slice(4))) return false;
     if (!query) return true;
     const haystack = [sound.title, sound.fileName, sound.category, sound.notes, ...(sound.tags || [])]
       .join(' ').toLocaleLowerCase('ko');
@@ -93,7 +114,20 @@ function setLibrary(snapshot) {
   state.sounds = snapshot.sounds || [];
   state.categories = snapshot.categories || [];
   state.watchedFolders = snapshot.watchedFolders || [];
+  state.shortcuts = { ...DEFAULT_SHORTCUTS, ...(snapshot.shortcuts || {}) };
+  if (snapshot.moved?.oldId && state.selectedId === snapshot.moved.oldId) state.selectedId = snapshot.moved.id;
   render();
+}
+
+function allTags() {
+  return [...new Set(state.sounds.flatMap((sound) => sound.tags || []).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'ko'));
+}
+
+function displayShortcut(value) {
+  return String(value || '')
+    .replace('Meta', '⌘').replace('Control', '⌃').replace('Alt', '⌥').replace('Shift', '⇧')
+    .replace('Backspace', '⌫').replace('Comma', ',').replace('Space', 'Space').replaceAll('+', '');
 }
 
 function renderSidebar() {
@@ -104,15 +138,23 @@ function renderSidebar() {
     const active = state.filter === `category:${category}` ? 'active' : '';
     return `<button class="nav-item ${active}" data-category="${escapeHtml(category)}"><span>●</span>${escapeHtml(category)}<b>${count}</b></button>`;
   }).join('');
+  $('#tagList').innerHTML = allTags().map((tag) => {
+    const count = state.sounds.filter((sound) => (sound.tags || []).includes(tag)).length;
+    const active = state.filter === `tag:${tag}` ? 'active' : '';
+    return `<button class="nav-item ${active}" data-tag="${escapeHtml(tag)}"><span>#</span>${escapeHtml(tag)}<b>${count}</b></button>`;
+  }).join('') || '<div class="dim" style="padding:6px 10px">태그 없음</div>';
   document.querySelectorAll('.nav-item[data-filter]').forEach((button) => {
     button.classList.toggle('active', button.dataset.filter === state.filter);
   });
   $('#categoryOptions').innerHTML = state.categories.map((category) => `<option value="${escapeHtml(category)}"></option>`).join('');
+  $('#searchShortcutHint').textContent = displayShortcut(state.shortcuts.search);
 }
 
 function renderList() {
   const sounds = filteredSounds();
-  const filterName = state.filter === 'all' ? '모든 사운드' : state.filter === 'favorites' ? '즐겨찾기' : state.filter.slice(9);
+  const filterName = state.filter === 'all' ? '모든 사운드'
+    : state.filter === 'favorites' ? '즐겨찾기'
+      : state.filter.startsWith('tag:') ? `#${state.filter.slice(4)}` : state.filter.slice(9);
   $('#viewTitle').textContent = filterName;
   $('#resultSummary').textContent = `${sounds.length.toLocaleString()}개의 사운드`;
   $('#emptyState').classList.toggle('hidden', state.sounds.length > 0);
@@ -188,11 +230,25 @@ function renderDetailPanel() {
   requestAnimationFrame(drawDetailWaveform);
 }
 
+function renderSettings() {
+  const open = state.view === 'settings';
+  document.querySelectorAll('.library-only').forEach((element) => element.classList.toggle('hidden', open));
+  $('#settingsPanel').classList.toggle('hidden', !open);
+  $('#settingsBtn').classList.toggle('active', open);
+  if (!open) return;
+  $('#shortcutList').innerHTML = Object.entries(SHORTCUT_LABELS).map(([action, [title, description]]) => `
+    <div class="shortcut-row">
+      <div><strong>${title}</strong><small>${description}</small></div>
+      <button class="shortcut-capture" data-shortcut-action="${action}">${displayShortcut(state.shortcuts[action])}</button>
+    </div>`).join('');
+}
+
 function render() {
   renderSidebar();
   renderList();
   renderInspector();
   renderDetailPanel();
+  renderSettings();
 }
 
 async function ensureWaveform(sound) {
@@ -452,6 +508,136 @@ async function updateSelected(changes) {
   saveDebounce = setTimeout(async () => setLibrary(await window.soundLibrary.updateSound({ id: sound.id, ...changes })), 250);
 }
 
+function openInputDialog({ title, description, value = '', placeholder = '', options = [] }) {
+  return new Promise((resolve) => {
+    const backdrop = $('#inputDialog');
+    const field = $('#inputDialogField');
+    $('#inputDialogTitle').textContent = title;
+    $('#inputDialogDescription').textContent = description;
+    field.value = value;
+    field.placeholder = placeholder;
+    $('#inputDialogOptions').innerHTML = options.map((option) => `<option value="${escapeHtml(option)}"></option>`).join('');
+    field.setAttribute('list', options.length ? 'inputDialogOptions' : '');
+    backdrop.classList.remove('hidden');
+    requestAnimationFrame(() => { field.focus(); field.select(); });
+    const finish = (result) => {
+      backdrop.classList.add('hidden');
+      $('#inputDialogForm').removeEventListener('submit', submit);
+      $('#inputDialogCancel').removeEventListener('click', cancel);
+      backdrop.removeEventListener('click', outside);
+      resolve(result);
+    };
+    const submit = (event) => { event.preventDefault(); finish(field.value.trim()); };
+    const cancel = () => finish(null);
+    const outside = (event) => { if (event.target === backdrop) finish(null); };
+    $('#inputDialogForm').addEventListener('submit', submit);
+    $('#inputDialogCancel').addEventListener('click', cancel);
+    backdrop.addEventListener('click', outside);
+  });
+}
+
+async function moveSelectedToCategory() {
+  const sound = selectedSound();
+  if (!sound) return showToast('먼저 이동할 사운드를 선택해 주세요.');
+  const category = await openInputDialog({
+    title: '카테고리 폴더로 이동',
+    description: `“${sound.title}” 파일을 이동할 카테고리를 입력하세요.`,
+    value: sound.category || '', placeholder: '예: UI 효과음', options: state.categories
+  });
+  if (!category) return;
+  showToast(`${category} 폴더로 파일 이동 중…`, 10000);
+  try {
+    const snapshot = await window.soundLibrary.moveSoundToCategory({ id: sound.id, category });
+    if (!snapshot) return;
+    setLibrary(snapshot);
+    showToast(`파일을 “${category}” 카테고리 폴더로 이동했습니다.`);
+  } catch (error) {
+    showToast(`이동 실패: ${error.message}`, 5000);
+  }
+}
+
+async function editSelectedTags() {
+  const sound = selectedSound();
+  if (!sound) return showToast('먼저 태그를 편집할 사운드를 선택해 주세요.');
+  const value = await openInputDialog({
+    title: '태그 편집', description: '쉼표로 여러 태그를 구분하세요.',
+    value: (sound.tags || []).join(', '), placeholder: '예: 알림, 트위치, 밝음', options: allTags()
+  });
+  if (value === null) return;
+  const tags = [...new Set(value.split(',').map((tag) => tag.trim()).filter(Boolean))];
+  setLibrary(await window.soundLibrary.updateSound({ id: sound.id, tags }));
+  showToast('태그를 저장했습니다.');
+}
+
+async function moveSelectedToFolder() {
+  const sound = selectedSound();
+  if (!sound) return showToast('먼저 이동할 사운드를 선택해 주세요.');
+  try {
+    const snapshot = await window.soundLibrary.moveSoundToFolder(sound.id);
+    if (!snapshot) return;
+    setLibrary(snapshot);
+    showToast('파일을 선택한 폴더로 이동했습니다.');
+  } catch (error) {
+    showToast(`이동 실패: ${error.message}`, 5000);
+  }
+}
+
+async function trashSelected() {
+  const sound = selectedSound();
+  if (!sound) return showToast('먼저 삭제할 사운드를 선택해 주세요.');
+  if (!confirm(`“${sound.title}” 원본 파일을 macOS 휴지통으로 이동할까요?\n이 항목은 라이브러리에서도 삭제됩니다.`)) return;
+  if (state.playingId === sound.id) player.pause();
+  state.selectedId = null;
+  state.inspectorOpen = false;
+  setLibrary(await window.soundLibrary.removeSound({ id: sound.id, trashFile: true }));
+  showToast('원본 파일을 휴지통으로 이동했습니다.');
+}
+
+async function toggleFavoriteSelected() {
+  const sound = selectedSound();
+  if (!sound) return showToast('먼저 사운드를 선택해 주세요.');
+  setLibrary(await window.soundLibrary.updateSound({ id: sound.id, favorite: !sound.favorite }));
+}
+
+function openSettings() {
+  state.view = 'settings';
+  state.inspectorOpen = false;
+  render();
+}
+
+async function runShortcut(action) {
+  if (action === 'search') {
+    state.view = 'library'; render(); $('#searchInput').focus(); $('#searchInput').select();
+  } else if (action === 'moveCategory') await moveSelectedToCategory();
+  else if (action === 'editTags') await editSelectedTags();
+  else if (action === 'addFiles') setLibrary(await window.soundLibrary.addFiles());
+  else if (action === 'addFolder') setLibrary(await window.soundLibrary.addFolder());
+  else if (action === 'trash') await trashSelected();
+  else if (action === 'reveal') { const sound = selectedSound(); if (sound) window.soundLibrary.reveal(sound.path); }
+  else if (action === 'favorite') await toggleFavoriteSelected();
+  else if (action === 'settings') openSettings();
+  else if (action === 'playPause') toggleSelectedPlayback();
+}
+
+function actionForShortcut(shortcut) {
+  return Object.keys(state.shortcuts).find((action) => state.shortcuts[action] === shortcut);
+}
+
+function shortcutFromKeyboardEvent(event) {
+  const parts = [];
+  if (event.metaKey) parts.push('Meta');
+  if (event.ctrlKey) parts.push('Control');
+  if (event.altKey) parts.push('Alt');
+  if (event.shiftKey) parts.push('Shift');
+  let key = event.key;
+  if (key === ',') key = 'Comma';
+  if (key === ' ') key = 'Space';
+  if (key === 'Delete') key = 'Backspace';
+  if (key.length === 1) key = key.toUpperCase();
+  if (!['Meta', 'Control', 'Alt', 'Shift'].includes(key)) parts.push(key);
+  return parts.join('+');
+}
+
 list.addEventListener('click', async (event) => {
   const row = event.target.closest('.sound-row');
   if (!row) return;
@@ -550,8 +736,10 @@ detailSelection.addEventListener('dragstart', (event) => {
 document.addEventListener('click', (event) => {
   const filterButton = event.target.closest('[data-filter]');
   const categoryButton = event.target.closest('[data-category]');
-  if (filterButton) { state.filter = filterButton.dataset.filter; render(); }
-  if (categoryButton) { state.filter = `category:${categoryButton.dataset.category}`; render(); }
+  const tagButton = event.target.closest('[data-tag]');
+  if (filterButton) { state.view = 'library'; state.filter = filterButton.dataset.filter; render(); }
+  if (categoryButton) { state.view = 'library'; state.filter = `category:${categoryButton.dataset.category}`; render(); }
+  if (tagButton) { state.view = 'library'; state.filter = `tag:${tagButton.dataset.tag}`; render(); }
 });
 
 $('#searchInput').addEventListener('input', (event) => { state.query = event.target.value; renderList(); });
@@ -559,6 +747,40 @@ $('#addFolderBtn').addEventListener('click', async () => setLibrary(await window
 $('#emptyAddBtn').addEventListener('click', async () => setLibrary(await window.soundLibrary.addFolder()));
 $('#addFilesBtn').addEventListener('click', async () => setLibrary(await window.soundLibrary.addFiles()));
 $('#rescanBtn').addEventListener('click', async () => setLibrary(await window.soundLibrary.rescan()));
+$('#settingsBtn').addEventListener('click', openSettings);
+$('#closeSettingsBtn').addEventListener('click', () => { window.soundLibrary.setShortcutCapture(false); state.view = 'library'; render(); });
+$('#resetShortcutsBtn').addEventListener('click', async () => {
+  window.soundLibrary.setShortcutCapture(false);
+  setLibrary(await window.soundLibrary.setShortcuts(DEFAULT_SHORTCUTS));
+  showToast('기본 단축키로 복원했습니다.');
+});
+$('#shortcutList').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-shortcut-action]');
+  if (!button) return;
+  button.classList.add('recording');
+  button.textContent = '새 단축키를 누르세요…';
+  button.focus();
+  window.soundLibrary.setShortcutCapture(true);
+});
+$('#shortcutList').addEventListener('keydown', async (event) => {
+  const button = event.target.closest('[data-shortcut-action].recording');
+  if (!button) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (event.key === 'Escape') { window.soundLibrary.setShortcutCapture(false); renderSettings(); return; }
+  const shortcut = shortcutFromKeyboardEvent(event);
+  if (!shortcut || ['Meta', 'Control', 'Alt', 'Shift'].includes(shortcut)) return;
+  const duplicate = Object.entries(state.shortcuts).find(([action, value]) => action !== button.dataset.shortcutAction && value === shortcut);
+  if (duplicate) {
+    window.soundLibrary.setShortcutCapture(false);
+    showToast(`이미 “${SHORTCUT_LABELS[duplicate[0]][0]}”에 사용 중인 단축키입니다.`);
+    return renderSettings();
+  }
+  state.shortcuts[button.dataset.shortcutAction] = shortcut;
+  window.soundLibrary.setShortcutCapture(false);
+  setLibrary(await window.soundLibrary.setShortcuts(state.shortcuts));
+  showToast('단축키를 저장했습니다.');
+});
 $('#closeInspector').addEventListener('click', () => { state.inspectorOpen = false; render(); });
 $('#largePlay').addEventListener('click', toggleSelectedPlayback);
 $('#detailPlayButton').addEventListener('click', toggleSelectedPlayback);
@@ -574,6 +796,8 @@ $('#editCategory').addEventListener('input', (event) => updateSelected({ categor
 $('#editTags').addEventListener('input', (event) => updateSelected({ tags: event.target.value.split(',').map((tag) => tag.trim()).filter(Boolean) }));
 $('#editNotes').addEventListener('input', (event) => updateSelected({ notes: event.target.value }));
 $('#revealBtn').addEventListener('click', () => { const sound = selectedSound(); if (sound) window.soundLibrary.reveal(sound.path); });
+$('#moveBtn').addEventListener('click', moveSelectedToFolder);
+$('#trashBtn').addEventListener('click', trashSelected);
 $('#removeBtn').addEventListener('click', async (event) => {
   const sound = selectedSound();
   if (!sound) return;
@@ -588,14 +812,38 @@ $('#removeBtn').addEventListener('click', async (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
-    event.preventDefault();
-    $('#searchInput').focus();
-  }
-  if (event.code === 'Space' && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
-    event.preventDefault();
-    toggleSelectedPlayback();
-  }
+  if (event.target.closest('.shortcut-capture.recording')) return;
+  const shortcut = shortcutFromKeyboardEvent(event);
+  const action = actionForShortcut(shortcut);
+  if (!action) return;
+  if (shortcut === 'Space' && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+  event.preventDefault();
+  runShortcut(action);
+});
+
+let dragDepth = 0;
+document.addEventListener('dragenter', (event) => {
+  if (!event.dataTransfer?.types.includes('Files')) return;
+  event.preventDefault();
+  dragDepth += 1;
+  $('#dropOverlay').classList.remove('hidden');
+});
+document.addEventListener('dragover', (event) => {
+  if (event.dataTransfer?.types.includes('Files')) event.preventDefault();
+});
+document.addEventListener('dragleave', () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) $('#dropOverlay').classList.add('hidden');
+});
+document.addEventListener('drop', async (event) => {
+  event.preventDefault();
+  dragDepth = 0;
+  $('#dropOverlay').classList.add('hidden');
+  const files = [...(event.dataTransfer?.files || [])];
+  if (!files.length) return;
+  showToast('드롭한 사운드를 추가하는 중…', 10000);
+  setLibrary(await window.soundLibrary.addDroppedFiles(files));
+  showToast('사운드를 라이브러리에 추가했습니다.');
 });
 
 player.addEventListener('play', () => {
@@ -621,6 +869,10 @@ player.addEventListener('timeupdate', () => {
 });
 window.soundLibrary.onScanProgress(({ current, total, fileName }) => showToast(`사운드 분석 중 ${current}/${total} · ${fileName}`, 1200));
 window.soundLibrary.onDragError((message) => showToast(`드래그를 시작하지 못했습니다: ${message}`, 4000));
+window.soundLibrary.onShortcut((shortcut) => {
+  const action = actionForShortcut(shortcut);
+  if (action) runShortcut(action);
+});
 new ResizeObserver(drawDetailWaveform).observe(detailWrap);
 
 window.soundLibrary.getLibrary().then(setLibrary);

@@ -10,11 +10,24 @@ const execFileAsync = promisify(execFile);
 const AUDIO_EXTENSIONS = new Set([
   '.wav', '.wave', '.aif', '.aiff', '.mp3', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.caf'
 ]);
+const DEFAULT_SHORTCUTS = {
+  search: 'Meta+S',
+  moveCategory: 'Meta+M',
+  editTags: 'Meta+T',
+  addFiles: 'Meta+O',
+  addFolder: 'Meta+Shift+O',
+  trash: 'Meta+Backspace',
+  reveal: 'Meta+Shift+R',
+  favorite: 'Meta+Shift+F',
+  settings: 'Meta+Comma',
+  playPause: 'Space'
+};
 
 let mainWindow;
 let dbPath;
 let db = { version: 1, sounds: [], categories: [], settings: { watchedFolders: [] } };
 let saveTimer;
+let shortcutCapture = false;
 const waveformCache = new Map();
 
 function findMediaTool(name) {
@@ -43,7 +56,8 @@ function cleanDb(candidate) {
     settings: {
       watchedFolders: Array.isArray(candidate?.settings?.watchedFolders)
         ? candidate.settings.watchedFolders
-        : []
+        : [],
+      shortcuts: { ...DEFAULT_SHORTCUTS, ...(candidate?.settings?.shortcuts || {}) }
     }
   };
 }
@@ -78,7 +92,8 @@ function librarySnapshot() {
   return {
     sounds: db.sounds.map(publicSound),
     categories: db.categories,
-    watchedFolders: db.settings.watchedFolders
+    watchedFolders: db.settings.watchedFolders,
+    shortcuts: db.settings.shortcuts
   };
 }
 
@@ -186,6 +201,63 @@ async function indexFiles(filePaths) {
   return { ...librarySnapshot(), scanResult: { added, updated, total } };
 }
 
+function normalizedShortcutFromInput(input) {
+  const parts = [];
+  if (input.meta) parts.push('Meta');
+  if (input.control) parts.push('Control');
+  if (input.alt) parts.push('Alt');
+  if (input.shift) parts.push('Shift');
+  let key = input.key;
+  if (key === ',') key = 'Comma';
+  if (key === ' ') key = 'Space';
+  if (key === 'Delete') key = 'Backspace';
+  if (key?.length === 1) key = key.toUpperCase();
+  if (!['Meta', 'Control', 'Alt', 'Shift'].includes(key)) parts.push(key);
+  return parts.join('+');
+}
+
+function uniqueDestination(folder, fileName) {
+  const parsed = path.parse(fileName);
+  let candidate = path.join(folder, fileName);
+  let counter = 2;
+  while (fs.existsSync(candidate)) {
+    candidate = path.join(folder, `${parsed.name} ${counter}${parsed.ext}`);
+    counter += 1;
+  }
+  return candidate;
+}
+
+async function moveFile(source, destination) {
+  try {
+    await fsp.rename(source, destination);
+  } catch (error) {
+    if (error.code !== 'EXDEV') throw error;
+    await fsp.copyFile(source, destination);
+    await fsp.unlink(source);
+  }
+}
+
+async function moveSoundToFolder(sound, folder, category) {
+  await fsp.mkdir(folder, { recursive: true });
+  const destination = path.resolve(path.dirname(sound.path)) === path.resolve(folder)
+    ? sound.path
+    : uniqueDestination(folder, sound.fileName);
+  if (path.resolve(sound.path) !== path.resolve(destination)) await moveFile(sound.path, destination);
+  const oldId = sound.id;
+  const stat = await fsp.stat(destination);
+  sound.path = destination;
+  sound.fileName = path.basename(destination);
+  sound.id = stableId(destination);
+  sound.category = category || inferCategory(destination);
+  sound.modifiedAt = stat.mtimeMs;
+  sound.size = stat.size;
+  waveformCache.clear();
+  db.categories = [...new Set([...db.categories, sound.category].filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'ko'));
+  await saveDb();
+  return { ...librarySnapshot(), moved: { oldId, id: sound.id, path: destination } };
+}
+
 async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -202,6 +274,15 @@ async function createWindow() {
     }
   });
   await mainWindow.loadFile(path.join(__dirname, 'index.html'));
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (shortcutCapture) return;
+    if (input.type !== 'keyDown' || input.isAutoRepeat) return;
+    const shortcut = normalizedShortcutFromInput(input);
+    if (shortcut === 'Space') return;
+    if (!Object.values(db.settings.shortcuts).includes(shortcut)) return;
+    event.preventDefault();
+    mainWindow.webContents.send('shortcut-triggered', shortcut);
+  });
 }
 
 app.whenReady().then(async () => {
@@ -226,6 +307,16 @@ ipcMain.handle('library:add-files', async () => {
   });
   if (result.canceled) return null;
   return indexFiles(result.filePaths);
+});
+
+ipcMain.handle('library:add-paths', async (_event, paths) => {
+  const files = [];
+  for (const itemPath of [...new Set(paths || [])]) {
+    const stat = await fsp.stat(itemPath).catch(() => null);
+    if (stat?.isDirectory()) files.push(...await walkAudioFiles(itemPath));
+    else if (stat?.isFile() && AUDIO_EXTENSIONS.has(path.extname(itemPath).toLowerCase())) files.push(itemPath);
+  }
+  return indexFiles([...new Set(files)]);
 });
 
 ipcMain.handle('library:add-folder', async () => {
@@ -257,6 +348,47 @@ ipcMain.handle('library:update', async (_event, payload) => {
   queueSave();
   return librarySnapshot();
 });
+
+ipcMain.handle('library:move-folder', async (_event, id) => {
+  const sound = db.sounds.find((item) => item.id === id);
+  if (!sound || !fs.existsSync(sound.path)) throw new Error('원본 파일을 찾을 수 없습니다.');
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: `“${sound.title}” 이동할 폴더 선택`,
+    properties: ['openDirectory', 'createDirectory']
+  });
+  if (result.canceled) return null;
+  return moveSoundToFolder(sound, result.filePaths[0]);
+});
+
+ipcMain.handle('library:move-category', async (_event, { id, category }) => {
+  const sound = db.sounds.find((item) => item.id === id);
+  const safeCategory = String(category || '').trim().replace(/[\\/:*?"<>|]/g, '-');
+  if (!sound || !fs.existsSync(sound.path)) throw new Error('원본 파일을 찾을 수 없습니다.');
+  if (!safeCategory) throw new Error('카테고리 이름을 입력해 주세요.');
+  const source = path.resolve(sound.path);
+  let root = db.settings.watchedFolders.find((folder) => {
+    const relative = path.relative(path.resolve(folder), source);
+    return relative && !relative.startsWith('..') && !path.isAbsolute(relative);
+  }) || db.settings.watchedFolders[0];
+  if (!root) {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: '카테고리 폴더를 만들 라이브러리 위치 선택',
+      properties: ['openDirectory', 'createDirectory']
+    });
+    if (result.canceled) return null;
+    root = result.filePaths[0];
+    db.settings.watchedFolders.push(root);
+  }
+  return moveSoundToFolder(sound, path.join(root, safeCategory), safeCategory);
+});
+
+ipcMain.handle('shortcuts:set', async (_event, shortcuts) => {
+  db.settings.shortcuts = { ...DEFAULT_SHORTCUTS, ...(shortcuts || {}) };
+  await saveDb();
+  return librarySnapshot();
+});
+
+ipcMain.on('shortcuts:capture', (_event, active) => { shortcutCapture = Boolean(active); });
 
 ipcMain.handle('library:remove', async (_event, { id, trashFile }) => {
   const index = db.sounds.findIndex((item) => item.id === id);
