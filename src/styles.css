@@ -83,6 +83,10 @@ h1 { margin: 4px 0 2px; font-size: 28px; letter-spacing: -.03em; }
 .audition-toolbar time { color: #c6cccc; background: #101214; border: 1px solid #272c30; border-radius: 4px; padding: 4px 7px; font-variant-numeric: tabular-nums; font-size: 11px; }
 .time-divider { color: #4f565d; }
 .clear-range { border: 1px solid #36504d; background: #1b2c2b; color: #80c7c0; border-radius: 6px; padding: 5px 8px; cursor: pointer; font-size: 10px; }
+.volume-control { display: flex; align-items: center; gap: 6px; min-width: 150px; }
+.volume-control button { width: 26px; padding: 0; border: 0; background: transparent; cursor: pointer; font-size: 14px; }
+.volume-control input { width: 82px; accent-color: #57d5ca; cursor: pointer; }
+.volume-control span { width: 34px; color: #879097; font-size: 10px; font-variant-numeric: tabular-nums; }
 .detail-waveform-wrap { height: calc(100% - 54px); position: relative; background: linear-gradient(#111415, #0d0f10); cursor: crosshair; touch-action: none; overflow: hidden; }
 #detailWaveformCanvas { display: block; width: 100%; height: 100%; pointer-events: none; }
 .detail-waveform-loading { position: absolute; inset: 0; display: grid; place-items: center; color: #4d555a; font-size: 11px; pointer-events: none; }

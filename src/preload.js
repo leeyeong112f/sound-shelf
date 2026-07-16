@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('soundLibrary', {
   moveSoundToFolder: (id) => ipcRenderer.invoke('library:move-folder', id),
   moveSoundToCategory: (payload) => ipcRenderer.invoke('library:move-category', payload),
   setShortcuts: (shortcuts) => ipcRenderer.invoke('shortcuts:set', shortcuts),
+  setPreviewVolume: (volume) => ipcRenderer.invoke('preview-volume:set', volume),
   setShortcutCapture: (active) => ipcRenderer.send('shortcuts:capture', active),
   getWaveform: (id) => ipcRenderer.invoke('library:waveform', id),
   prepareClip: (payload) => ipcRenderer.invoke('library:prepare-clip', payload),

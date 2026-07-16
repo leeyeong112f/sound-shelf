@@ -57,7 +57,10 @@ function cleanDb(candidate) {
       watchedFolders: Array.isArray(candidate?.settings?.watchedFolders)
         ? candidate.settings.watchedFolders
         : [],
-      shortcuts: { ...DEFAULT_SHORTCUTS, ...(candidate?.settings?.shortcuts || {}) }
+      shortcuts: { ...DEFAULT_SHORTCUTS, ...(candidate?.settings?.shortcuts || {}) },
+      previewVolume: Number.isFinite(Number(candidate?.settings?.previewVolume))
+        ? Math.max(0, Math.min(1, Number(candidate.settings.previewVolume)))
+        : 0.8
     }
   };
 }
@@ -93,7 +96,8 @@ function librarySnapshot() {
     sounds: db.sounds.map(publicSound),
     categories: db.categories,
     watchedFolders: db.settings.watchedFolders,
-    shortcuts: db.settings.shortcuts
+    shortcuts: db.settings.shortcuts,
+    previewVolume: db.settings.previewVolume
   };
 }
 
@@ -386,6 +390,12 @@ ipcMain.handle('shortcuts:set', async (_event, shortcuts) => {
   db.settings.shortcuts = { ...DEFAULT_SHORTCUTS, ...(shortcuts || {}) };
   await saveDb();
   return librarySnapshot();
+});
+
+ipcMain.handle('preview-volume:set', async (_event, volume) => {
+  db.settings.previewVolume = Math.max(0, Math.min(1, Number(volume) || 0));
+  queueSave();
+  return db.settings.previewVolume;
 });
 
 ipcMain.on('shortcuts:capture', (_event, active) => { shortcutCapture = Boolean(active); });

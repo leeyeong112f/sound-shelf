@@ -30,7 +30,8 @@ const state = {
   waveformLoading: new Set(),
   selections: new Map(),
   shortcuts: { ...DEFAULT_SHORTCUTS },
-  view: 'library'
+  view: 'library',
+  previewVolume: 0.8
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -42,6 +43,8 @@ const detailSelection = $('#detailSelection');
 let saveDebounce;
 let selectionGesture = null;
 let transportAnimationFrame = null;
+let volumeSaveDebounce;
+let lastAudibleVolume = 0.8;
 const miniWaveObserver = new IntersectionObserver((entries) => {
   entries.forEach((entry) => {
     if (!entry.isIntersecting) return;
@@ -115,8 +118,19 @@ function setLibrary(snapshot) {
   state.categories = snapshot.categories || [];
   state.watchedFolders = snapshot.watchedFolders || [];
   state.shortcuts = { ...DEFAULT_SHORTCUTS, ...(snapshot.shortcuts || {}) };
+  state.previewVolume = Number.isFinite(Number(snapshot.previewVolume)) ? Number(snapshot.previewVolume) : 0.8;
+  player.volume = state.previewVolume;
+  if (state.previewVolume > 0) lastAudibleVolume = state.previewVolume;
   if (snapshot.moved?.oldId && state.selectedId === snapshot.moved.oldId) state.selectedId = snapshot.moved.id;
   render();
+}
+
+function updateVolumeControl() {
+  const percent = Math.round(state.previewVolume * 100);
+  $('#volumeSlider').value = String(percent);
+  $('#volumeValue').textContent = `${percent}%`;
+  $('#muteButton').textContent = percent === 0 ? '🔇' : percent < 50 ? '🔉' : '🔊';
+  $('#muteButton').setAttribute('aria-label', percent === 0 ? '음소거 해제' : '음소거');
 }
 
 function allTags() {
@@ -209,6 +223,7 @@ function renderInspector() {
 function renderDetailPanel() {
   const sound = selectedSound();
   $('#auditionPanel').classList.remove('hidden');
+  updateVolumeControl();
   if (!sound) {
     $('#detailSoundName').textContent = '목록에서 사운드 이름을 선택하세요';
     $('#detailCurrentTime').textContent = '0:00.00';
@@ -369,14 +384,9 @@ function drawDetailWaveform() {
   if (!hasWaveform) return;
   const normalized = normalizeWaveform(waveform);
   const targetCount = Math.max(80, Math.floor(rect.width / 2));
-  const left = resamplePeaks(normalized.left, targetCount);
-  const right = resamplePeaks(normalized.right, targetCount);
-  if (sound.channels > 1) {
-    drawChannel(context, left, rect.width, rect.height * 0.26, rect.height * 0.235);
-    drawChannel(context, right, rect.width, rect.height * 0.74, rect.height * 0.235);
-  } else {
-    drawChannel(context, left, rect.width, rect.height * 0.5, rect.height * 0.47);
-  }
+  const combined = normalized.left.map((left, index) => Math.max(left, normalized.right?.[index] || 0));
+  const mono = resamplePeaks(combined, targetCount);
+  drawChannel(context, mono, rect.width, rect.height * 0.5, rect.height * 0.47);
 }
 
 function updateDetailSelection() {
@@ -784,6 +794,20 @@ $('#shortcutList').addEventListener('keydown', async (event) => {
 $('#closeInspector').addEventListener('click', () => { state.inspectorOpen = false; render(); });
 $('#largePlay').addEventListener('click', toggleSelectedPlayback);
 $('#detailPlayButton').addEventListener('click', toggleSelectedPlayback);
+$('#volumeSlider').addEventListener('input', (event) => {
+  state.previewVolume = Math.max(0, Math.min(1, Number(event.target.value) / 100));
+  player.volume = state.previewVolume;
+  if (state.previewVolume > 0) lastAudibleVolume = state.previewVolume;
+  updateVolumeControl();
+  clearTimeout(volumeSaveDebounce);
+  volumeSaveDebounce = setTimeout(() => window.soundLibrary.setPreviewVolume(state.previewVolume), 180);
+});
+$('#muteButton').addEventListener('click', () => {
+  state.previewVolume = state.previewVolume > 0 ? 0 : Math.max(0.05, lastAudibleVolume || 0.8);
+  player.volume = state.previewVolume;
+  updateVolumeControl();
+  window.soundLibrary.setPreviewVolume(state.previewVolume);
+});
 $('#clearRangeButton').addEventListener('click', () => {
   const sound = selectedSound();
   if (!sound) return;
