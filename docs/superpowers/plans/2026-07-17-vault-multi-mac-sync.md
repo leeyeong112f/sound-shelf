@@ -202,7 +202,7 @@ test('updatedAt이 없는 편집 레코드는 베이스를 이기지 못한다',
 `package.json`의 `scripts`에 추가 (기존 `check` 줄 다음):
 
 ```json
-    "test": "node --test test/",
+    "test": "node --test test/*.js",
 ```
 
 - [ ] **Step 2: 테스트가 실패하는지 확인**
