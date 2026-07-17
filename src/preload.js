@@ -20,5 +20,6 @@ contextBridge.exposeInMainWorld('soundLibrary', {
   startDrag: (filePath) => ipcRenderer.send('library:start-drag', filePath),
   onDragError: (callback) => ipcRenderer.on('drag-error', (_event, message) => callback(message)),
   onScanProgress: (callback) => ipcRenderer.on('scan-progress', (_event, payload) => callback(payload)),
+  onLibraryUpdated: (callback) => ipcRenderer.on('library-updated', (_event, snapshot) => callback(snapshot)),
   onShortcut: (callback) => ipcRenderer.on('shortcut-triggered', (_event, shortcut) => callback(shortcut))
 });

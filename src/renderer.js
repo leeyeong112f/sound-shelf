@@ -939,6 +939,10 @@ player.addEventListener('timeupdate', () => {
   }
 });
 window.soundLibrary.onScanProgress(({ current, total, fileName }) => showToast(`사운드 분석 중 ${current}/${total} · ${fileName}`, 1200));
+window.soundLibrary.onLibraryUpdated((snapshot) => {
+  setLibrary(snapshot);
+  if (snapshot.updateReason === 'folder-change') showToast('폴더 변경 사항을 자동으로 반영했습니다.', 1800);
+});
 window.soundLibrary.onDragError((message) => showToast(`드래그를 시작하지 못했습니다: ${message}`, 4000));
 window.soundLibrary.onShortcut((shortcut) => {
   const action = actionForShortcut(shortcut);

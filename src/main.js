@@ -29,6 +29,10 @@ let db = { version: 1, sounds: [], categories: [], settings: { watchedFolders: [
 let saveTimer;
 let shortcutCapture = false;
 const waveformCache = new Map();
+const folderWatchers = new Map();
+let watcherTimer;
+let autoScanRunning = false;
+let autoScanPending = false;
 
 function findMediaTool(name) {
   const candidates = [
@@ -174,7 +178,7 @@ async function walkAudioFiles(rootPath) {
   return results;
 }
 
-async function indexFiles(filePaths) {
+async function indexFiles(filePaths, { reportProgress = true } = {}) {
   const existingById = new Map(db.sounds.map((sound) => [sound.id, sound]));
   let added = 0;
   let updated = 0;
@@ -220,7 +224,7 @@ async function indexFiles(filePaths) {
       added += 1;
     }
 
-    if (index % 5 === 0 || index === total - 1) {
+    if (reportProgress && (index % 5 === 0 || index === total - 1)) {
       mainWindow?.webContents.send('scan-progress', { current: index + 1, total, fileName: path.basename(filePath) });
     }
   }
@@ -229,6 +233,56 @@ async function indexFiles(filePaths) {
     .sort((a, b) => a.localeCompare(b, 'ko'));
   await saveDb();
   return { ...librarySnapshot(), scanResult: { added, updated, total } };
+}
+
+async function rescanWatchedFolders({ reportProgress = true } = {}) {
+  const groups = await Promise.all(db.settings.watchedFolders.map(walkAudioFiles));
+  return indexFiles([...new Set(groups.flat())], { reportProgress });
+}
+
+async function runAutoRescan(reason = 'folder-change') {
+  if (autoScanRunning) {
+    autoScanPending = true;
+    return;
+  }
+  autoScanRunning = true;
+  try {
+    const snapshot = await rescanWatchedFolders({ reportProgress: false });
+    mainWindow?.webContents.send('library-updated', { ...snapshot, updateReason: reason });
+  } catch (error) {
+    console.error('Automatic library refresh failed:', error);
+  } finally {
+    autoScanRunning = false;
+    if (autoScanPending) {
+      autoScanPending = false;
+      scheduleAutoRescan('pending-change');
+    }
+  }
+}
+
+function scheduleAutoRescan(reason = 'folder-change') {
+  clearTimeout(watcherTimer);
+  watcherTimer = setTimeout(() => runAutoRescan(reason), 700);
+}
+
+function refreshFolderWatchers() {
+  const watched = new Set(db.settings.watchedFolders.map((folder) => path.resolve(folder)));
+  for (const [folder, watcher] of folderWatchers) {
+    if (!watched.has(folder)) {
+      watcher.close();
+      folderWatchers.delete(folder);
+    }
+  }
+  for (const folder of watched) {
+    if (folderWatchers.has(folder) || !fs.existsSync(folder)) continue;
+    try {
+      const watcher = fs.watch(folder, { recursive: process.platform === 'darwin' }, () => scheduleAutoRescan('folder-change'));
+      watcher.on('error', (error) => console.error(`Folder watcher failed (${folder}):`, error.message));
+      folderWatchers.set(folder, watcher);
+    } catch (error) {
+      console.error(`Could not watch folder (${folder}):`, error.message);
+    }
+  }
 }
 
 function normalizedShortcutFromInput(input) {
@@ -305,6 +359,7 @@ async function createWindow() {
     }
   });
   await mainWindow.loadFile(path.join(__dirname, 'index.html'));
+  mainWindow.on('focus', () => scheduleAutoRescan('window-focus'));
   mainWindow.webContents.on('before-input-event', (event, input) => {
     if (shortcutCapture) return;
     if (input.type !== 'keyDown' || input.isAutoRepeat) return;
@@ -319,6 +374,7 @@ async function createWindow() {
 app.whenReady().then(async () => {
   await loadDb();
   await createWindow();
+  refreshFolderWatchers();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -326,6 +382,12 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  clearTimeout(watcherTimer);
+  for (const watcher of folderWatchers.values()) watcher.close();
+  folderWatchers.clear();
 });
 
 ipcMain.handle('library:get', () => librarySnapshot());
@@ -350,6 +412,7 @@ ipcMain.handle('library:add-paths', async (_event, paths) => {
     }
     else if (stat?.isFile() && AUDIO_EXTENSIONS.has(path.extname(itemPath).toLowerCase())) files.push(itemPath);
   }
+  refreshFolderWatchers();
   return indexFiles([...new Set(files)]);
 });
 
@@ -361,13 +424,13 @@ ipcMain.handle('library:add-folder', async () => {
   if (result.canceled) return null;
   const folder = result.filePaths[0];
   if (!db.settings.watchedFolders.includes(folder)) db.settings.watchedFolders.push(folder);
+  refreshFolderWatchers();
   const files = await walkAudioFiles(folder);
   return indexFiles(files);
 });
 
 ipcMain.handle('library:rescan', async () => {
-  const groups = await Promise.all(db.settings.watchedFolders.map(walkAudioFiles));
-  return indexFiles([...new Set(groups.flat())]);
+  return rescanWatchedFolders();
 });
 
 ipcMain.handle('library:update', async (_event, payload) => {
@@ -418,6 +481,7 @@ ipcMain.handle('library:move-category', async (_event, { id, category }) => {
     if (result.canceled) return null;
     root = result.filePaths[0];
     db.settings.watchedFolders.push(root);
+    refreshFolderWatchers();
   }
   return moveSoundToFolder(sound, path.join(root, ...categoryParts), safeCategory);
 });
