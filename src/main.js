@@ -1,4 +1,5 @@
 const { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
@@ -35,6 +36,9 @@ let vaultStorage = null;
 let activeVault = null;
 let saveTimer;
 let shortcutCapture = false;
+let updateStartupTimer;
+let updateCheckTimer;
+let updateDialogShown = false;
 const waveformCache = new Map();
 const waveformJobs = new Map();
 const waveformQueue = [];
@@ -122,6 +126,17 @@ async function createAutomaticBackup(reason = 'automatic') {
     .sort((a, b) => b.time - a.time);
   await Promise.all(backups.slice(15).map((item) => fsp.unlink(item.path).catch(() => {})));
   return destination;
+}
+
+async function pruneTemporaryClips(maxAgeMs = 24 * 60 * 60 * 1000) {
+  const clipDirectory = path.join(app.getPath('temp'), 'sound-shelf-clips');
+  const entries = await fsp.readdir(clipDirectory, { withFileTypes: true }).catch(() => []);
+  const cutoff = Date.now() - maxAgeMs;
+  await Promise.all(entries.filter((entry) => entry.isFile()).map(async (entry) => {
+    const filePath = path.join(clipDirectory, entry.name);
+    const stat = await fsp.stat(filePath).catch(() => null);
+    if (stat && stat.mtimeMs < cutoff) await fsp.unlink(filePath).catch(() => {});
+  }));
 }
 
 function validateImportedDb(candidate) {
@@ -1032,10 +1047,43 @@ async function createWindow() {
   });
 }
 
+function configureAutoUpdates() {
+  const updateConfiguration = path.join(process.resourcesPath, 'app-update.yml');
+  if (!app.isPackaged || !fs.existsSync(updateConfiguration)) return;
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.on('error', (error) => console.error('Automatic update failed:', error.message));
+  autoUpdater.on('update-downloaded', async (info) => {
+    if (updateDialogShown) return;
+    updateDialogShown = true;
+    const options = {
+      type: 'info',
+      buttons: ['재시작하고 업데이트', '나중에'],
+      defaultId: 0,
+      cancelId: 1,
+      title: 'Sound Shelf 업데이트 준비 완료',
+      message: `새 버전 ${info.version}을 다운로드했습니다.`,
+      detail: '지금 재시작하면 업데이트가 적용됩니다. 나중에 선택하면 앱을 종료할 때 자동으로 적용됩니다.'
+    };
+    const result = mainWindow && !mainWindow.isDestroyed()
+      ? await dialog.showMessageBox(mainWindow, options)
+      : await dialog.showMessageBox(options);
+    if (result.response === 0) autoUpdater.quitAndInstall(false, true);
+    else updateDialogShown = false;
+  });
+  const checkForUpdates = () => autoUpdater.checkForUpdates().catch((error) => {
+    console.error('Could not check for updates:', error.message);
+  });
+  updateStartupTimer = setTimeout(checkForUpdates, 12000);
+  updateCheckTimer = setInterval(checkForUpdates, 4 * 60 * 60 * 1000);
+}
+
 if (singleInstanceLock) app.whenReady().then(async () => {
   await loadDb();
   await pruneWaveformDiskCache();
+  await pruneTemporaryClips();
   await createWindow();
+  configureAutoUpdates();
   refreshFolderWatchers();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -1047,6 +1095,8 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  clearTimeout(updateStartupTimer);
+  clearInterval(updateCheckTimer);
   clearTimeout(watcherTimer);
   for (const watcher of folderWatchers.values()) watcher.close();
   folderWatchers.clear();
@@ -1790,6 +1840,46 @@ ipcMain.handle('library:prepare-clip', async (_event, payload) => {
   } catch (error) {
     console.error('Clip preparation failed:', error);
     return { ok: false, message: `선택 구간을 만들지 못했습니다: ${error.message}` };
+  }
+});
+
+ipcMain.handle('library:create-clip', async (_event, payload) => {
+  const sound = db.sounds.find((item) => item.id === payload?.id);
+  if (!sound || !fs.existsSync(sound.path)) throw new Error('원본 사운드 파일을 찾을 수 없습니다.');
+  const start = Math.max(0, Number(payload.start || 0));
+  const end = Math.min(Number(sound.duration || 0), Number(payload.end || 0));
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end - start < 0.05) {
+    throw new Error('0.05초 이상의 구간을 선택해 주세요.');
+  }
+  const safeTitle = (sound.title || 'sound')
+    .normalize('NFC')
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .slice(0, 80);
+  const outputPath = uniqueDestination(
+    path.dirname(sound.path),
+    `${safeTitle} - 구간 ${start.toFixed(3)}-${end.toFixed(3)}.wav`
+  );
+  try {
+    await execFileAsync(findMediaTool('ffmpeg'), [
+      '-v', 'error', '-y', '-i', sound.path,
+      '-ss', start.toFixed(6), '-t', (end - start).toFixed(6),
+      '-map', '0:a:0', '-vn', '-c:a', 'pcm_s24le', outputPath
+    ], { maxBuffer: 1024 * 1024 * 4, timeout: 60000 });
+    await indexFiles([outputPath], { reportProgress: false });
+    const created = db.sounds.find((item) => normalizedFsPath(item.path) === normalizedFsPath(outputPath));
+    if (!created) throw new Error('생성된 파일을 라이브러리에 추가하지 못했습니다.');
+    created.tags = [...new Set(sound.tags || [])];
+    created.rating = Number(sound.rating || 0);
+    created.categoryPath = sound.categoryPath || inferCategoryPath(outputPath);
+    created.category = created.categoryPath.split('/').filter(Boolean).pop() || inferCategory(outputPath);
+    await saveDb();
+    return {
+      ...librarySnapshot(),
+      createdClip: { ...publicSound(created), start, end, sourceId: sound.id }
+    };
+  } catch (error) {
+    await fsp.unlink(outputPath).catch(() => {});
+    throw new Error(`선택 구간 파일을 만들지 못했습니다: ${error.message}`);
   }
 });
 

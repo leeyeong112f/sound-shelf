@@ -43,6 +43,7 @@ contextBridge.exposeInMainWorld('soundLibrary', {
   getWaveform: (id) => ipcRenderer.invoke('library:waveform', id),
   analyzeKey: (payload) => ipcRenderer.invoke('library:analyze-key', payload),
   prepareClip: (payload) => ipcRenderer.invoke('library:prepare-clip', payload),
+  createClip: (payload) => ipcRenderer.invoke('library:create-clip', payload),
   reveal: (filePath) => ipcRenderer.invoke('library:reveal', filePath),
   insertIntoResolve: (sound) => ipcRenderer.invoke('resolve:insert', sound),
   startDrag: (filePath) => ipcRenderer.send('library:start-drag', filePath),

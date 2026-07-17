@@ -73,6 +73,7 @@
               <strong id="detailSoundName">목록에서 사운드 이름을 선택하세요</strong>
               <small>파형 클릭: 해당 위치 재생 · 플레이헤드 드래그: 위치 조절 · 구간 드래그: 시작점부터 재생</small>
             </div>
+            <button id="createRangeFileButton" class="create-range-file hidden">선택 구간 파일 만들기</button>
             <button id="clearRangeButton" class="clear-range hidden">선택 해제</button>
             <div class="volume-control" title="미리듣기 음량">
               <button id="muteButton" type="button" aria-label="음소거">🔊</button>
@@ -86,7 +87,7 @@
           <div id="detailWaveformWrap" class="detail-waveform-wrap">
             <canvas id="detailWaveformCanvas"></canvas>
             <div id="detailWaveformLoading" class="detail-waveform-loading">파형 생성 중…</div>
-            <div id="detailSelection" class="detail-selection hidden" draggable="false" title="클릭: 구간 재생 · 드래그: 선택 구간 전달"><span></span></div>
+            <div id="detailSelection" class="detail-selection hidden" draggable="false" title="클릭: 구간 재생 · 파일 만들기 후 Resolve로 드래그"><span></span></div>
             <div id="detailPlayhead" class="detail-playhead" title="드래그하여 재생 위치 조절"></div>
           </div>
         </section>

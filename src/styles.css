@@ -83,6 +83,8 @@ h1 { margin: 4px 0 2px; font-size: 28px; letter-spacing: -.03em; }
 .sound-row:active { cursor: grabbing; }
 .sound-row:hover { background: #1c1f25; }
 .sound-row.selected { background: #2f6464; box-shadow: inset 2px 0 #64ddd2; }
+.sound-row.selection-revealed { animation: selection-reveal .9s ease-out; }
+@keyframes selection-reveal { 0%, 35% { box-shadow: inset 4px 0 #9aff2e, inset 0 0 0 1px rgba(154, 255, 46, .55); } 100% { box-shadow: inset 4px 0 transparent, inset 0 0 0 1px transparent; } }
 .sound-row.selected .dim, .sound-row.selected .sound-name small { color: #c3dddd; }
 .play-button { width: 30px; height: 30px; border: 0; border-radius: 50%; background: #282c34; cursor: pointer; color: var(--accent); }
 .sound-name { min-width: 0; }
@@ -118,6 +120,8 @@ h1 { margin: 4px 0 2px; font-size: 28px; letter-spacing: -.03em; }
 .audition-toolbar time { color: #c6cccc; background: #101214; border: 1px solid #272c30; border-radius: 4px; padding: 4px 7px; font-variant-numeric: tabular-nums; font-size: 11px; }
 .time-divider { color: #4f565d; }
 .clear-range { border: 1px solid #36504d; background: #1b2c2b; color: #80c7c0; border-radius: 6px; padding: 5px 8px; cursor: pointer; font-size: 10px; }
+.create-range-file { border: 1px solid #4d7144; background: #263923; color: #b8f99d; border-radius: 6px; padding: 5px 9px; cursor: pointer; font-size: 10px; font-weight: 700; }
+.create-range-file:disabled { border-color: #36504d; background: #1b2c2b; color: #80c7c0; cursor: default; }
 .volume-control { display: flex; align-items: center; gap: 6px; min-width: 150px; }
 .volume-control button { width: 26px; padding: 0; border: 0; background: transparent; cursor: pointer; font-size: 14px; }
 .volume-control input { width: 82px; accent-color: #57d5ca; cursor: pointer; }

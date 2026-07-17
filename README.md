@@ -1,5 +1,9 @@
 # Sound Shelf
 
+## 설치
+
+배포가 활성화되면 [GitHub Releases 최신 버전](https://github.com/leeyeong112f/sound-shelf/releases/latest)에서 Universal DMG를 내려받아 설치할 수 있습니다. 최초 설치, Apple 서명 설정과 바이브코딩 자동 배포 방법은 [설치 및 자동 업데이트 안내](docs/INSTALL_AND_UPDATES.md)를 참고하세요.
+
 로컬 사운드 파일을 검색·분류·미리 듣고 DaVinci Resolve 타임라인으로 드래그하는 macOS 데스크톱 앱입니다.
 
 ## 실행
@@ -61,7 +65,8 @@ npm run build:mac
 - 미리듣기 음량 조절과 음소거 (설정값 자동 저장)
 - 사운드 이름 오른쪽에 실제 오디오 파형 표시
 - 파형 드래그로 구간 선택 및 선택 구간 미리 듣기
-- 선택 구간만 임시 WAV로 만들어 Resolve에 드래그
+- 구간 선택은 파일을 만들지 않으며, `선택 구간 파일 만들기` 버튼을 누른 경우에만 같은 카테고리에 새 WAV 생성
+- 명시적으로 만든 선택 구간 파일을 Resolve에 드래그
 - Finder에서 원본 위치 열기
 - 기본 단축키: `⌘S` 검색, `⌘M` 카테고리 이동, `⌘T` 태그 편집, `⌘⌫` 원본 삭제, `⌘F` Fairlight로 보내기
 - `⌘F`로 선택 사운드를 Resolve 타임헤드에 삽입 (파형 구간 선택 시 그 구간만 삽입)

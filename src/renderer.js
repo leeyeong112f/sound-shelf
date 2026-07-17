@@ -178,7 +178,7 @@ function filteredSounds() {
   });
 }
 
-function setLibrary(snapshot) {
+function setLibrary(snapshot, { revealSelected = false } = {}) {
   if (!snapshot) return;
   state.sounds = snapshot.sounds || [];
   state.categories = snapshot.categories || [];
@@ -194,6 +194,7 @@ function setLibrary(snapshot) {
   if (snapshot.moved?.oldId && state.selectedId === snapshot.moved.oldId) state.selectedId = snapshot.moved.id;
   if (snapshot.idChanges?.[state.selectedId]) state.selectedId = snapshot.idChanges[state.selectedId];
   if (snapshot.idChanges) state.selectedIds = new Set([...state.selectedIds].map((id) => snapshot.idChanges[id] || id));
+  if (snapshot.idChanges?.[state.selectionAnchorId]) state.selectionAnchorId = snapshot.idChanges[state.selectionAnchorId];
   const validIds = new Set(state.sounds.map((sound) => sound.id));
   state.selectedIds = new Set([...state.selectedIds].filter((id) => validIds.has(id)));
   if (snapshot.categoryMove && state.filter.startsWith('category:')) {
@@ -213,6 +214,24 @@ function setLibrary(snapshot) {
   state.selectedCategories = new Set([...state.selectedCategories].filter((category) => validCategories.has(category)));
   if (state.categoryAnchor && !validCategories.has(state.categoryAnchor)) state.categoryAnchor = null;
   render();
+  if (revealSelected) requestAnimationFrame(revealSelectedSoundInList);
+}
+
+function revealSelectedSoundInList() {
+  if (!state.selectedId || !state.visibleSounds.length) return;
+  const index = state.visibleSounds.findIndex((sound) => sound.id === state.selectedId);
+  if (index < 0) return;
+  const rowTop = index * VIRTUAL_ROW_HEIGHT;
+  const centered = rowTop - Math.max(0, (list.clientHeight - VIRTUAL_ROW_HEIGHT) / 2);
+  const maximum = Math.max(0, state.visibleSounds.length * VIRTUAL_ROW_HEIGHT - list.clientHeight);
+  list.scrollTop = Math.max(0, Math.min(maximum, centered));
+  renderVirtualRows();
+  requestAnimationFrame(() => {
+    const row = list.querySelector(`.sound-row[data-id="${state.selectedId}"]`);
+    if (!row) return;
+    row.classList.add('selection-revealed');
+    setTimeout(() => row.classList.remove('selection-revealed'), 900);
+  });
 }
 
 function updateVolumeControl() {
@@ -395,6 +414,7 @@ function renderDetailPanel() {
     $('#detailPlayButton').textContent = '▶';
     $('#detailWaveformLoading').classList.add('hidden');
     $('#detailSelection').classList.add('hidden');
+    $('#createRangeFileButton').classList.add('hidden');
     $('#clearRangeButton').classList.add('hidden');
     $('#detailPlayhead').style.left = '0%';
     const context = detailCanvas.getContext('2d');
@@ -568,6 +588,9 @@ function updateDetailSelection() {
   const selection = sound ? state.selections.get(sound.id) : null;
   detailSelection.classList.toggle('hidden', !selection);
   $('#clearRangeButton').classList.toggle('hidden', !selection);
+  $('#createRangeFileButton').classList.toggle('hidden', !selection);
+  $('#createRangeFileButton').disabled = Boolean(selection?.path);
+  $('#createRangeFileButton').textContent = selection?.path ? '구간 파일 생성 완료' : '선택 구간 파일 만들기';
   if (!sound || !selection) return;
   detailSelection.style.left = `${(selection.start / sound.duration) * 100}%`;
   detailSelection.style.width = `${((selection.end - selection.start) / sound.duration) * 100}%`;
@@ -581,21 +604,6 @@ function updateDetailSelection() {
 function waveformRatio(event) {
   const rect = detailWrap.getBoundingClientRect();
   return Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-}
-
-async function prepareSelection(sound, selection) {
-  const token = `${selection.start.toFixed(6)}:${selection.end.toFixed(6)}`;
-  selection.token = token;
-  selection.preparing = true;
-  selection.path = '';
-  updateDetailSelection();
-  const result = await window.soundLibrary.prepareClip({ id: sound.id, start: selection.start, end: selection.end });
-  const current = state.selections.get(sound.id);
-  if (!current || current.token !== token) return;
-  current.preparing = false;
-  if (result.ok) current.path = result.path;
-  updateDetailSelection();
-  showToast(result.ok ? `${result.duration.toFixed(2)}초 구간 준비 완료 · 선택 영역을 드래그하세요` : result.message, result.ok ? 2600 : 5000);
 }
 
 async function toggleFullPlayback(sound) {
@@ -1072,8 +1080,9 @@ async function renameSelectedSound() {
   });
   if (!name || name === currentName) return;
   try {
-    setLibrary(await window.soundLibrary.renameSound({ id: sound.id, name }));
-    showToast('사운드 이름과 실제 파일명을 변경했습니다.');
+    const snapshot = await window.soundLibrary.renameSound({ id: sound.id, name });
+    setLibrary(snapshot, { revealSelected: true });
+    showToast('이름을 변경하고 새 정렬 위치에서 선택 상태를 유지했습니다.');
   } catch (error) {
     showToast(`이름 변경 실패: ${error.message}`, 5000);
   }
@@ -1323,7 +1332,6 @@ detailWrap.addEventListener('pointerup', async (event) => {
     updateDetailSelection();
     return;
   }
-  prepareSelection(sound, selection);
   await playSelection(sound, selection);
 });
 
@@ -1644,6 +1652,30 @@ $('#clearRangeButton').addEventListener('click', () => {
   state.selections.delete(sound.id);
   state.playRangeEnd = null;
   updateDetailSelection();
+});
+$('#createRangeFileButton').addEventListener('click', async () => {
+  const sound = selectedSound();
+  const selection = sound ? state.selections.get(sound.id) : null;
+  if (!sound || !selection || selection.end - selection.start < 0.05 || selection.path) return;
+  const button = $('#createRangeFileButton');
+  button.disabled = true;
+  button.textContent = '파일 만드는 중…';
+  showToast('선택 구간을 같은 카테고리에 새 사운드 파일로 만드는 중…', 15000);
+  try {
+    const snapshot = await window.soundLibrary.createClip({ id: sound.id, start: selection.start, end: selection.end });
+    const current = state.selections.get(sound.id);
+    if (current && snapshot.createdClip) {
+      current.path = snapshot.createdClip.path;
+      current.createdId = snapshot.createdClip.id;
+    }
+    setLibrary(snapshot);
+    updateDetailSelection();
+    showToast(`“${snapshot.createdClip.title}” 파일을 만들었습니다.`);
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = '선택 구간 파일 만들기';
+    showToast(`구간 파일 생성 실패: ${error.message}`, 5000);
+  }
 });
 $('#editTitle').addEventListener('input', (event) => updateSelected({ title: event.target.value }));
 $('#editCategory').addEventListener('input', (event) => updateSelected({ category: event.target.value }));

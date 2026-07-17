@@ -3,15 +3,59 @@
   "version": "0.1.0",
   "private": true,
   "productName": "Sound Shelf",
+  "author": "leeyeong112f",
   "description": "Local sound library manager with drag-and-drop support for DaVinci Resolve",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/leeyeong112f/sound-shelf.git"
+  },
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
     "check": "node --check src/main.js && node --check src/preload.js && node --check src/renderer.js",
-    "build:mac": "electron-packager . 'Sound Shelf' --platform=darwin --arch=arm64 --out=outputs --overwrite --asar --download.cacheRoot=/private/tmp/soundly-electron-cache --ignore='^/(outputs|work)($|/)'"
+    "build:mac": "electron-packager . 'Sound Shelf' --platform=darwin --arch=arm64 --out=outputs --overwrite --asar --download.cacheRoot=/private/tmp/soundly-electron-cache --ignore='^/(outputs|work)($|/)'",
+    "dist:mac": "electron-builder --mac --universal",
+    "release:mac": "electron-builder --mac --universal --publish always"
   },
   "devDependencies": {
     "@electron/packager": "^20.0.3",
-    "electron": "^43.1.1"
+    "electron": "^43.1.1",
+    "electron-builder": "^26.15.3"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  },
+  "build": {
+    "appId": "com.leeyeong112f.sound-shelf",
+    "productName": "Sound Shelf",
+    "asar": true,
+    "directories": {
+      "output": "outputs/release"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.music",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false
+    },
+    "dmg": {
+      "title": "Sound Shelf ${version}"
+    },
+    "artifactName": "Sound-Shelf-${version}-${arch}.${ext}",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "leeyeong112f",
+        "repo": "sound-shelf",
+        "releaseType": "release"
+      }
+    ]
   }
 }
