@@ -87,6 +87,29 @@ function canonicalizeWatchedFolders(folders) {
   });
 }
 
+function deduplicateSoundsByPath(sounds) {
+  const unique = new Map();
+  for (const sound of sounds || []) {
+    if (!sound?.path) continue;
+    const key = normalizedFsPath(sound.path);
+    const existing = unique.get(key);
+    sound.id = stableId(sound.path);
+    if (!existing) {
+      unique.set(key, sound);
+      continue;
+    }
+    existing.tags = [...new Set([...(existing.tags || []), ...(sound.tags || [])])];
+    existing.favorite = Boolean(existing.favorite || sound.favorite);
+    existing.rating = Math.max(Number(existing.rating || 0), Number(sound.rating || 0));
+    existing.notes = existing.notes || sound.notes || '';
+    existing.title = existing.title || sound.title || path.basename(existing.path, path.extname(existing.path));
+    existing.createdAt = Math.min(Number(existing.createdAt || Date.now()), Number(sound.createdAt || Date.now()));
+    existing.modifiedAt = Math.max(Number(existing.modifiedAt || 0), Number(sound.modifiedAt || 0));
+    existing.size = Math.max(Number(existing.size || 0), Number(sound.size || 0));
+  }
+  return [...unique.values()];
+}
+
 async function repairDuplicateCategoryFolders() {
   for (const root of db.settings.watchedFolders) {
     const stack = [root];
@@ -120,6 +143,7 @@ async function loadDb() {
     db = cleanDb(JSON.parse(await fsp.readFile(dbPath, 'utf8')));
     db.settings.watchedFolders = canonicalizeWatchedFolders(db.settings.watchedFolders);
     await repairDuplicateCategoryFolders();
+    db.sounds = deduplicateSoundsByPath(db.sounds);
     for (const sound of db.sounds) {
       const inferred = inferCategoryPath(sound.path);
       sound.categoryPath = inferred || sound.categoryPath || sound.category || '미분류';
@@ -164,7 +188,7 @@ function librarySnapshot() {
 }
 
 function stableId(filePath) {
-  return crypto.createHash('sha1').update(path.resolve(filePath)).digest('hex');
+  return crypto.createHash('sha1').update(normalizedFsPath(filePath)).digest('hex');
 }
 
 function waveformCacheKey(sound) {
@@ -355,6 +379,7 @@ async function indexFiles(filePaths, { reportProgress = true, categoryFolders = 
 
   db.categories = [...new Set([...(categoryFolders || db.categories), ...db.sounds.map((sound) => sound.categoryPath || sound.category)].filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, 'ko'));
+  db.sounds = deduplicateSoundsByPath(db.sounds);
   await saveDb();
   return { ...librarySnapshot(), scanResult: { added, updated, total } };
 }
