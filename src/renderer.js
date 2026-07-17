@@ -191,7 +191,7 @@ function renderCategoryNodes(nodes, depth = 0) {
       const children = hasChildren && !collapsed ? renderCategoryNodes(node.children, depth + 1) : '';
       return `<div class="category-tree-node">
         <div class="category-tree-row ${active}" style="--tree-depth:${depth}" data-category-row="${escapeHtml(node.path)}" draggable="${node.path !== '미분류'}">
-          <button class="tree-toggle ${hasChildren ? '' : 'empty'}" data-category-toggle="${escapeHtml(node.path)}" ${hasChildren ? '' : 'disabled'}>${hasChildren ? (collapsed ? '▸' : '▾') : ''}</button>
+          <button class="tree-toggle ${hasChildren ? '' : 'empty'}" data-category-toggle="${escapeHtml(node.path)}" ${hasChildren ? `aria-expanded="${!collapsed}" title="하위 폴더 ${collapsed ? '펼치기' : '접기'}"` : 'disabled'}>${hasChildren ? (collapsed ? '▶' : '▼') : ''}</button>
           <button class="tree-label" data-category="${escapeHtml(node.path)}" title="${escapeHtml(node.path)}">${escapeHtml(node.name)}</button>
           <b>${count}</b>
         </div>${children}
@@ -708,7 +708,10 @@ function showContextMenu(event, target) {
   const menu = $('#contextMenu');
   if (target.type === 'category') {
     const protectedRoot = target.category === '미분류';
+    const hasChildren = state.categoryPaths.some((category) => category.startsWith(`${target.category}/`));
+    const collapsed = state.collapsedCategories.has(target.category);
     menu.innerHTML = `
+      ${hasChildren ? `<button data-context-action="toggle-category">하위 폴더 ${collapsed ? '펼치기' : '접기'}</button><div class="separator"></div>` : ''}
       <button data-context-action="new-folder">새 하위 폴더</button>
       <button data-context-action="add-files">이 폴더에 파일 추가…</button>
       <button data-context-action="reveal-category">Finder에서 보기</button>
@@ -898,6 +901,14 @@ detailSelection.addEventListener('dragstart', (event) => {
   if (clipPath) window.soundLibrary.startDrag(clipPath);
 });
 
+function toggleCategoryCollapse(categoryPath) {
+  const hasChildren = state.categoryPaths.some((category) => category.startsWith(`${categoryPath}/`));
+  if (!hasChildren) return;
+  if (state.collapsedCategories.has(categoryPath)) state.collapsedCategories.delete(categoryPath);
+  else state.collapsedCategories.add(categoryPath);
+  renderSidebar();
+}
+
 document.addEventListener('click', (event) => {
   const filterButton = event.target.closest('[data-filter]');
   const categoryButton = event.target.closest('[data-category]');
@@ -905,14 +916,18 @@ document.addEventListener('click', (event) => {
   const tagButton = event.target.closest('[data-tag]');
   if (filterButton) { state.view = 'library'; state.filter = filterButton.dataset.filter; render(); }
   if (categoryToggle) {
-    const categoryPath = categoryToggle.dataset.categoryToggle;
-    if (state.collapsedCategories.has(categoryPath)) state.collapsedCategories.delete(categoryPath);
-    else state.collapsedCategories.add(categoryPath);
-    renderSidebar();
+    toggleCategoryCollapse(categoryToggle.dataset.categoryToggle);
   }
   if (categoryButton) { state.view = 'library'; state.filter = `category:${categoryButton.dataset.category}`; render(); }
   if (tagButton) { state.view = 'library'; state.filter = `tag:${tagButton.dataset.tag}`; render(); }
   if (!event.target.closest('#contextMenu')) hideContextMenu();
+});
+
+$('#categoryList').addEventListener('dblclick', (event) => {
+  const label = event.target.closest('[data-category]');
+  if (!label) return;
+  event.preventDefault();
+  toggleCategoryCollapse(label.dataset.category);
 });
 
 $('#contextMenu').addEventListener('click', async (event) => {
@@ -921,6 +936,7 @@ $('#contextMenu').addEventListener('click', async (event) => {
   const target = contextTarget;
   hideContextMenu();
   if (target.type === 'category') {
+    if (action === 'toggle-category') return toggleCategoryCollapse(target.category);
     if (action === 'new-folder') return createSubfolder(target.category);
     if (action === 'add-files') return addFilesToCategory(target.category);
     if (action === 'rename-category') return renameCategory(target.category);
