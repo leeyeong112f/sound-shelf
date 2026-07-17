@@ -6,6 +6,7 @@ const { DatabaseSync } = require('node:sqlite');
 
 const VAULT_SCHEMA_VERSION = 1;
 const METADATA_SCHEMA_VERSION = 1;
+const EDITS_SCHEMA_VERSION = 1;
 
 function normalizedRelativePath(value) {
   return String(value || '')
@@ -46,6 +47,7 @@ class VaultStorage {
     this.manifestPath = path.join(this.controlDirectory, 'vault.json');
     this.metadataPath = path.join(this.controlDirectory, 'metadata.json');
     this.folderOrderPath = path.join(this.controlDirectory, 'folder-order.json');
+    this.editsDirectory = path.join(this.controlDirectory, 'edits');
     this.database = null;
     this.manifest = null;
     this.cachePath = '';
@@ -150,7 +152,10 @@ class VaultStorage {
     };
   }
 
-  async saveMetadata(sounds) {
+  // 베이스 스냅샷을 통째로 덮어쓴다. 두 Mac이 동시에 호출하면 Drive 충돌 사본이
+  // 생기므로 정상 편집 경로에서 호출하면 안 된다. 볼트 생성·가져오기처럼
+  // 단독 실행이 보장된 경우에만 쓴다.
+  async overwriteBaseMetadata(sounds) {
     const payload = {
       type: 'sound-shelf-metadata',
       schemaVersion: METADATA_SCHEMA_VERSION,
@@ -176,6 +181,82 @@ class VaultStorage {
       vaultId: this.manifest.id,
       updatedAt: new Date().toISOString(),
       order: [...new Set(order || [])]
+    });
+  }
+
+  editFilePath(machineId) {
+    return path.join(this.editsDirectory, `${machineId}.json`);
+  }
+
+  // edits/ 안의 *.json 을 전부 읽는다. Drive 충돌 사본(`mac-1 (1).json`)이
+  // 생기더라도 그 안의 편집을 잃지 않으려면 이름을 가리지 않고 읽어야 한다.
+  async loadEditSources() {
+    let entries = [];
+    try {
+      entries = await fsp.readdir(this.editsDirectory, { withFileTypes: true });
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      return [];
+    }
+    // 읽는 순서가 병합 결과를 바꾸면 두 Mac이 영구히 갈라진다.
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    const sources = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      const filePath = path.join(this.editsDirectory, entry.name);
+      let candidate = null;
+      try {
+        candidate = JSON.parse(await fsp.readFile(filePath, 'utf8'));
+      } catch (error) {
+        // Drive가 내려받는 중이면 반쯤 쓰인 파일이 보일 수 있다.
+        // 이번 회차만 건너뛰고 다음 폴링에 다시 시도한다.
+        console.error(`Skipping unreadable edit file (${entry.name}):`, error.message);
+        continue;
+      }
+      if (candidate?.vaultId && candidate.vaultId !== this.manifest.id) continue;
+      sources.push({
+        machineId: String(candidate?.machineId || entry.name.replace(/\.json$/, '')),
+        sounds: candidate?.sounds && typeof candidate.sounds === 'object' ? candidate.sounds : {},
+        folderOrder: candidate?.folderOrder || null,
+        settings: candidate?.settings || null,
+        __fileName: entry.name
+      });
+    }
+    return sources;
+  }
+
+  async editFileStamps(excludeMachineId = '') {
+    let entries = [];
+    try {
+      entries = await fsp.readdir(this.editsDirectory, { withFileTypes: true });
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      return [];
+    }
+    const exclude = `${excludeMachineId}.json`;
+    const stamps = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.json') || entry.name === exclude) continue;
+      const stat = await fsp.stat(path.join(this.editsDirectory, entry.name)).catch(() => null);
+      if (stat) stamps.push({ name: entry.name, mtimeMs: stat.mtimeMs, size: stat.size });
+    }
+    return stamps.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  // 이 Mac 자신의 파일만 쓴다. 두 Mac이 같은 파일을 건드리지 않는 것이
+  // 이 설계의 핵심이며, Drive 충돌 사본을 구조적으로 막는다.
+  async saveEdits(machineId, machineName, { sounds = {}, folderOrder = null, settings = null } = {}) {
+    await fsp.mkdir(this.editsDirectory, { recursive: true });
+    await writeJsonAtomic(this.editFilePath(machineId), {
+      type: 'sound-shelf-edits',
+      schemaVersion: EDITS_SCHEMA_VERSION,
+      vaultId: this.manifest.id,
+      machineId,
+      machineName: String(machineName || '').normalize('NFC'),
+      updatedAt: new Date().toISOString(),
+      sounds,
+      folderOrder,
+      settings
     });
   }
 
@@ -320,6 +401,7 @@ class VaultStorage {
 
 module.exports = {
   VaultStorage,
+  EDITS_SCHEMA_VERSION,
   normalizedRelativePath,
   relativePathInside,
   readJson,
