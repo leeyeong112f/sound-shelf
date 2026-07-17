@@ -274,7 +274,7 @@ function activateVault(rootPath, options) {
 // 목록 구성이 그대로인 경우가 이 기능의 주 사용 사례이기 때문이다.
 function editSignature(sounds) {
   return JSON.stringify(sounds
-    .map((sound) => [sound.id, sound.title, sound.tags, sound.notes, sound.favorite, sound.rating])
+    .map((sound) => [sound.id, sound.relativePath, sound.title, sound.tags, sound.notes, sound.favorite, sound.rating])
     .sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
 }
 
