@@ -29,6 +29,10 @@ let db = { version: 1, sounds: [], categories: [], settings: { watchedFolders: [
 let saveTimer;
 let shortcutCapture = false;
 const waveformCache = new Map();
+const waveformJobs = new Map();
+const waveformQueue = [];
+let activeWaveformJobs = 0;
+const MAX_WAVEFORM_JOBS = 2;
 const folderWatchers = new Map();
 let watcherTimer;
 let autoScanRunning = false;
@@ -106,7 +110,7 @@ function librarySnapshot() {
   return {
     sounds: db.sounds.map(publicSound),
     categories: db.categories,
-    categoryPaths: [...new Set(db.sounds.map((sound) => sound.categoryPath || sound.category).filter(Boolean))]
+    categoryPaths: [...new Set([...db.categories, ...db.sounds.map((sound) => sound.categoryPath || sound.category)].filter(Boolean))]
       .sort((a, b) => a.localeCompare(b, 'ko')),
     watchedFolders: db.settings.watchedFolders,
     shortcuts: db.settings.shortcuts,
@@ -116,6 +120,59 @@ function librarySnapshot() {
 
 function stableId(filePath) {
   return crypto.createHash('sha1').update(path.resolve(filePath)).digest('hex');
+}
+
+function waveformCacheKey(sound) {
+  return crypto.createHash('sha1')
+    .update(`v3:${sound.id}:${sound.modifiedAt}:${sound.size}`)
+    .digest('hex');
+}
+
+function waveformCachePath(cacheKey) {
+  return path.join(app.getPath('userData'), 'waveform-cache', `${cacheKey}.json`);
+}
+
+async function readWaveformDiskCache(cacheKey) {
+  try {
+    const waveform = JSON.parse(await fsp.readFile(waveformCachePath(cacheKey), 'utf8'));
+    if (!Array.isArray(waveform?.left) || !Array.isArray(waveform?.right)) return null;
+    return waveform;
+  } catch {
+    return null;
+  }
+}
+
+async function writeWaveformDiskCache(cacheKey, waveform) {
+  const cachePath = waveformCachePath(cacheKey);
+  await fsp.mkdir(path.dirname(cachePath), { recursive: true });
+  const temporary = `${cachePath}.tmp`;
+  await fsp.writeFile(temporary, JSON.stringify(waveform), 'utf8');
+  await fsp.rename(temporary, cachePath);
+}
+
+function runWaveformJob(task) {
+  return new Promise((resolve, reject) => {
+    waveformQueue.push({ task, resolve, reject });
+    const drain = () => {
+      while (activeWaveformJobs < MAX_WAVEFORM_JOBS && waveformQueue.length) {
+        const job = waveformQueue.shift();
+        activeWaveformJobs += 1;
+        Promise.resolve().then(job.task).then(job.resolve, job.reject).finally(() => {
+          activeWaveformJobs -= 1;
+          drain();
+        });
+      }
+    };
+    drain();
+  });
+}
+
+async function pruneWaveformDiskCache() {
+  const directory = path.join(app.getPath('userData'), 'waveform-cache');
+  const valid = new Set(db.sounds.map((sound) => `${waveformCacheKey(sound)}.json`));
+  const entries = await fsp.readdir(directory).catch(() => []);
+  await Promise.all(entries.filter((name) => name.endsWith('.json') && !valid.has(name))
+    .map((name) => fsp.unlink(path.join(directory, name)).catch(() => {})));
 }
 
 function inferCategory(filePath) {
@@ -178,7 +235,29 @@ async function walkAudioFiles(rootPath) {
   return results;
 }
 
-async function indexFiles(filePaths, { reportProgress = true } = {}) {
+async function walkCategoryFolders(rootPath) {
+  const results = [];
+  const stack = [rootPath];
+  while (stack.length) {
+    const current = stack.pop();
+    let entries = [];
+    try {
+      entries = await fsp.readdir(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+      const fullPath = path.join(current, entry.name);
+      const relative = path.relative(rootPath, fullPath).split(path.sep).filter(Boolean).join('/');
+      if (relative) results.push(relative);
+      stack.push(fullPath);
+    }
+  }
+  return results;
+}
+
+async function indexFiles(filePaths, { reportProgress = true, categoryFolders = null } = {}) {
   const existingById = new Map(db.sounds.map((sound) => [sound.id, sound]));
   let added = 0;
   let updated = 0;
@@ -229,15 +308,18 @@ async function indexFiles(filePaths, { reportProgress = true } = {}) {
     }
   }
 
-  db.categories = [...new Set(db.sounds.map((sound) => sound.categoryPath || sound.category).filter(Boolean))]
+  db.categories = [...new Set([...(categoryFolders || db.categories), ...db.sounds.map((sound) => sound.categoryPath || sound.category)].filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, 'ko'));
   await saveDb();
   return { ...librarySnapshot(), scanResult: { added, updated, total } };
 }
 
 async function rescanWatchedFolders({ reportProgress = true } = {}) {
-  const groups = await Promise.all(db.settings.watchedFolders.map(walkAudioFiles));
-  return indexFiles([...new Set(groups.flat())], { reportProgress });
+  const [groups, categoryGroups] = await Promise.all([
+    Promise.all(db.settings.watchedFolders.map(walkAudioFiles)),
+    Promise.all(db.settings.watchedFolders.map(walkCategoryFolders))
+  ]);
+  return indexFiles([...new Set(groups.flat())], { reportProgress, categoryFolders: [...new Set(categoryGroups.flat())] });
 }
 
 async function runAutoRescan(reason = 'folder-change') {
@@ -321,6 +403,96 @@ async function moveFile(source, destination) {
   }
 }
 
+function watchedRootForFile(filePath) {
+  const absolute = path.resolve(filePath);
+  return [...db.settings.watchedFolders].map((folder) => path.resolve(folder))
+    .sort((a, b) => b.length - a.length)
+    .find((folder) => {
+      const relative = path.relative(folder, absolute);
+      return !relative.startsWith('..') && !path.isAbsolute(relative);
+    });
+}
+
+function normalizeCategoryPath(categoryPath) {
+  return String(categoryPath || '').split(/[\\/>]+/)
+    .map((part) => part.trim().replace(/[:*?"<>|]/g, '-')).filter(Boolean).join('/');
+}
+
+function categoryFolderPath(categoryPath) {
+  const normalized = normalizeCategoryPath(categoryPath);
+  const matchingSound = db.sounds.find((sound) => {
+    const soundCategory = sound.categoryPath || sound.category;
+    return soundCategory === normalized || soundCategory?.startsWith(`${normalized}/`);
+  });
+  const root = (matchingSound && watchedRootForFile(matchingSound.path)) || db.settings.watchedFolders[0];
+  if (!root) return null;
+  if (!normalized || normalized === '미분류') return path.resolve(root);
+  return path.join(path.resolve(root), ...normalized.split('/'));
+}
+
+function categoryPathForFolder(folderPath) {
+  const absolute = path.resolve(folderPath);
+  for (const categoryPath of db.categories) {
+    const candidate = categoryFolderPath(categoryPath);
+    if (candidate && path.resolve(candidate) === absolute) return categoryPath;
+  }
+  return null;
+}
+
+function updateSoundsForCategoryMove(sourceCategory, destinationCategory, sourceFolder, destinationFolder) {
+  const idChanges = {};
+  for (const sound of db.sounds) {
+    const currentCategory = sound.categoryPath || sound.category;
+    if (currentCategory !== sourceCategory && !currentCategory?.startsWith(`${sourceCategory}/`)) continue;
+    const oldId = sound.id;
+    const suffix = currentCategory.slice(sourceCategory.length).replace(/^\//, '');
+    sound.categoryPath = suffix ? `${destinationCategory}/${suffix}` : destinationCategory;
+    sound.category = sound.categoryPath.split('/').pop();
+    const relativeFile = path.relative(sourceFolder, sound.path);
+    sound.path = path.join(destinationFolder, relativeFile);
+    sound.fileName = path.basename(sound.path);
+    sound.id = stableId(sound.path);
+    idChanges[oldId] = sound.id;
+  }
+  db.categories = [...new Set(db.categories.map((category) => {
+    if (category === sourceCategory) return destinationCategory;
+    if (category.startsWith(`${sourceCategory}/`)) return `${destinationCategory}${category.slice(sourceCategory.length)}`;
+    return category;
+  }))].sort((a, b) => a.localeCompare(b, 'ko'));
+  waveformCache.clear();
+  return idChanges;
+}
+
+async function moveCategoryDirectory(sourceCategory, targetCategory) {
+  const source = normalizeCategoryPath(sourceCategory);
+  const target = normalizeCategoryPath(targetCategory);
+  if (!source || source === '미분류') throw new Error('미분류 루트 폴더는 이동할 수 없습니다.');
+  if (target === source || target.startsWith(`${source}/`)) throw new Error('폴더를 자기 자신이나 하위 폴더로 이동할 수 없습니다.');
+  const sourceFolder = categoryFolderPath(source);
+  const targetFolder = categoryFolderPath(target);
+  if (!sourceFolder || !targetFolder || !fs.existsSync(sourceFolder)) throw new Error('이동할 폴더를 찾을 수 없습니다.');
+  await fsp.mkdir(targetFolder, { recursive: true });
+  const destinationFolder = path.join(targetFolder, path.basename(sourceFolder));
+  if (fs.existsSync(destinationFolder)) throw new Error('대상 폴더에 같은 이름의 폴더가 이미 있습니다.');
+  await moveFile(sourceFolder, destinationFolder);
+  const destinationCategory = target === '미분류'
+    ? path.basename(sourceFolder)
+    : `${target}/${path.basename(sourceFolder)}`;
+  const idChanges = updateSoundsForCategoryMove(source, destinationCategory, sourceFolder, destinationFolder);
+  await saveDb();
+  refreshFolderWatchers();
+  return { ...librarySnapshot(), idChanges, categoryMove: { from: source, to: destinationCategory } };
+}
+
+async function copyFileIntoCategory(filePath, categoryPath) {
+  const folder = categoryFolderPath(categoryPath);
+  if (!folder) throw new Error('대상 카테고리 폴더를 찾을 수 없습니다.');
+  await fsp.mkdir(folder, { recursive: true });
+  const destination = uniqueDestination(folder, path.basename(filePath));
+  await fsp.copyFile(filePath, destination);
+  return destination;
+}
+
 async function moveSoundToFolder(sound, folder, categoryPath) {
   await fsp.mkdir(folder, { recursive: true });
   const destination = path.resolve(path.dirname(sound.path)) === path.resolve(folder)
@@ -373,6 +545,7 @@ async function createWindow() {
 
 app.whenReady().then(async () => {
   await loadDb();
+  await pruneWaveformDiskCache();
   await createWindow();
   refreshFolderWatchers();
   app.on('activate', () => {
@@ -486,6 +659,106 @@ ipcMain.handle('library:move-category', async (_event, { id, category }) => {
   return moveSoundToFolder(sound, path.join(root, ...categoryParts), safeCategory);
 });
 
+ipcMain.handle('category:create', async (_event, { parentCategory, name }) => {
+  const parent = normalizeCategoryPath(parentCategory);
+  const safeName = normalizeCategoryPath(name).split('/').pop();
+  if (!safeName) throw new Error('새 폴더 이름을 입력해 주세요.');
+  const parentFolder = categoryFolderPath(parent);
+  if (!parentFolder) throw new Error('상위 폴더를 찾을 수 없습니다.');
+  const folder = path.join(parentFolder, safeName);
+  if (fs.existsSync(folder)) throw new Error('같은 이름의 폴더가 이미 있습니다.');
+  await fsp.mkdir(folder, { recursive: true });
+  const categoryPath = parent && parent !== '미분류' ? `${parent}/${safeName}` : safeName;
+  if (!db.categories.includes(categoryPath)) db.categories.push(categoryPath);
+  db.categories.sort((a, b) => a.localeCompare(b, 'ko'));
+  await saveDb();
+  return librarySnapshot();
+});
+
+ipcMain.handle('category:rename', async (_event, { category, name }) => {
+  const sourceCategory = normalizeCategoryPath(category);
+  const safeName = normalizeCategoryPath(name).split('/').pop();
+  if (!sourceCategory || sourceCategory === '미분류') throw new Error('미분류 루트는 이름을 바꿀 수 없습니다.');
+  if (!safeName) throw new Error('새 폴더 이름을 입력해 주세요.');
+  const sourceFolder = categoryFolderPath(sourceCategory);
+  if (!sourceFolder || !fs.existsSync(sourceFolder)) throw new Error('원본 폴더를 찾을 수 없습니다.');
+  const destinationFolder = path.join(path.dirname(sourceFolder), safeName);
+  if (fs.existsSync(destinationFolder)) throw new Error('같은 이름의 폴더가 이미 있습니다.');
+  await fsp.rename(sourceFolder, destinationFolder);
+  const parentCategory = sourceCategory.includes('/') ? sourceCategory.slice(0, sourceCategory.lastIndexOf('/')) : '';
+  const destinationCategory = parentCategory ? `${parentCategory}/${safeName}` : safeName;
+  const idChanges = updateSoundsForCategoryMove(sourceCategory, destinationCategory, sourceFolder, destinationFolder);
+  await saveDb();
+  return { ...librarySnapshot(), idChanges, categoryMove: { from: sourceCategory, to: destinationCategory } };
+});
+
+ipcMain.handle('category:trash', async (_event, category) => {
+  const normalized = normalizeCategoryPath(category);
+  if (!normalized || normalized === '미분류') throw new Error('미분류 루트는 삭제할 수 없습니다.');
+  const folder = categoryFolderPath(normalized);
+  if (!folder || !fs.existsSync(folder)) throw new Error('삭제할 폴더를 찾을 수 없습니다.');
+  await shell.trashItem(folder);
+  db.sounds = db.sounds.filter((sound) => {
+    const soundCategory = sound.categoryPath || sound.category;
+    return soundCategory !== normalized && !soundCategory?.startsWith(`${normalized}/`);
+  });
+  db.categories = db.categories.filter((item) => item !== normalized && !item.startsWith(`${normalized}/`));
+  waveformCache.clear();
+  await saveDb();
+  return librarySnapshot();
+});
+
+ipcMain.handle('category:reveal', async (_event, category) => {
+  const folder = categoryFolderPath(category);
+  if (!folder || !fs.existsSync(folder)) throw new Error('폴더를 찾을 수 없습니다.');
+  shell.showItemInFolder(folder);
+  return true;
+});
+
+ipcMain.handle('category:add-files', async (_event, category) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: `“${category}” 폴더에 파일 추가`,
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: 'Audio', extensions: [...AUDIO_EXTENSIONS].map((ext) => ext.slice(1)) }]
+  });
+  if (result.canceled) return null;
+  const copied = [];
+  for (const filePath of result.filePaths) copied.push(await copyFileIntoCategory(filePath, category));
+  return indexFiles(copied);
+});
+
+ipcMain.handle('category:drop-paths', async (_event, { category, paths }) => {
+  const targetCategory = normalizeCategoryPath(category);
+  const targetFolder = categoryFolderPath(targetCategory);
+  if (!targetFolder) throw new Error('대상 폴더를 찾을 수 없습니다.');
+  let snapshot = null;
+  const copiedFiles = [];
+  let needsRescan = false;
+  for (const itemPath of [...new Set(paths || [])]) {
+    const stat = await fsp.stat(itemPath).catch(() => null);
+    if (!stat) continue;
+    if (stat.isDirectory()) {
+      const sourceCategory = categoryPathForFolder(itemPath);
+      if (sourceCategory) {
+        snapshot = await moveCategoryDirectory(sourceCategory, targetCategory);
+      } else {
+        const destination = uniqueDestination(targetFolder, path.basename(itemPath));
+        await fsp.cp(itemPath, destination, { recursive: true, errorOnExist: true, force: false });
+        needsRescan = true;
+      }
+      continue;
+    }
+    if (!stat.isFile() || !AUDIO_EXTENSIONS.has(path.extname(itemPath).toLowerCase())) continue;
+    const existing = db.sounds.find((sound) => path.resolve(sound.path) === path.resolve(itemPath));
+    if (existing) snapshot = await moveSoundToFolder(existing, targetFolder, targetCategory);
+    else copiedFiles.push(await copyFileIntoCategory(itemPath, targetCategory));
+  }
+  if (copiedFiles.length) snapshot = await indexFiles(copiedFiles);
+  if (needsRescan) snapshot = await rescanWatchedFolders({ reportProgress: false });
+  if (!snapshot) snapshot = await rescanWatchedFolders({ reportProgress: false });
+  return snapshot;
+});
+
 ipcMain.handle('shortcuts:set', async (_event, shortcuts) => {
   db.settings.shortcuts = { ...DEFAULT_SHORTCUTS, ...(shortcuts || {}) };
   await saveDb();
@@ -516,35 +789,48 @@ ipcMain.handle('library:reveal', async (_event, filePath) => {
 ipcMain.handle('library:waveform', async (_event, id) => {
   const sound = db.sounds.find((item) => item.id === id);
   if (!sound || !fs.existsSync(sound.path)) return [];
-  const cacheKey = `${sound.id}:${sound.modifiedAt}:${sound.size}`;
+  const cacheKey = waveformCacheKey(sound);
   if (waveformCache.has(cacheKey)) return waveformCache.get(cacheKey);
-  try {
-    const { stdout } = await execFileAsync(findMediaTool('ffmpeg'), [
-      '-v', 'error', '-i', sound.path, '-map', '0:a:0', '-ac', '2', '-ar', '8000', '-f', 's16le', 'pipe:1'
-    ], { encoding: null, maxBuffer: 1024 * 1024 * 64, timeout: 45000 });
-    const frameCount = Math.floor(stdout.length / 4);
-    const targetCount = 1200;
-    const bucketSize = Math.max(1, Math.ceil(frameCount / targetCount));
-    const left = [];
-    const right = [];
-    for (let offset = 0; offset < frameCount; offset += bucketSize) {
-      let leftPeak = 0;
-      let rightPeak = 0;
-      const limit = Math.min(frameCount, offset + bucketSize);
-      for (let index = offset; index < limit; index += 1) {
-        leftPeak = Math.max(leftPeak, Math.abs(stdout.readInt16LE(index * 4)) / 32768);
-        rightPeak = Math.max(rightPeak, Math.abs(stdout.readInt16LE(index * 4 + 2)) / 32768);
-      }
-      left.push(Math.min(1, leftPeak));
-      right.push(Math.min(1, rightPeak));
-    }
-    const waveform = { left, right };
-    waveformCache.set(cacheKey, waveform);
-    return waveform;
-  } catch (error) {
-    console.error('Waveform generation failed:', error.message);
-    return { left: [], right: [] };
+  const diskCached = await readWaveformDiskCache(cacheKey);
+  if (diskCached) {
+    waveformCache.set(cacheKey, diskCached);
+    return diskCached;
   }
+  if (waveformJobs.has(cacheKey)) return waveformJobs.get(cacheKey);
+  const job = runWaveformJob(async () => {
+    try {
+      const { stdout } = await execFileAsync(findMediaTool('ffmpeg'), [
+        '-v', 'error', '-i', sound.path, '-map', '0:a:0', '-ac', '2', '-ar', '8000', '-f', 's16le', 'pipe:1'
+      ], { encoding: null, maxBuffer: 1024 * 1024 * 64, timeout: 45000 });
+      const frameCount = Math.floor(stdout.length / 4);
+      const targetCount = 1200;
+      const bucketSize = Math.max(1, Math.ceil(frameCount / targetCount));
+      const left = [];
+      const right = [];
+      for (let offset = 0; offset < frameCount; offset += bucketSize) {
+        let leftPeak = 0;
+        let rightPeak = 0;
+        const limit = Math.min(frameCount, offset + bucketSize);
+        for (let index = offset; index < limit; index += 1) {
+          leftPeak = Math.max(leftPeak, Math.abs(stdout.readInt16LE(index * 4)) / 32768);
+          rightPeak = Math.max(rightPeak, Math.abs(stdout.readInt16LE(index * 4 + 2)) / 32768);
+        }
+        left.push(Math.min(1, leftPeak));
+        right.push(Math.min(1, rightPeak));
+      }
+      const waveform = { left, right };
+      waveformCache.set(cacheKey, waveform);
+      await writeWaveformDiskCache(cacheKey, waveform).catch((error) => console.error('Waveform cache write failed:', error.message));
+      return waveform;
+    } catch (error) {
+      console.error('Waveform generation failed:', error.message);
+      return { left: [], right: [] };
+    } finally {
+      waveformJobs.delete(cacheKey);
+    }
+  });
+  waveformJobs.set(cacheKey, job);
+  return job;
 });
 
 ipcMain.handle('library:prepare-clip', async (_event, payload) => {
@@ -604,7 +890,7 @@ ipcMain.handle('resolve:insert', async (_event, sound) => {
   }
 });
 
-ipcMain.on('library:start-drag', (event, filePath) => {
+function startNativeDrag(event, filePath) {
   if (!filePath || !fs.existsSync(filePath)) return;
   try {
     const iconBuffer = fs.readFileSync(path.join(__dirname, 'drag-icon.png'));
@@ -615,4 +901,7 @@ ipcMain.on('library:start-drag', (event, filePath) => {
     console.error('Native drag failed:', error);
     event.sender.send('drag-error', error.message);
   }
-});
+}
+
+ipcMain.on('library:start-drag', startNativeDrag);
+ipcMain.on('category:start-drag', (event, category) => startNativeDrag(event, categoryFolderPath(category)));

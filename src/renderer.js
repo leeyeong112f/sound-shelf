@@ -112,9 +112,14 @@ function filteredSounds() {
     }
     if (state.filter.startsWith('tag:') && !(sound.tags || []).includes(state.filter.slice(4))) return false;
     if (!query) return true;
-    const haystack = [sound.title, sound.fileName, sound.category, sound.categoryPath, sound.notes, ...(sound.tags || [])]
+    const haystack = [sound.title, sound.fileName, sound.category, sound.categoryPath, sound.notes]
       .join(' ').toLocaleLowerCase('ko');
-    return query.split(/\s+/).every((word) => haystack.includes(word));
+    const tags = (sound.tags || []).map((tag) => tag.toLocaleLowerCase('ko'));
+    return query.split(/\s+/).every((word) => {
+      if (!word.startsWith('#')) return haystack.includes(word);
+      const tagQuery = word.slice(1);
+      return tagQuery ? tags.some((tag) => tag.includes(tagQuery)) : tags.length > 0;
+    });
   }).sort((a, b) => a.title.localeCompare(b.title, 'ko', { numeric: true }));
 }
 
@@ -129,6 +134,13 @@ function setLibrary(snapshot) {
   player.volume = state.previewVolume;
   if (state.previewVolume > 0) lastAudibleVolume = state.previewVolume;
   if (snapshot.moved?.oldId && state.selectedId === snapshot.moved.oldId) state.selectedId = snapshot.moved.id;
+  if (snapshot.idChanges?.[state.selectedId]) state.selectedId = snapshot.idChanges[state.selectedId];
+  if (snapshot.categoryMove && state.filter.startsWith('category:')) {
+    const current = state.filter.slice(9);
+    if (current === snapshot.categoryMove.from || current.startsWith(`${snapshot.categoryMove.from}/`)) {
+      state.filter = `category:${snapshot.categoryMove.to}${current.slice(snapshot.categoryMove.from.length)}`;
+    }
+  }
   render();
 }
 
@@ -178,7 +190,7 @@ function renderCategoryNodes(nodes, depth = 0) {
       }).length;
       const children = hasChildren && !collapsed ? renderCategoryNodes(node.children, depth + 1) : '';
       return `<div class="category-tree-node">
-        <div class="category-tree-row ${active}" style="--tree-depth:${depth}">
+        <div class="category-tree-row ${active}" style="--tree-depth:${depth}" data-category-row="${escapeHtml(node.path)}" draggable="${node.path !== '미분류'}">
           <button class="tree-toggle ${hasChildren ? '' : 'empty'}" data-category-toggle="${escapeHtml(node.path)}" ${hasChildren ? '' : 'disabled'}>${hasChildren ? (collapsed ? '▸' : '▾') : ''}</button>
           <button class="tree-label" data-category="${escapeHtml(node.path)}" title="${escapeHtml(node.path)}">${escapeHtml(node.name)}</button>
           <b>${count}</b>
@@ -632,6 +644,88 @@ async function moveSelectedToFolder() {
   }
 }
 
+async function createSubfolder(category) {
+  const name = await openInputDialog({
+    title: '새 하위 폴더', description: `“${category}” 안에 만들 폴더 이름을 입력하세요.`, placeholder: '새 폴더'
+  });
+  if (!name) return;
+  try {
+    setLibrary(await window.soundLibrary.createCategoryFolder({ parentCategory: category, name }));
+    state.collapsedCategories.delete(category);
+    renderSidebar();
+    showToast('새 폴더를 만들었습니다.');
+  } catch (error) {
+    showToast(`폴더 생성 실패: ${error.message}`, 5000);
+  }
+}
+
+async function renameCategory(category) {
+  const oldName = category.split('/').pop();
+  const name = await openInputDialog({
+    title: '폴더 이름 변경', description: `“${category}” 폴더의 새 이름을 입력하세요.`, value: oldName
+  });
+  if (!name || name === oldName) return;
+  try {
+    setLibrary(await window.soundLibrary.renameCategoryFolder({ category, name }));
+    showToast('폴더 이름을 변경했습니다.');
+  } catch (error) {
+    showToast(`이름 변경 실패: ${error.message}`, 5000);
+  }
+}
+
+async function trashCategory(category) {
+  if (!confirm(`“${category}” 폴더와 안의 모든 파일을 macOS 휴지통으로 이동할까요?`)) return;
+  try {
+    if (state.filter === `category:${category}` || state.filter.startsWith(`category:${category}/`)) state.filter = 'all';
+    setLibrary(await window.soundLibrary.trashCategoryFolder(category));
+    showToast('폴더를 휴지통으로 이동했습니다.');
+  } catch (error) {
+    showToast(`폴더 삭제 실패: ${error.message}`, 5000);
+  }
+}
+
+async function addFilesToCategory(category) {
+  try {
+    const snapshot = await window.soundLibrary.addFilesToCategory(category);
+    if (snapshot) {
+      setLibrary(snapshot);
+      showToast('파일을 폴더에 복사해 추가했습니다.');
+    }
+  } catch (error) {
+    showToast(`파일 추가 실패: ${error.message}`, 5000);
+  }
+}
+
+let contextTarget = null;
+function hideContextMenu() {
+  $('#contextMenu').classList.add('hidden');
+  contextTarget = null;
+}
+
+function showContextMenu(event, target) {
+  event.preventDefault();
+  contextTarget = target;
+  const menu = $('#contextMenu');
+  if (target.type === 'category') {
+    const protectedRoot = target.category === '미분류';
+    menu.innerHTML = `
+      <button data-context-action="new-folder">새 하위 폴더</button>
+      <button data-context-action="add-files">이 폴더에 파일 추가…</button>
+      <button data-context-action="reveal-category">Finder에서 보기</button>
+      ${protectedRoot ? '' : '<div class="separator"></div><button data-context-action="rename-category">이름 변경…</button><button class="danger" data-context-action="trash-category">폴더를 휴지통으로</button>'}`;
+  } else {
+    menu.innerHTML = `
+      <button data-context-action="move-category">카테고리 폴더로 이동…</button>
+      <button data-context-action="move-folder">다른 폴더로 이동…</button>
+      <button data-context-action="reveal-sound">Finder에서 보기</button>
+      <div class="separator"></div><button class="danger" data-context-action="trash-sound">원본 파일을 휴지통으로</button>`;
+  }
+  menu.classList.remove('hidden');
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.min(event.clientX, window.innerWidth - rect.width - 8)}px`;
+  menu.style.top = `${Math.min(event.clientY, window.innerHeight - rect.height - 8)}px`;
+}
+
 async function trashSelected() {
   const sound = selectedSound();
   if (!sound) return showToast('먼저 삭제할 사운드를 선택해 주세요.');
@@ -722,6 +816,27 @@ list.addEventListener('dragstart', (event) => {
   if (!sound?.missing) window.soundLibrary.startDrag(sound.path);
 });
 
+$('#categoryList').addEventListener('dragstart', (event) => {
+  const row = event.target.closest('[data-category-row]');
+  if (!row || row.dataset.categoryRow === '미분류') return event.preventDefault();
+  event.preventDefault();
+  window.soundLibrary.startCategoryDrag(row.dataset.categoryRow);
+});
+
+document.addEventListener('contextmenu', (event) => {
+  const categoryRow = event.target.closest('[data-category-row]');
+  if (categoryRow) return showContextMenu(event, { type: 'category', category: categoryRow.dataset.categoryRow });
+  if (event.target.closest('#categoryList')) return showContextMenu(event, { type: 'category', category: '미분류' });
+  const soundRow = event.target.closest('.sound-row');
+  if (soundRow) {
+    state.selectedId = soundRow.dataset.id;
+    state.inspectorOpen = false;
+    renderDetailPanel();
+    return showContextMenu(event, { type: 'sound', id: soundRow.dataset.id });
+  }
+  hideContextMenu();
+});
+
 list.addEventListener('dblclick', async (event) => {
   const name = event.target.closest('.sound-name');
   const row = event.target.closest('.sound-row');
@@ -797,6 +912,32 @@ document.addEventListener('click', (event) => {
   }
   if (categoryButton) { state.view = 'library'; state.filter = `category:${categoryButton.dataset.category}`; render(); }
   if (tagButton) { state.view = 'library'; state.filter = `tag:${tagButton.dataset.tag}`; render(); }
+  if (!event.target.closest('#contextMenu')) hideContextMenu();
+});
+
+$('#contextMenu').addEventListener('click', async (event) => {
+  const action = event.target.closest('[data-context-action]')?.dataset.contextAction;
+  if (!action || !contextTarget) return;
+  const target = contextTarget;
+  hideContextMenu();
+  if (target.type === 'category') {
+    if (action === 'new-folder') return createSubfolder(target.category);
+    if (action === 'add-files') return addFilesToCategory(target.category);
+    if (action === 'rename-category') return renameCategory(target.category);
+    if (action === 'trash-category') return trashCategory(target.category);
+    if (action === 'reveal-category') {
+      try { await window.soundLibrary.revealCategoryFolder(target.category); } catch (error) { showToast(error.message, 4000); }
+    }
+    return;
+  }
+  state.selectedId = target.id;
+  if (action === 'move-category') return moveSelectedToCategory();
+  if (action === 'move-folder') return moveSelectedToFolder();
+  if (action === 'trash-sound') return trashSelected();
+  if (action === 'reveal-sound') {
+    const sound = selectedSound();
+    if (sound) window.soundLibrary.reveal(sound.path);
+  }
 });
 
 $('#searchInput').addEventListener('input', (event) => { state.query = event.target.value; renderList(); });
@@ -900,7 +1041,10 @@ document.addEventListener('dragenter', (event) => {
   $('#dropOverlay').classList.remove('hidden');
 });
 document.addEventListener('dragover', (event) => {
-  if (event.dataTransfer?.types.includes('Files')) event.preventDefault();
+  if (!event.dataTransfer?.types.includes('Files')) return;
+  event.preventDefault();
+  document.querySelectorAll('.category-tree-row.drag-over').forEach((row) => row.classList.remove('drag-over'));
+  event.target.closest('[data-category-row]')?.classList.add('drag-over');
 });
 document.addEventListener('dragleave', () => {
   dragDepth = Math.max(0, dragDepth - 1);
@@ -910,8 +1054,20 @@ document.addEventListener('drop', async (event) => {
   event.preventDefault();
   dragDepth = 0;
   $('#dropOverlay').classList.add('hidden');
+  document.querySelectorAll('.category-tree-row.drag-over').forEach((row) => row.classList.remove('drag-over'));
   const files = [...(event.dataTransfer?.files || [])];
   if (!files.length) return;
+  const categoryRow = event.target.closest('[data-category-row]');
+  if (categoryRow) {
+    showToast(`“${categoryRow.dataset.categoryRow}” 폴더로 이동하는 중…`, 10000);
+    try {
+      setLibrary(await window.soundLibrary.dropFilesToCategory(categoryRow.dataset.categoryRow, files));
+      showToast('파일 또는 폴더를 이동했습니다.');
+    } catch (error) {
+      showToast(`이동 실패: ${error.message}`, 5000);
+    }
+    return;
+  }
   showToast('드롭한 사운드를 추가하는 중…', 10000);
   setLibrary(await window.soundLibrary.addDroppedFiles(files));
   showToast('사운드를 라이브러리에 추가했습니다.');

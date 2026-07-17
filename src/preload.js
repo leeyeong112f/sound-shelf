@@ -1,15 +1,23 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
+const filePaths = (files) => files.map((file) => webUtils.getPathForFile(file)).filter(Boolean);
 
 contextBridge.exposeInMainWorld('soundLibrary', {
   getLibrary: () => ipcRenderer.invoke('library:get'),
   addFiles: () => ipcRenderer.invoke('library:add-files'),
-  addDroppedFiles: (files) => ipcRenderer.invoke('library:add-paths', files.map((file) => webUtils.getPathForFile(file)).filter(Boolean)),
+  addDroppedFiles: (files) => ipcRenderer.invoke('library:add-paths', filePaths(files)),
   addFolder: () => ipcRenderer.invoke('library:add-folder'),
   rescan: () => ipcRenderer.invoke('library:rescan'),
   updateSound: (payload) => ipcRenderer.invoke('library:update', payload),
   removeSound: (payload) => ipcRenderer.invoke('library:remove', payload),
   moveSoundToFolder: (id) => ipcRenderer.invoke('library:move-folder', id),
   moveSoundToCategory: (payload) => ipcRenderer.invoke('library:move-category', payload),
+  createCategoryFolder: (payload) => ipcRenderer.invoke('category:create', payload),
+  renameCategoryFolder: (payload) => ipcRenderer.invoke('category:rename', payload),
+  trashCategoryFolder: (category) => ipcRenderer.invoke('category:trash', category),
+  revealCategoryFolder: (category) => ipcRenderer.invoke('category:reveal', category),
+  addFilesToCategory: (category) => ipcRenderer.invoke('category:add-files', category),
+  dropFilesToCategory: (category, files) => ipcRenderer.invoke('category:drop-paths', { category, paths: filePaths(files) }),
+  startCategoryDrag: (category) => ipcRenderer.send('category:start-drag', category),
   setShortcuts: (shortcuts) => ipcRenderer.invoke('shortcuts:set', shortcuts),
   setPreviewVolume: (volume) => ipcRenderer.invoke('preview-volume:set', volume),
   setShortcutCapture: (active) => ipcRenderer.send('shortcuts:capture', active),
