@@ -1,7 +1,8 @@
 const DEFAULT_SHORTCUTS = {
   search: 'Meta+S', moveCategory: 'Meta+M', editTags: 'Meta+T', addFiles: 'Meta+O',
   addFolder: 'Meta+Shift+O', trash: 'Meta+Backspace', reveal: 'Meta+Shift+R',
-  favorite: 'Meta+Shift+F', settings: 'Meta+Comma', playPause: 'Space'
+  favorite: 'Meta+Shift+F', settings: 'Meta+Comma', playPause: 'Space',
+  insertResolve: 'Meta+F'
 };
 const SHORTCUT_LABELS = {
   search: ['사운드 검색', '검색창으로 이동'],
@@ -13,7 +14,8 @@ const SHORTCUT_LABELS = {
   reveal: ['Finder에서 보기', '선택 파일 위치 열기'],
   favorite: ['즐겨찾기 전환', '선택 사운드 별표 켜기/끄기'],
   settings: ['단축키 설정', '이 설정 화면 열기'],
-  playPause: ['재생/일시정지', '선택 사운드 미리 듣기']
+  playPause: ['재생/일시정지', '선택 사운드 미리 듣기'],
+  insertResolve: ['Fairlight로 보내기', '선택 사운드(구간 선택 시 그 구간만)를 Resolve 타임헤드에 삽입']
 };
 
 const state = {
@@ -853,6 +855,23 @@ function openSettings() {
   render();
 }
 
+async function insertSelectedIntoResolve() {
+  const sound = selectedSound();
+  if (!sound) return showToast('먼저 Fairlight로 보낼 사운드를 선택해 주세요.');
+  if (sound.missing) return showToast('원본 파일을 찾을 수 없습니다.');
+  const selection = state.selections.get(sound.id);
+  const hasRange = selection && selection.end - selection.start >= 0.05;
+  showToast(hasRange ? '선택 구간을 Fairlight 타임헤드에 삽입 중…' : 'Fairlight 타임헤드에 삽입 중…', 15000);
+  let payload = { path: sound.path, duration: sound.duration, sampleRate: sound.sampleRate };
+  if (hasRange) {
+    const clip = await window.soundLibrary.prepareClip({ id: sound.id, start: selection.start, end: selection.end });
+    if (!clip.ok) return showToast(clip.message, 5000);
+    payload = { path: clip.path, duration: clip.duration, sampleRate: sound.sampleRate };
+  }
+  const result = await window.soundLibrary.insertIntoResolve(payload);
+  showToast(result.message, result.ok ? 2200 : 6000);
+}
+
 async function runShortcut(action) {
   if (action === 'search') {
     state.view = 'library'; render(); $('#searchInput').focus(); $('#searchInput').select();
@@ -865,6 +884,7 @@ async function runShortcut(action) {
   else if (action === 'favorite') await toggleFavoriteSelected();
   else if (action === 'settings') openSettings();
   else if (action === 'playPause') toggleSelectedPlayback();
+  else if (action === 'insertResolve') await insertSelectedIntoResolve();
 }
 
 function actionForShortcut(shortcut) {
