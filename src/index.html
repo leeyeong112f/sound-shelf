@@ -44,12 +44,18 @@
             <h1 id="viewTitle">모든 사운드</h1>
             <p id="resultSummary">0개의 사운드</p>
           </div>
-          <div class="resolve-hint"><span class="pulse"></span>이름 선택 → 아래 파형에서 구간 편집</div>
+          <div class="view-controls">
+            <select id="sortSelect" title="정렬"><option value="title">이름순</option><option value="duration">길이순</option><option value="createdAt">추가일순</option><option value="size">크기순</option><option value="rating">별점순</option></select>
+            <button id="sortDirectionBtn" class="subtle-button" title="정렬 방향">↑</button>
+            <select id="ratingFilter" title="별점 필터"><option value="0">모든 별점</option><option value="1">★ 이상</option><option value="2">★★ 이상</option><option value="3">★★★ 이상</option><option value="4">★★★★ 이상</option><option value="5">★★★★★만</option></select>
+            <select id="fileFilter" title="파일 상태"><option value="all">모든 파일</option><option value="available">정상 파일</option><option value="missing">누락 파일</option></select>
+          </div>
         </section>
 
         <section class="sound-table-wrap library-only">
+          <div id="batchToolbar" class="batch-toolbar hidden"><strong id="selectionCount">0개 선택</strong><button id="batchTagsBtn">태그 추가</button><button id="batchMoveBtn">카테고리 이동</button><button id="batchFavoriteBtn">즐겨찾기</button><button id="batchTrashBtn" class="danger">휴지통</button><button id="clearSelectionBtn">선택 해제</button></div>
           <div class="sound-table-head">
-            <span></span><span>이름</span><span>파형</span><span>카테고리</span><span>길이</span><span>포맷</span><span>채널</span><span>태그</span><span></span>
+            <span></span><span>이름</span><span>파형</span><span>카테고리</span><span>길이</span><span>포맷</span><span>채널</span><span>별점</span><span>태그</span><span></span>
           </div>
           <div id="soundList" class="sound-list"></div>
           <div id="emptyState" class="empty-state">
@@ -91,6 +97,11 @@
             <button id="closeSettingsBtn" class="subtle-button">완료</button>
           </div>
           <div id="shortcutList" class="shortcut-list"></div>
+          <div class="library-tools">
+            <h2>라이브러리 관리</h2>
+            <div class="tool-grid"><button id="exportBackupBtn" class="subtle-button">백업 내보내기</button><button id="importBackupBtn" class="subtle-button">백업 복원</button><button id="collectMetadataBtn" class="subtle-button">내장 메타데이터 수집</button><button id="findDuplicatesBtn" class="subtle-button">콘텐츠 중복 검사</button><button id="relinkMissingBtn" class="subtle-button">누락 파일 자동 재연결</button></div>
+            <p id="performanceInfo" class="performance-info"></p>
+          </div>
           <div class="settings-footer">
             <button id="resetShortcutsBtn" class="subtle-button">기본값으로 복원</button>
             <p>추천: 검색 ⌘S · 카테고리 이동 ⌘M · 태그 편집 ⌘T · 실제 삭제 ⌘⌫</p>
@@ -105,6 +116,7 @@
         <label>카테고리 경로<input id="editCategory" list="categoryOptions" placeholder="예: Trains/Horn" /></label>
         <datalist id="categoryOptions"></datalist>
         <label>태그<input id="editTags" placeholder="쉼표로 구분" /></label>
+        <label>별점<div id="inspectorRating" class="inspector-rating"></div></label>
         <label>메모<textarea id="editNotes" rows="4"></textarea></label>
         <div class="facts" id="soundFacts"></div>
         <div class="inspector-actions">
@@ -127,6 +139,7 @@
       </form>
     </div>
     <div id="contextMenu" class="context-menu hidden" role="menu"></div>
+    <div id="resultsDialog" class="dialog-backdrop hidden"><div class="results-dialog"><div class="results-heading"><h2>중복 파일 검사</h2><button id="closeResultsBtn">×</button></div><div id="resultsContent"></div></div></div>
     <div id="scanToast" class="toast hidden"></div>
     <audio id="audioPlayer"></audio>
     <script src="renderer.js"></script>

@@ -37,6 +37,7 @@ const folderWatchers = new Map();
 let watcherTimer;
 let autoScanRunning = false;
 let autoScanPending = false;
+let performanceStats = { storage: 'JSON', loadMs: 0, fileSize: 0, soundCount: 0, sqliteRecommended: false };
 const singleInstanceLock = app.requestSingleInstanceLock();
 
 if (!singleInstanceLock) app.quit();
@@ -67,7 +68,7 @@ function findPython() {
 
 function cleanDb(candidate) {
   return {
-    version: 1,
+    version: 2,
     sounds: Array.isArray(candidate?.sounds) ? candidate.sounds : [],
     categories: Array.isArray(candidate?.categories) ? candidate.categories : [],
     settings: {
@@ -80,6 +81,35 @@ function cleanDb(candidate) {
         : 0.8
     }
   };
+}
+
+function backupDirectory() {
+  return path.join(app.getPath('userData'), 'backups');
+}
+
+function backupFileName(prefix = 'automatic') {
+  return `${prefix}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+}
+
+async function createAutomaticBackup(reason = 'automatic') {
+  if (!dbPath || !fs.existsSync(dbPath)) return null;
+  const directory = backupDirectory();
+  await fsp.mkdir(directory, { recursive: true });
+  const destination = path.join(directory, backupFileName(reason));
+  await fsp.copyFile(dbPath, destination);
+  const backups = (await fsp.readdir(directory, { withFileTypes: true }))
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+    .map((entry) => ({ name: entry.name, path: path.join(directory, entry.name), time: fs.statSync(path.join(directory, entry.name)).mtimeMs }))
+    .sort((a, b) => b.time - a.time);
+  await Promise.all(backups.slice(15).map((item) => fsp.unlink(item.path).catch(() => {})));
+  return destination;
+}
+
+function validateImportedDb(candidate) {
+  if (!candidate || !Array.isArray(candidate.sounds) || !candidate.settings) {
+    throw new Error('올바른 Sound Shelf 백업 파일이 아닙니다.');
+  }
+  return cleanDb(candidate);
 }
 
 function normalizedFsPath(filePath) {
@@ -148,7 +178,9 @@ async function repairDuplicateCategoryFolders() {
 
 async function loadDb() {
   dbPath = path.join(app.getPath('userData'), 'sound-library.json');
+  const startedAt = performance.now();
   try {
+    await createAutomaticBackup('startup').catch((error) => console.error('Automatic backup failed:', error.message));
     db = cleanDb(JSON.parse(await fsp.readFile(dbPath, 'utf8')));
     db.settings.watchedFolders = canonicalizeWatchedFolders(db.settings.watchedFolders);
     await repairDuplicateCategoryFolders();
@@ -166,6 +198,14 @@ async function loadDb() {
     if (error.code !== 'ENOENT') console.error('Could not load library:', error);
     await saveDb();
   }
+  const stat = await fsp.stat(dbPath).catch(() => ({ size: 0 }));
+  performanceStats = {
+    storage: 'JSON',
+    loadMs: Number((performance.now() - startedAt).toFixed(2)),
+    fileSize: Number(stat.size || 0),
+    soundCount: db.sounds.length,
+    sqliteRecommended: db.sounds.length >= 10000 || stat.size >= 20 * 1024 * 1024
+  };
 }
 
 async function saveDb() {
@@ -173,6 +213,10 @@ async function saveDb() {
   const temporary = `${dbPath}.tmp`;
   await fsp.writeFile(temporary, JSON.stringify(db, null, 2), 'utf8');
   await fsp.rename(temporary, dbPath);
+  const stat = await fsp.stat(dbPath).catch(() => ({ size: 0 }));
+  performanceStats.fileSize = Number(stat.size || 0);
+  performanceStats.soundCount = db.sounds.length;
+  performanceStats.sqliteRecommended = db.sounds.length >= 10000 || stat.size >= 20 * 1024 * 1024;
 }
 
 function queueSave() {
@@ -192,7 +236,8 @@ function librarySnapshot() {
       .sort((a, b) => a.localeCompare(b, 'ko')),
     watchedFolders: db.settings.watchedFolders,
     shortcuts: db.settings.shortcuts,
-    previewVolume: db.settings.previewVolume
+    previewVolume: db.settings.previewVolume,
+    performance: { ...performanceStats, soundCount: db.sounds.length }
   };
 }
 
@@ -280,15 +325,24 @@ async function probeAudio(filePath) {
     ], { maxBuffer: 1024 * 1024 * 8 });
     const info = JSON.parse(stdout);
     const audio = info.streams?.find((stream) => stream.codec_type === 'audio') || {};
+    const rawMetadata = { ...(info.format?.tags || {}), ...(audio.tags || {}) };
+    const embeddedMetadata = Object.fromEntries(Object.entries(rawMetadata)
+      .filter(([, value]) => value !== null && value !== undefined && String(value).trim())
+      .map(([key, value]) => [String(key).toLowerCase(), String(value).trim()]));
+    const keywordSource = [embeddedMetadata.keywords, embeddedMetadata.keyword, embeddedMetadata.genre]
+      .filter(Boolean).join(',');
     return {
       duration: Number(info.format?.duration || audio.duration || 0),
       sampleRate: Number(audio.sample_rate || 0),
       channels: Number(audio.channels || 0),
       codec: audio.codec_name || '',
-      bitRate: Number(info.format?.bit_rate || audio.bit_rate || 0)
+      bitRate: Number(info.format?.bit_rate || audio.bit_rate || 0),
+      embeddedMetadata,
+      embeddedTags: [...new Set(keywordSource.split(/[,;]+/).map((tag) => tag.trim()).filter(Boolean))],
+      metadataVersion: 1
     };
   } catch {
-    return { duration: 0, sampleRate: 0, channels: 0, codec: '', bitRate: 0 };
+    return { duration: 0, sampleRate: 0, channels: 0, codec: '', bitRate: 0, embeddedMetadata: {}, embeddedTags: [], metadataVersion: 1 };
   }
 }
 
@@ -369,7 +423,12 @@ async function indexFiles(filePaths, { reportProgress = true, categoryFolders = 
       sampleRate: technical.sampleRate || 0,
       channels: technical.channels || 0,
       codec: technical.codec || '',
-      bitRate: technical.bitRate || 0
+      bitRate: technical.bitRate || 0,
+      embeddedMetadata: technical.embeddedMetadata || current?.embeddedMetadata || {},
+      embeddedTags: technical.embeddedTags || current?.embeddedTags || [],
+      metadataVersion: technical.metadataVersion || current?.metadataVersion || 0,
+      contentHash: needsProbe ? '' : (current?.contentHash || ''),
+      contentHashKey: needsProbe ? '' : (current?.contentHashKey || '')
     };
 
     if (current) {
@@ -587,7 +646,7 @@ async function copyFileIntoCategory(filePath, categoryPath) {
   return destination;
 }
 
-async function moveSoundToFolder(sound, folder, categoryPath) {
+async function moveSoundToFolder(sound, folder, categoryPath, { save = true } = {}) {
   await fsp.mkdir(folder, { recursive: true });
   const destination = path.resolve(path.dirname(sound.path)) === path.resolve(folder)
     ? sound.path
@@ -605,8 +664,18 @@ async function moveSoundToFolder(sound, folder, categoryPath) {
   waveformCache.clear();
   db.categories = [...new Set([...db.categories, sound.categoryPath].filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, 'ko'));
-  await saveDb();
+  if (save) await saveDb();
   return { ...librarySnapshot(), moved: { oldId, id: sound.id, path: destination } };
+}
+
+function hashFile(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    stream.on('error', reject);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
 }
 
 async function createWindow() {
@@ -720,6 +789,176 @@ ipcMain.handle('library:update', async (_event, payload) => {
   db.categories.sort((a, b) => a.localeCompare(b, 'ko'));
   queueSave();
   return librarySnapshot();
+});
+
+ipcMain.handle('library:update-batch', async (_event, { ids, updates, addTags }) => {
+  const selected = new Set(ids || []);
+  const allowed = ['favorite', 'rating'];
+  for (const sound of db.sounds) {
+    if (!selected.has(sound.id)) continue;
+    for (const key of allowed) if (Object.hasOwn(updates || {}, key)) sound[key] = updates[key];
+    if (Array.isArray(addTags)) sound.tags = [...new Set([...(sound.tags || []), ...addTags])];
+  }
+  await saveDb();
+  return librarySnapshot();
+});
+
+ipcMain.handle('library:move-category-batch', async (_event, { ids, category }) => {
+  const categoryParts = normalizeCategoryPath(category).split('/').filter(Boolean);
+  if (!categoryParts.length) throw new Error('카테고리 이름을 입력해 주세요.');
+  const selected = db.sounds.filter((sound) => (ids || []).includes(sound.id));
+  const idChanges = {};
+  for (const sound of selected) {
+    if (!fs.existsSync(sound.path)) continue;
+    const root = watchedRootForFile(sound.path) || db.settings.watchedFolders[0];
+    if (!root) throw new Error('라이브러리 루트 폴더를 찾을 수 없습니다.');
+    const oldId = sound.id;
+    await moveSoundToFolder(sound, path.join(root, ...categoryParts), categoryParts.join('/'), { save: false });
+    idChanges[oldId] = sound.id;
+  }
+  await saveDb();
+  return { ...librarySnapshot(), idChanges };
+});
+
+ipcMain.handle('library:remove-batch', async (_event, { ids, trashFiles }) => {
+  const selected = new Set(ids || []);
+  const removing = db.sounds.filter((sound) => selected.has(sound.id));
+  if (trashFiles) {
+    for (const sound of removing) if (fs.existsSync(sound.path)) await shell.trashItem(sound.path);
+  }
+  db.sounds = db.sounds.filter((sound) => !selected.has(sound.id));
+  waveformCache.clear();
+  await saveDb();
+  return librarySnapshot();
+});
+
+ipcMain.handle('library:backup-export', async () => {
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Sound Shelf 라이브러리 백업',
+    defaultPath: path.join(app.getPath('documents'), `Sound-Shelf-Backup-${new Date().toISOString().slice(0, 10)}.json`),
+    filters: [{ name: 'Sound Shelf Backup', extensions: ['json'] }]
+  });
+  if (result.canceled || !result.filePath) return null;
+  await saveDb();
+  await fsp.copyFile(dbPath, result.filePath);
+  return { ok: true, path: result.filePath };
+});
+
+ipcMain.handle('library:backup-import', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Sound Shelf 백업 복원', properties: ['openFile'],
+    filters: [{ name: 'Sound Shelf Backup', extensions: ['json'] }]
+  });
+  if (result.canceled) return null;
+  const candidate = JSON.parse(await fsp.readFile(result.filePaths[0], 'utf8'));
+  await createAutomaticBackup('before-restore');
+  db = validateImportedDb(candidate);
+  db.settings.watchedFolders = canonicalizeWatchedFolders(db.settings.watchedFolders);
+  db.sounds = deduplicateSoundsByPath(db.sounds);
+  await saveDb();
+  refreshFolderWatchers();
+  return librarySnapshot();
+});
+
+ipcMain.handle('library:collect-metadata', async () => {
+  let updated = 0;
+  const existing = db.sounds.filter((sound) => fs.existsSync(sound.path) && sound.metadataVersion !== 1);
+  for (let index = 0; index < existing.length; index += 1) {
+    const sound = existing[index];
+    const metadata = await probeAudio(sound.path);
+    Object.assign(sound, metadata);
+    updated += 1;
+    if (index % 5 === 0 || index === existing.length - 1) {
+      mainWindow?.webContents.send('scan-progress', { current: index + 1, total: existing.length, fileName: sound.fileName });
+    }
+  }
+  await saveDb();
+  return { ...librarySnapshot(), metadataResult: { updated } };
+});
+
+ipcMain.handle('library:find-duplicates', async () => {
+  const sizeGroups = new Map();
+  for (const sound of db.sounds) {
+    if (sound.missing || !fs.existsSync(sound.path) || !sound.size) continue;
+    if (!sizeGroups.has(sound.size)) sizeGroups.set(sound.size, []);
+    sizeGroups.get(sound.size).push(sound);
+  }
+  const candidates = [...sizeGroups.values()].filter((group) => group.length > 1).flat();
+  for (let index = 0; index < candidates.length; index += 1) {
+    const sound = candidates[index];
+    const key = `${sound.size}:${sound.modifiedAt}`;
+    if (!sound.contentHash || sound.contentHashKey !== key) {
+      sound.contentHash = await hashFile(sound.path);
+      sound.contentHashKey = key;
+    }
+    if (index % 3 === 0 || index === candidates.length - 1) {
+      mainWindow?.webContents.send('scan-progress', { current: index + 1, total: candidates.length, fileName: sound.fileName });
+    }
+  }
+  const hashes = new Map();
+  for (const sound of candidates) {
+    if (!sound.contentHash) continue;
+    if (!hashes.has(sound.contentHash)) hashes.set(sound.contentHash, []);
+    hashes.get(sound.contentHash).push(publicSound(sound));
+  }
+  await saveDb();
+  const groups = [...hashes.values()].filter((group) => group.length > 1);
+  return { groups, checked: candidates.length };
+});
+
+ipcMain.handle('library:relink-missing', async () => {
+  const missing = db.sounds.filter((sound) => !fs.existsSync(sound.path));
+  const allFiles = (await Promise.all(db.settings.watchedFolders.map(walkAudioFiles))).flat();
+  const candidates = new Map();
+  for (const filePath of allFiles) {
+    const stat = await fsp.stat(filePath).catch(() => null);
+    if (!stat) continue;
+    const key = `${path.basename(filePath).normalize('NFC').toLocaleLowerCase('ko')}:${stat.size}`;
+    if (!candidates.has(key)) candidates.set(key, []);
+    candidates.get(key).push(filePath);
+  }
+  const idChanges = {};
+  let relinked = 0;
+  for (const sound of missing) {
+    const key = `${path.basename(sound.path).normalize('NFC').toLocaleLowerCase('ko')}:${sound.size}`;
+    const matches = candidates.get(key) || [];
+    if (matches.length !== 1) continue;
+    const oldId = sound.id;
+    sound.path = matches[0];
+    sound.fileName = path.basename(matches[0]);
+    sound.id = stableId(matches[0]);
+    sound.categoryPath = inferCategoryPath(matches[0]);
+    sound.category = sound.categoryPath.split('/').pop();
+    idChanges[oldId] = sound.id;
+    relinked += 1;
+  }
+  db.sounds = deduplicateSoundsByPath(db.sounds);
+  await saveDb();
+  return { ...librarySnapshot(), idChanges, relinkResult: { missing: missing.length, relinked, unresolved: missing.length - relinked } };
+});
+
+ipcMain.handle('library:relink-one', async (_event, id) => {
+  const sound = db.sounds.find((item) => item.id === id);
+  if (!sound) throw new Error('재연결할 항목을 찾을 수 없습니다.');
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: `“${sound.title}” 원본 파일 재연결`, properties: ['openFile'],
+    filters: [{ name: 'Audio', extensions: [...AUDIO_EXTENSIONS].map((ext) => ext.slice(1)) }]
+  });
+  if (result.canceled) return null;
+  const filePath = result.filePaths[0];
+  const stat = await fsp.stat(filePath);
+  const oldId = sound.id;
+  sound.path = filePath;
+  sound.fileName = path.basename(filePath);
+  sound.id = stableId(filePath);
+  sound.size = stat.size;
+  sound.modifiedAt = stat.mtimeMs;
+  sound.categoryPath = inferCategoryPath(filePath);
+  sound.category = sound.categoryPath.split('/').pop();
+  Object.assign(sound, await probeAudio(filePath));
+  db.sounds = deduplicateSoundsByPath(db.sounds);
+  await saveDb();
+  return { ...librarySnapshot(), idChanges: { [oldId]: sound.id } };
 });
 
 ipcMain.handle('library:move-folder', async (_event, id) => {
