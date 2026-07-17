@@ -37,6 +37,15 @@ const folderWatchers = new Map();
 let watcherTimer;
 let autoScanRunning = false;
 let autoScanPending = false;
+const singleInstanceLock = app.requestSingleInstanceLock();
+
+if (!singleInstanceLock) app.quit();
+else app.on('second-instance', () => {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+});
 
 function findMediaTool(name) {
   const candidates = [
@@ -473,6 +482,21 @@ async function moveFile(source, destination) {
   }
 }
 
+function isTrashPath(filePath) {
+  return normalizedFsPath(filePath).split(path.sep)
+    .some((part) => ['.Trash', '.Trashes', '$RECYCLE.BIN'].includes(part));
+}
+
+async function moveDirectory(source, destination) {
+  try {
+    await fsp.rename(source, destination);
+  } catch (error) {
+    if (error.code !== 'EXDEV') throw error;
+    await fsp.cp(source, destination, { recursive: true, errorOnExist: true, force: false });
+    await fsp.rm(source, { recursive: true, force: false });
+  }
+}
+
 function watchedRootForFile(filePath) {
   const absolute = normalizedFsPath(filePath);
   return [...db.settings.watchedFolders]
@@ -613,7 +637,7 @@ async function createWindow() {
   });
 }
 
-app.whenReady().then(async () => {
+if (singleInstanceLock) app.whenReady().then(async () => {
   await loadDb();
   await pruneWaveformDiskCache();
   await createWindow();
@@ -649,6 +673,9 @@ ipcMain.handle('library:add-paths', async (_event, paths) => {
   const files = [];
   for (const itemPath of [...new Set(paths || [])]) {
     const stat = await fsp.stat(itemPath).catch(() => null);
+    if (stat && isTrashPath(itemPath)) {
+      throw new Error('휴지통 파일은 왼쪽의 원하는 카테고리 또는 선택한 카테고리 화면에 놓아주세요.');
+    }
     if (stat?.isDirectory()) {
       if (!db.settings.watchedFolders.includes(itemPath)) db.settings.watchedFolders.push(itemPath);
       files.push(...await walkAudioFiles(itemPath));
@@ -812,15 +839,20 @@ ipcMain.handle('category:drop-paths', async (_event, { category, paths }) => {
         snapshot = await moveCategoryDirectory(sourceCategory, targetCategory);
       } else {
         const destination = uniqueDestination(targetFolder, path.basename(itemPath));
-        await fsp.cp(itemPath, destination, { recursive: true, errorOnExist: true, force: false });
+        if (isTrashPath(itemPath)) await moveDirectory(itemPath, destination);
+        else await fsp.cp(itemPath, destination, { recursive: true, errorOnExist: true, force: false });
         needsRescan = true;
       }
       continue;
     }
     if (!stat.isFile() || !AUDIO_EXTENSIONS.has(path.extname(itemPath).toLowerCase())) continue;
-    const existing = db.sounds.find((sound) => path.resolve(sound.path) === path.resolve(itemPath));
+    const existing = db.sounds.find((sound) => normalizedFsPath(sound.path) === normalizedFsPath(itemPath));
     if (existing) snapshot = await moveSoundToFolder(existing, targetFolder, targetCategory);
-    else copiedFiles.push(await copyFileIntoCategory(itemPath, targetCategory));
+    else if (isTrashPath(itemPath)) {
+      const destination = uniqueDestination(targetFolder, path.basename(itemPath));
+      await moveFile(itemPath, destination);
+      copiedFiles.push(destination);
+    } else copiedFiles.push(await copyFileIntoCategory(itemPath, targetCategory));
   }
   if (copiedFiles.length) snapshot = await indexFiles(copiedFiles);
   if (needsRescan) snapshot = await rescanWatchedFolders({ reportProgress: false });

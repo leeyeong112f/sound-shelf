@@ -1044,7 +1044,9 @@ document.addEventListener('dragover', (event) => {
   if (!event.dataTransfer?.types.includes('Files')) return;
   event.preventDefault();
   document.querySelectorAll('.category-tree-row.drag-over').forEach((row) => row.classList.remove('drag-over'));
-  event.target.closest('[data-category-row]')?.classList.add('drag-over');
+  const categoryRow = event.target.closest('[data-category-row]');
+  categoryRow?.classList.add('drag-over');
+  if (categoryRow || state.filter.startsWith('category:')) event.dataTransfer.dropEffect = 'move';
 });
 document.addEventListener('dragleave', () => {
   dragDepth = Math.max(0, dragDepth - 1);
@@ -1058,10 +1060,12 @@ document.addEventListener('drop', async (event) => {
   const files = [...(event.dataTransfer?.files || [])];
   if (!files.length) return;
   const categoryRow = event.target.closest('[data-category-row]');
-  if (categoryRow) {
-    showToast(`“${categoryRow.dataset.categoryRow}” 폴더로 이동하는 중…`, 10000);
+  const selectedCategory = state.filter.startsWith('category:') ? state.filter.slice('category:'.length) : '';
+  const dropCategory = categoryRow?.dataset.categoryRow || selectedCategory;
+  if (dropCategory) {
+    showToast(`“${dropCategory}” 폴더로 이동하는 중…`, 10000);
     try {
-      setLibrary(await window.soundLibrary.dropFilesToCategory(categoryRow.dataset.categoryRow, files));
+      setLibrary(await window.soundLibrary.dropFilesToCategory(dropCategory, files));
       showToast('파일 또는 폴더를 이동했습니다.');
     } catch (error) {
       showToast(`이동 실패: ${error.message}`, 5000);
@@ -1069,8 +1073,12 @@ document.addEventListener('drop', async (event) => {
     return;
   }
   showToast('드롭한 사운드를 추가하는 중…', 10000);
-  setLibrary(await window.soundLibrary.addDroppedFiles(files));
-  showToast('사운드를 라이브러리에 추가했습니다.');
+  try {
+    setLibrary(await window.soundLibrary.addDroppedFiles(files));
+    showToast('사운드를 라이브러리에 추가했습니다.');
+  } catch (error) {
+    showToast(`추가 실패: ${error.message}`, 5000);
+  }
 });
 
 player.addEventListener('play', () => {
