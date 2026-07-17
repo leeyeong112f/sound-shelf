@@ -1899,6 +1899,7 @@ window.soundLibrary.onLibraryUpdated((snapshot) => {
   if (snapshot.updateReason === 'folder-change') showToast('폴더 변경 사항을 자동으로 반영했습니다.', 1800);
   if (snapshot.updateReason === 'startup') showToast('사운드 라이브러리를 불러왔습니다.', 1800);
   if (snapshot.updateReason === 'vault-cached') showToast('저장된 목록을 표시했습니다. 폴더 동기화는 백그라운드에서 계속됩니다.', 2500);
+  if (snapshot.updateReason === 'remote-sync') showToast('다른 Mac의 변경 사항을 반영했습니다.', 2000);
 });
 window.soundLibrary.onDragError((message) => showToast(`드래그를 시작하지 못했습니다: ${message}`, 4000));
 window.soundLibrary.onShortcut((shortcut) => {

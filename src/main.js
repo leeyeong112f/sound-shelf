@@ -280,6 +280,8 @@ function editSignature(sounds) {
 
 function applyMergedState(merged) {
   const before = editSignature(db.sounds.map(portableSound).filter(Boolean));
+  const beforeOrder = JSON.stringify(db.categoryOrder || []);
+  const beforeVolume = db.settings.previewVolume;
   const cacheById = new Map((vaultStorage?.cachedSounds() || []).map((item) => [item.id, item]));
   const hydrated = merged.sounds
     .filter((sound) => sound?.relativePath)
@@ -290,7 +292,10 @@ function applyMergedState(merged) {
   db.categories = [...new Set(db.sounds.map((sound) => sound.categoryPath).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, 'ko'));
   syncBaseline = new Map(merged.sounds.map((sound) => [sound.id, sound]));
-  return before !== editSignature(db.sounds.map(portableSound).filter(Boolean));
+  const soundsChanged = before !== editSignature(db.sounds.map(portableSound).filter(Boolean));
+  const orderChanged = beforeOrder !== JSON.stringify(db.categoryOrder || []);
+  const volumeChanged = beforeVolume !== db.settings.previewVolume;
+  return soundsChanged || orderChanged || volumeChanged;
 }
 
 async function activateVaultNow(rootPath, { legacySounds = [], legacyCategoryOrder = db.categoryOrder || [], preserveSettings = true } = {}) {
@@ -912,6 +917,48 @@ function scheduleAutoRescan(reason = 'folder-change', changedPath = '') {
   watcherTimer = setTimeout(() => runAutoRescan(reason), 900);
 }
 
+// fs.watch 를 쓰지 않는 이유: Google Drive 가상 파일시스템이 macOS FSEvents 를
+// 제대로 발생시키는지 보장할 수 없다. mtime 폴링은 확실히 동작하고, Drive 자체의
+// 내려받기 지연이 훨씬 크므로 7초면 충분하다.
+async function pollRemoteEdits() {
+  if (startupLoading || !vaultStorage || !activeVault) return;
+  if (!fs.existsSync(activeVault.root)) return;
+  const stamps = await vaultStorage.editFileStamps(db.settings.machineId).catch(() => null);
+  if (!stamps) return;
+  const fingerprint = JSON.stringify(stamps);
+  if (fingerprint === lastEditStamps) return;
+  lastEditStamps = fingerprint;
+
+  const [portableMetadata, savedFolderOrder, editSources] = await Promise.all([
+    vaultStorage.loadMetadata(),
+    vaultStorage.loadFolderOrder(),
+    vaultStorage.loadEditSources()
+  ]);
+  const merged = mergeVaultState(
+    { sounds: portableMetadata.sounds, folderOrder: savedFolderOrder },
+    editSources
+  );
+  const changed = applyMergedState(merged);
+  if (!changed) return;
+  mainWindow?.webContents.send('library-updated', { ...librarySnapshot(), updateReason: 'remote-sync' });
+}
+
+function startSyncPolling() {
+  stopSyncPolling();
+  syncPollTimer = setInterval(() => {
+    // 볼트 활성화 큐에 얹어 스캔과 병합이 겹치지 않게 직렬화한다.
+    vaultActivationQueue = vaultActivationQueue
+      .catch(() => {})
+      .then(() => pollRemoteEdits())
+      .catch((error) => console.error('Remote sync poll failed:', error));
+  }, SYNC_POLL_MS);
+}
+
+function stopSyncPolling() {
+  clearInterval(syncPollTimer);
+  syncPollTimer = null;
+}
+
 function refreshFolderWatchers() {
   const watched = new Set(db.settings.watchedFolders.map((folder) => path.resolve(folder)));
   for (const [folder, watcher] of folderWatchers) {
@@ -1202,6 +1249,7 @@ if (singleInstanceLock) app.whenReady().then(async () => {
   } finally {
     startupLoading = false;
     refreshFolderWatchers();
+    startSyncPolling();
     mainWindow?.webContents.send('library-updated', { ...librarySnapshot(), updateReason: 'startup' });
   }
 });
@@ -1213,6 +1261,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   clearTimeout(updateStartupTimer);
   clearInterval(updateCheckTimer);
+  stopSyncPolling();
   clearTimeout(watcherTimer);
   for (const watcher of folderWatchers.values()) watcher.close();
   folderWatchers.clear();
