@@ -7,7 +7,9 @@ const { pathToFileURL } = require('node:url');
 const crypto = require('node:crypto');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
+const os = require('node:os');
 const { VaultStorage, normalizedRelativePath, relativePathInside, writeJsonAtomic } = require('./vault-storage');
+const { mergeVaultState } = require('./vault-sync');
 
 const execFileAsync = promisify(execFile);
 const AUDIO_EXTENSIONS = new Set([
@@ -31,7 +33,7 @@ const DEFAULT_SHORTCUTS = {
 
 let mainWindow;
 let dbPath;
-let db = { version: 1, sounds: [], categories: [], categoryOrder: [], settings: { watchedFolders: [], shortcuts: { ...DEFAULT_SHORTCUTS }, previewVolume: 0.8 } };
+let db = { version: 1, sounds: [], categories: [], categoryOrder: [], settings: { watchedFolders: [], shortcuts: { ...DEFAULT_SHORTCUTS }, previewVolume: 0.8, machineId: '' } };
 let vaultStorage = null;
 let activeVault = null;
 let saveTimer;
@@ -51,6 +53,11 @@ let autoScanPending = false;
 const pendingScanFolders = new Set();
 let lastFullScanAt = 0;
 let startupLoading = true;
+let syncBaseline = new Map();
+let ownEdits = { sounds: {}, folderOrder: null, settings: null };
+let lastEditStamps = '';
+let syncPollTimer;
+const SYNC_POLL_MS = 7000;
 let performanceStats = { storage: '볼트 + 로컬 SQLite 캐시', loadMs: 0, fileSize: 0, soundCount: 0, sqliteRecommended: false };
 const singleInstanceLock = app.requestSingleInstanceLock();
 
@@ -102,7 +109,10 @@ function cleanDb(candidate) {
         ? Math.max(0, Math.min(1, Number(candidate.settings.previewVolume)))
         : 0.8,
       currentVaultRoot: candidate?.settings?.currentVaultRoot || candidate?.settings?.watchedFolders?.[0] || '',
-      currentVaultId: candidate?.settings?.currentVaultId || ''
+      currentVaultId: candidate?.settings?.currentVaultId || '',
+      // 이 Mac만의 ID. 볼트에 저장하면 동기화되어 두 Mac이 같은 ID를 갖게 되므로
+      // 반드시 로컬 userData에만 둔다.
+      machineId: candidate?.settings?.machineId || crypto.randomUUID()
     }
   };
 }
@@ -272,7 +282,8 @@ async function activateVaultNow(rootPath, { legacySounds = [], legacyCategoryOrd
     previewVolume: Number.isFinite(Number(previousSettings.previewVolume)) ? Number(previousSettings.previewVolume) : 0.8,
     watchedFolders: [root],
     currentVaultRoot: root,
-    currentVaultId: activeVault.id
+    currentVaultId: activeVault.id,
+    machineId: previousSettings.machineId || crypto.randomUUID()
   };
   const [portableMetadata, savedFolderOrder] = await Promise.all([
     vaultStorage.loadMetadata(),
@@ -388,17 +399,58 @@ async function loadDb() {
   };
 }
 
+const EDITABLE_FIELDS = ['relativePath', 'fileName', 'title', 'tags', 'notes', 'favorite', 'rating', 'createdAt', 'modifiedAt', 'size', 'contentHash', 'keyAnalysis'];
+
+function sameSound(left, right) {
+  if (!left || !right) return false;
+  return EDITABLE_FIELDS.every((field) => JSON.stringify(left[field] ?? null) === JSON.stringify(right[field] ?? null));
+}
+
+// saveDb 호출 지점이 코드 전역에 30곳 있다. 각 편집 지점에서 손으로 updatedAt을
+// 찍게 하면 하나만 빠뜨려도 그 편집이 조용히 동기화되지 않는다. 대신 저장 시점에
+// 베이스라인과 비교해 달라진 것만 골라낸다. 누락이 원천적으로 불가능하다.
+function collectLocalEdits() {
+  const now = Date.now();
+  const current = new Map();
+  for (const sound of db.sounds.map(portableSound).filter(Boolean)) current.set(sound.id, sound);
+
+  for (const [id, sound] of current) {
+    const baseline = syncBaseline.get(id);
+    if (baseline && !baseline.deleted && sameSound(baseline, sound)) continue;
+    ownEdits.sounds[id] = { ...sound, updatedAt: now };
+  }
+
+  for (const [id, baseline] of syncBaseline) {
+    if (current.has(id) || baseline.deleted) continue;
+    ownEdits.sounds[id] = { updatedAt: now, deleted: true };
+  }
+
+  const order = [...new Set(db.categoryOrder || [])];
+  if (JSON.stringify(order) !== JSON.stringify(ownEdits.folderOrder?.order || null)) {
+    ownEdits.folderOrder = { updatedAt: now, order };
+  }
+
+  const volume = Number(db.settings.previewVolume);
+  if (Number.isFinite(volume) && volume !== ownEdits.settings?.previewVolume) {
+    ownEdits.settings = { updatedAt: now, previewVolume: volume };
+  }
+
+  syncBaseline = new Map([...current].map(([id, sound]) => [id, { ...sound, updatedAt: ownEdits.sounds[id]?.updatedAt ?? syncBaseline.get(id)?.updatedAt ?? 0 }]));
+  for (const [id, record] of Object.entries(ownEdits.sounds)) {
+    if (record.deleted) syncBaseline.set(id, { id, deleted: true, updatedAt: record.updatedAt });
+  }
+}
+
 async function saveDb() {
   if (vaultStorage && activeVault) {
     for (const sound of db.sounds) {
       const relativePath = soundRelativePath(sound.path);
       if (relativePath) sound.relativePath = relativePath;
     }
-    const portableSounds = db.sounds.map(portableSound).filter(Boolean);
-    await Promise.all([
-      vaultStorage.saveMetadata(portableSounds),
-      vaultStorage.saveFolderOrder(db.categoryOrder || [])
-    ]);
+    collectLocalEdits();
+    // 볼트에는 내 편집 파일 하나만 쓴다. metadata.json / folder-order.json /
+    // vault.json 은 공유 파일이므로 정상 경로에서 건드리지 않는다.
+    await vaultStorage.saveEdits(db.settings.machineId, os.hostname(), ownEdits);
     vaultStorage.replaceTechnicalCache(db.sounds.filter((sound) => sound.relativePath));
   }
   await fsp.mkdir(path.dirname(dbPath), { recursive: true });
