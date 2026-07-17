@@ -27,7 +27,7 @@ nav { display: grid; gap: 4px; }
 .section-label { margin: 24px 10px 8px; color: #666c78; font-size: 11px; font-weight: 800; letter-spacing: .1em; }
 .sidebar-groups { min-height: 0; overflow: auto; }
 .category-list { display: grid; align-content: start; gap: 2px; }
-.category-tree-row { min-height: 34px; display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; padding: 0 8px 0 calc(3px + var(--tree-depth) * 17px); border-radius: 7px; color: #c7cad0; }
+.category-tree-row { min-height: 34px; display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; padding: 0 8px 0 calc(3px + var(--tree-indent, 0px)); border-radius: 7px; color: #c7cad0; }
 .category-tree-row:hover, .category-tree-row.active { background: #242830; color: white; }
 .category-tree-row.drag-over { background: #315f5b; box-shadow: inset 0 0 0 1px #57d5ca; }
 .category-tree-row.active .tree-label { color: var(--accent); }
