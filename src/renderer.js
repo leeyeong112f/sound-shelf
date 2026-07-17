@@ -2,7 +2,7 @@ const DEFAULT_SHORTCUTS = {
   search: 'Meta+S', moveCategory: 'Meta+M', editTags: 'Meta+T', addFiles: 'Meta+O',
   addFolder: 'Meta+Shift+O', trash: 'Meta+Backspace', reveal: 'Meta+Shift+R',
   favorite: 'Meta+Shift+F', settings: 'Meta+Comma', playPause: 'Space',
-  insertResolve: 'Meta+F'
+  insertResolve: 'Meta+F', newSubfolder: 'Meta+Shift+N'
 };
 const SHORTCUT_LABELS = {
   search: ['사운드 검색', '검색창으로 이동'],
@@ -15,7 +15,8 @@ const SHORTCUT_LABELS = {
   favorite: ['즐겨찾기 전환', '선택 사운드 별표 켜기/끄기'],
   settings: ['단축키 설정', '이 설정 화면 열기'],
   playPause: ['재생/일시정지', '선택 사운드 미리 듣기'],
-  insertResolve: ['Fairlight로 보내기', '선택 사운드(구간 선택 시 그 구간만)를 Resolve 타임헤드에 삽입']
+  insertResolve: ['Fairlight로 보내기', '선택 사운드(구간 선택 시 그 구간만)를 Resolve 타임헤드에 삽입'],
+  newSubfolder: ['새 하위 폴더', '현재 보고 있는 카테고리 안에 새 폴더 생성']
 };
 
 const state = {
@@ -885,6 +886,10 @@ async function runShortcut(action) {
   else if (action === 'settings') openSettings();
   else if (action === 'playPause') toggleSelectedPlayback();
   else if (action === 'insertResolve') await insertSelectedIntoResolve();
+  else if (action === 'newSubfolder') {
+    const parent = state.filter.startsWith('category:') ? state.filter.slice(9) : '미분류';
+    await createSubfolder(parent);
+  }
 }
 
 function actionForShortcut(shortcut) {

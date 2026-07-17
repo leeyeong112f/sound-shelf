@@ -21,7 +21,8 @@ const DEFAULT_SHORTCUTS = {
   favorite: 'Meta+Shift+F',
   settings: 'Meta+Comma',
   playPause: 'Space',
-  insertResolve: 'Meta+F'
+  insertResolve: 'Meta+F',
+  newSubfolder: 'Meta+Shift+N'
 };
 
 let mainWindow;
