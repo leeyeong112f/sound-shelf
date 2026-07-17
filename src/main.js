@@ -162,6 +162,15 @@ function normalizedFsPath(filePath) {
   return path.resolve(filePath).normalize('NFC');
 }
 
+function normalizedAudioBaseName(value) {
+  const fileName = path.basename(String(value || '')).normalize('NFKC').trim();
+  const extension = path.extname(fileName);
+  const baseName = AUDIO_EXTENSIONS.has(extension.toLowerCase())
+    ? fileName.slice(0, -extension.length)
+    : fileName;
+  return baseName.replace(/\s+/g, ' ').trim().toLocaleLowerCase('ko');
+}
+
 function canonicalizeWatchedFolders(folders) {
   const unique = [...new Map((folders || []).map((folder) => [normalizedFsPath(folder), path.resolve(folder)])).values()];
   return unique.sort((a, b) => normalizedFsPath(a).length - normalizedFsPath(b).length).filter((folder, index, sorted) => {
@@ -681,6 +690,24 @@ async function walkAudioFiles(rootPath) {
     }
   }
   return results;
+}
+
+async function findDuplicateAudioName(name, currentPath) {
+  const targetName = normalizedAudioBaseName(name);
+  const currentNormalizedPath = normalizedFsPath(currentPath);
+  const indexedMatch = db.sounds.find((sound) => {
+    if (!sound?.path || !fs.existsSync(sound.path)) return false;
+    if (normalizedFsPath(sound.path) === currentNormalizedPath) return false;
+    return normalizedAudioBaseName(sound.fileName || sound.path || sound.title) === targetName;
+  });
+  if (indexedMatch) return indexedMatch.path;
+
+  const roots = [...new Set((db.settings.watchedFolders || [])
+    .map((folder) => path.resolve(folder))
+    .filter((folder) => fs.existsSync(folder)))];
+  const physicalFiles = (await Promise.all(roots.map(walkAudioFiles))).flat();
+  return physicalFiles.find((filePath) => normalizedFsPath(filePath) !== currentNormalizedPath
+    && normalizedAudioBaseName(filePath) === targetName) || null;
 }
 
 async function walkCategoryFolders(rootPath) {
@@ -1451,6 +1478,14 @@ ipcMain.handle('library:rename', async (_event, { id, name }) => {
   if (!sound || !fs.existsSync(sound.path)) throw new Error('이름을 바꿀 원본 파일을 찾을 수 없습니다.');
   const safeName = String(name || '').trim().replace(/[\\/:*?"<>|]/g, '-').replace(/^\.+/, '').trim();
   if (!safeName) throw new Error('새 사운드 이름을 입력해 주세요.');
+  const duplicatePath = await findDuplicateAudioName(safeName, sound.path);
+  if (duplicatePath) {
+    const root = activeVaultRoot();
+    const relativePath = root && relativePathInside(root, duplicatePath) !== null
+      ? path.relative(root, duplicatePath).split(path.sep).join('/')
+      : duplicatePath;
+    throw new Error(`같은 이름의 사운드가 이미 있습니다: ${relativePath}`);
+  }
   const extension = path.extname(sound.path);
   const destination = path.join(path.dirname(sound.path), `${safeName}${extension}`);
   const oldId = sound.id;
