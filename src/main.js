@@ -270,6 +270,29 @@ function activateVault(rootPath, options) {
   return run;
 }
 
+// 변경 여부는 id 목록이 아니라 사용자 편집 필드까지 비교해야 한다. 태그만 바뀌고
+// 목록 구성이 그대로인 경우가 이 기능의 주 사용 사례이기 때문이다.
+function editSignature(sounds) {
+  return JSON.stringify(sounds
+    .map((sound) => [sound.id, sound.title, sound.tags, sound.notes, sound.favorite, sound.rating])
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
+}
+
+function applyMergedState(merged) {
+  const before = editSignature(db.sounds.map(portableSound).filter(Boolean));
+  const cacheById = new Map((vaultStorage?.cachedSounds() || []).map((item) => [item.id, item]));
+  const hydrated = merged.sounds
+    .filter((sound) => sound?.relativePath)
+    .map((sound) => hydratePortableSound(sound, cacheById.get(sound.id), activeVault.root));
+  db.sounds = deduplicateSoundsByPath(hydrated);
+  if (merged.folderOrder.length) db.categoryOrder = merged.folderOrder;
+  if (merged.previewVolume !== null) db.settings.previewVolume = merged.previewVolume;
+  db.categories = [...new Set(db.sounds.map((sound) => sound.categoryPath).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'ko'));
+  syncBaseline = new Map(merged.sounds.map((sound) => [sound.id, sound]));
+  return before !== editSignature(db.sounds.map(portableSound).filter(Boolean));
+}
+
 async function activateVaultNow(rootPath, { legacySounds = [], legacyCategoryOrder = db.categoryOrder || [], preserveSettings = true } = {}) {
   const root = path.resolve(rootPath);
   const previousSettings = preserveSettings ? { ...db.settings } : {};
@@ -285,14 +308,27 @@ async function activateVaultNow(rootPath, { legacySounds = [], legacyCategoryOrd
     currentVaultId: activeVault.id,
     machineId: previousSettings.machineId || crypto.randomUUID()
   };
-  const [portableMetadata, savedFolderOrder] = await Promise.all([
+  const [portableMetadata, savedFolderOrder, editSources] = await Promise.all([
     vaultStorage.loadMetadata(),
-    vaultStorage.loadFolderOrder()
+    vaultStorage.loadFolderOrder(),
+    vaultStorage.loadEditSources()
   ]);
+  const merged = mergeVaultState(
+    { sounds: portableMetadata.sounds, folderOrder: savedFolderOrder },
+    editSources
+  );
+  // 내 편집 파일의 내용을 메모리로 되살린다. 이걸 하지 않으면 다음 saveDb에서
+  // 내 과거 편집이 담긴 파일을 빈 내용으로 덮어써 유실된다.
+  const mine = editSources.find((source) => source.machineId === db.settings.machineId);
+  ownEdits = {
+    sounds: mine?.sounds ? { ...mine.sounds } : {},
+    folderOrder: mine?.folderOrder || null,
+    settings: mine?.settings || null
+  };
   const cached = vaultStorage.cachedSounds();
   const cacheById = new Map(cached.map((sound) => [sound.id, sound]));
   const cacheByRelativePath = new Map(cached.map((sound) => [normalizedRelativePath(sound.relativePath), sound]));
-  const hydrated = portableMetadata.sounds
+  const hydrated = merged.sounds
     .filter((sound) => sound?.relativePath)
     .map((sound) => hydratePortableSound(
       sound,
@@ -331,7 +367,9 @@ async function activateVaultNow(rootPath, { legacySounds = [], legacyCategoryOrd
   }
 
   db.sounds = deduplicateSoundsByPath(hydrated);
-  db.categoryOrder = savedFolderOrder.length ? savedFolderOrder : legacyCategoryOrder;
+  db.categoryOrder = merged.folderOrder.length ? merged.folderOrder : legacyCategoryOrder;
+  if (merged.previewVolume !== null) db.settings.previewVolume = merged.previewVolume;
+  syncBaseline = new Map(merged.sounds.map((sound) => [sound.id, sound]));
   db.categories = [...new Set(db.sounds.map((sound) => sound.categoryPath).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, 'ko'));
   // Show the cached library right away — the folder repair and full rescan
@@ -1443,7 +1481,14 @@ ipcMain.handle('library:backup-export', async () => {
       type: 'sound-shelf-portable-backup',
       schemaVersion: 1,
       vault: { id: activeVault.id, name: activeVault.name },
-      metadata: await vaultStorage.loadMetadata(),
+      metadata: {
+        type: 'sound-shelf-metadata',
+        schemaVersion: 1,
+        vaultId: activeVault.id,
+        updatedAt: new Date().toISOString(),
+        // 편집 내용이 빠진 백업은 쓸모가 없다. 병합된 현재 상태를 쓴다.
+        sounds: db.sounds.map(portableSound).filter(Boolean)
+      },
       folderOrder: await vaultStorage.loadFolderOrder(),
       createdAt: new Date().toISOString()
     });
@@ -1463,7 +1508,7 @@ ipcMain.handle('library:backup-import', async () => {
   await createAutomaticBackup('before-restore');
   if (candidate.type === 'sound-shelf-portable-backup' && candidate.metadata?.sounds && vaultStorage) {
     await vaultStorage.backupPortableMetadata('before-restore');
-    await vaultStorage.saveMetadata(candidate.metadata.sounds);
+    await vaultStorage.overwriteBaseMetadata(candidate.metadata.sounds);
     await vaultStorage.saveFolderOrder(candidate.folderOrder || []);
     return activateVault(activeVaultRoot(), { legacySounds: [] });
   }
