@@ -719,24 +719,68 @@ async function updateSelected(changes) {
   saveDebounce = setTimeout(async () => setLibrary(await window.soundLibrary.updateSound({ id: sound.id, ...changes })), 250);
 }
 
-function openInputDialog({ title, description, value = '', placeholder = '', options = [], confirmWithShiftSpace = false }) {
+function openInputDialog({
+  title,
+  description,
+  value = '',
+  placeholder = '',
+  options = [],
+  suggestions = [],
+  confirmWithShiftSpace = false
+}) {
   return new Promise((resolve) => {
     const backdrop = $('#inputDialog');
+    const form = $('#inputDialogForm');
     const field = $('#inputDialogField');
+    const suggestionsPanel = $('#inputDialogSuggestions');
     $('#inputDialogTitle').textContent = title;
     $('#inputDialogDescription').textContent = description;
     field.value = value;
     field.placeholder = placeholder;
     $('#inputDialogOptions').innerHTML = options.map((option) => `<option value="${escapeHtml(option)}"></option>`).join('');
     field.setAttribute('list', options.length ? 'inputDialogOptions' : '');
+    form.classList.toggle('has-suggestions', suggestions.length > 0);
+    const normalizeSuggestion = (text) => String(text || '').normalize('NFKC')
+      .replace(/\s+/g, ' ').trim().toLocaleLowerCase('ko');
+    const searchableSuggestions = suggestions.map((item) => ({
+      ...item,
+      normalizedName: normalizeSuggestion(item.name)
+    }));
+    const renderSuggestions = () => {
+      const query = normalizeSuggestion(field.value);
+      if (!suggestions.length || !query) {
+        suggestionsPanel.innerHTML = '';
+        suggestionsPanel.classList.add('hidden');
+        return;
+      }
+      const matches = searchableSuggestions
+        .filter((item) => item.normalizedName.includes(query))
+        .sort((left, right) => {
+          const prefixDifference = Number(!left.normalizedName.startsWith(query)) - Number(!right.normalizedName.startsWith(query));
+          return prefixDifference || left.name.localeCompare(right.name, 'ko');
+        });
+      suggestionsPanel.classList.remove('hidden');
+      if (!matches.length) {
+        suggestionsPanel.innerHTML = '<div class="input-dialog-suggestion-empty">이 키워드가 포함된 기존 사운드가 없습니다.</div>';
+        return;
+      }
+      const visible = matches.slice(0, 8);
+      suggestionsPanel.innerHTML = `
+        <div class="input-dialog-suggestion-summary">기존 이름 ${matches.length}개${matches.length > visible.length ? ` · 상위 ${visible.length}개 표시` : ''}</div>
+        ${visible.map((item) => `<div class="input-dialog-suggestion${item.missing ? ' missing' : ''}"><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.category || '미분류')}</span></div>`).join('')}`;
+    };
     backdrop.classList.remove('hidden');
-    requestAnimationFrame(() => { field.focus(); field.select(); });
+    requestAnimationFrame(() => { field.focus(); field.select(); renderSuggestions(); });
     let settled = false;
     const finish = (result) => {
       if (settled) return;
       settled = true;
       backdrop.classList.add('hidden');
-      $('#inputDialogForm').removeEventListener('submit', submit);
+      suggestionsPanel.classList.add('hidden');
+      suggestionsPanel.innerHTML = '';
+      form.classList.remove('has-suggestions');
+      field.removeEventListener('input', renderSuggestions);
+      form.removeEventListener('submit', submit);
       $('#inputDialogCancel').removeEventListener('click', cancel);
       backdrop.removeEventListener('click', outside);
       document.removeEventListener('keydown', handleDialogKeydown, true);
@@ -757,7 +801,8 @@ function openInputDialog({ title, description, value = '', placeholder = '', opt
       event.stopPropagation();
       finish(field.value.trim());
     };
-    $('#inputDialogForm').addEventListener('submit', submit);
+    field.addEventListener('input', renderSuggestions);
+    form.addEventListener('submit', submit);
     $('#inputDialogCancel').addEventListener('click', cancel);
     backdrop.addEventListener('click', outside);
     document.addEventListener('keydown', handleDialogKeydown, true);
@@ -1083,6 +1128,11 @@ async function renameSelectedSound() {
     description: '실제 오디오 파일명도 함께 변경됩니다. Enter 또는 Shift+Space로 확인할 수 있습니다.',
     value: currentName,
     placeholder: '새 사운드 이름',
+    suggestions: state.sounds.filter((item) => item.id !== sound.id).map((item) => ({
+      name: fileNameWithoutExtension(item.fileName || item.title),
+      category: item.categoryPath || item.category || '미분류',
+      missing: Boolean(item.missing)
+    })),
     confirmWithShiftSpace: true
   });
   if (!name || name === currentName) return;
