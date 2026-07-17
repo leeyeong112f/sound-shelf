@@ -454,12 +454,69 @@ async function indexFiles(filePaths, { reportProgress = true, categoryFolders = 
   return { ...librarySnapshot(), scanResult: { added, updated, total } };
 }
 
+async function relinkMissingFromFiles(filePaths) {
+  const missing = db.sounds.filter((sound) => !fs.existsSync(sound.path));
+  const existingByPath = new Map(
+    db.sounds
+      .filter((sound) => fs.existsSync(sound.path))
+      .map((sound) => [normalizeFsPath(sound.path), sound])
+  );
+  const candidates = new Map();
+  for (const filePath of filePaths) {
+    const stat = await fsp.stat(filePath).catch(() => null);
+    if (!stat) continue;
+    const key = `${path.basename(filePath).normalize('NFC').toLocaleLowerCase('ko')}:${stat.size}`;
+    if (!candidates.has(key)) candidates.set(key, []);
+    candidates.get(key).push(filePath);
+  }
+  const idChanges = {};
+  const mergedIds = new Set();
+  let relinked = 0;
+  for (const sound of missing) {
+    const key = `${path.basename(sound.path).normalize('NFC').toLocaleLowerCase('ko')}:${sound.size}`;
+    const matches = candidates.get(key) || [];
+    if (matches.length !== 1) continue;
+    const oldId = sound.id;
+    const matchPath = matches[0];
+    const existing = existingByPath.get(normalizeFsPath(matchPath));
+    if (existing && existing !== sound) {
+      existing.tags = [...new Set([...(existing.tags || []), ...(sound.tags || [])])];
+      existing.embeddedTags = [...new Set([...(existing.embeddedTags || []), ...(sound.embeddedTags || [])])];
+      if (!existing.notes && sound.notes) existing.notes = sound.notes;
+      existing.favorite = Boolean(existing.favorite || sound.favorite);
+      existing.rating = Math.max(Number(existing.rating || 0), Number(sound.rating || 0));
+      existing.createdAt = Math.min(Number(existing.createdAt || Date.now()), Number(sound.createdAt || Date.now()));
+      idChanges[oldId] = existing.id;
+      mergedIds.add(oldId);
+    } else {
+      sound.path = matchPath;
+      sound.fileName = path.basename(matchPath);
+      sound.id = stableId(matchPath);
+      sound.categoryPath = inferCategoryPath(matchPath);
+      sound.category = sound.categoryPath.split('/').pop();
+      existingByPath.set(normalizeFsPath(matchPath), sound);
+      idChanges[oldId] = sound.id;
+    }
+    relinked += 1;
+  }
+  if (mergedIds.size) db.sounds = db.sounds.filter((sound) => !mergedIds.has(sound.id));
+  db.sounds = deduplicateSoundsByPath(db.sounds);
+  return { missing: missing.length, relinked, unresolved: missing.length - relinked, idChanges };
+}
+
 async function rescanWatchedFolders({ reportProgress = true } = {}) {
   const [groups, categoryGroups] = await Promise.all([
     Promise.all(db.settings.watchedFolders.map(walkAudioFiles)),
     Promise.all(db.settings.watchedFolders.map(walkCategoryFolders))
   ]);
-  return indexFiles([...new Set(groups.flat())], { reportProgress, categoryFolders: [...new Set(categoryGroups.flat())] });
+  const files = [...new Set(groups.flat())];
+  const snapshot = await indexFiles(files, { reportProgress, categoryFolders: [...new Set(categoryGroups.flat())] });
+  const relinkResult = await relinkMissingFromFiles(files);
+  if (!relinkResult.relinked) return snapshot;
+  db.categories = [...new Set([...categoryGroups.flat(), ...db.sounds.map((sound) => sound.categoryPath)].filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'ko'));
+  await saveDb();
+  return { ...librarySnapshot(), idChanges: relinkResult.idChanges, relinkResult };
 }
 
 async function runAutoRescan(reason = 'folder-change') {
@@ -909,34 +966,13 @@ ipcMain.handle('library:find-duplicates', async () => {
 });
 
 ipcMain.handle('library:relink-missing', async () => {
-  const missing = db.sounds.filter((sound) => !fs.existsSync(sound.path));
   const allFiles = (await Promise.all(db.settings.watchedFolders.map(walkAudioFiles))).flat();
-  const candidates = new Map();
-  for (const filePath of allFiles) {
-    const stat = await fsp.stat(filePath).catch(() => null);
-    if (!stat) continue;
-    const key = `${path.basename(filePath).normalize('NFC').toLocaleLowerCase('ko')}:${stat.size}`;
-    if (!candidates.has(key)) candidates.set(key, []);
-    candidates.get(key).push(filePath);
-  }
-  const idChanges = {};
-  let relinked = 0;
-  for (const sound of missing) {
-    const key = `${path.basename(sound.path).normalize('NFC').toLocaleLowerCase('ko')}:${sound.size}`;
-    const matches = candidates.get(key) || [];
-    if (matches.length !== 1) continue;
-    const oldId = sound.id;
-    sound.path = matches[0];
-    sound.fileName = path.basename(matches[0]);
-    sound.id = stableId(matches[0]);
-    sound.categoryPath = inferCategoryPath(matches[0]);
-    sound.category = sound.categoryPath.split('/').pop();
-    idChanges[oldId] = sound.id;
-    relinked += 1;
-  }
-  db.sounds = deduplicateSoundsByPath(db.sounds);
+  const result = await relinkMissingFromFiles(allFiles);
+  const categoryGroups = await Promise.all(db.settings.watchedFolders.map(walkCategoryFolders));
+  db.categories = [...new Set([...categoryGroups.flat(), ...db.sounds.map((sound) => sound.categoryPath)].filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'ko'));
   await saveDb();
-  return { ...librarySnapshot(), idChanges, relinkResult: { missing: missing.length, relinked, unresolved: missing.length - relinked } };
+  return { ...librarySnapshot(), idChanges: result.idChanges, relinkResult: result };
 });
 
 ipcMain.handle('library:relink-one', async (_event, id) => {
