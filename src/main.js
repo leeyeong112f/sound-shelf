@@ -31,7 +31,7 @@ const DEFAULT_SHORTCUTS = {
 
 let mainWindow;
 let dbPath;
-let db = { version: 1, sounds: [], categories: [], categoryOrder: [], settings: { watchedFolders: [] } };
+let db = { version: 1, sounds: [], categories: [], categoryOrder: [], settings: { watchedFolders: [], shortcuts: { ...DEFAULT_SHORTCUTS }, previewVolume: 0.8 } };
 let vaultStorage = null;
 let activeVault = null;
 let saveTimer;
@@ -50,6 +50,7 @@ let autoScanRunning = false;
 let autoScanPending = false;
 const pendingScanFolders = new Set();
 let lastFullScanAt = 0;
+let startupLoading = true;
 let performanceStats = { storage: '볼트 + 로컬 SQLite 캐시', loadMs: 0, fileSize: 0, soundCount: 0, sqliteRecommended: false };
 const singleInstanceLock = app.requestSingleInstanceLock();
 
@@ -248,7 +249,18 @@ function hydratePortableSound(metadata, cache, root) {
   };
 }
 
-async function activateVault(rootPath, { legacySounds = [], legacyCategoryOrder = db.categoryOrder || [], preserveSettings = true } = {}) {
+let vaultActivationQueue = Promise.resolve();
+
+// Serialize vault activations: opening a vault from the UI while the startup
+// activation is still scanning must not run two scans (and folder repairs)
+// concurrently against the same tree.
+function activateVault(rootPath, options) {
+  const run = vaultActivationQueue.catch(() => {}).then(() => activateVaultNow(rootPath, options));
+  vaultActivationQueue = run.catch(() => {});
+  return run;
+}
+
+async function activateVaultNow(rootPath, { legacySounds = [], legacyCategoryOrder = db.categoryOrder || [], preserveSettings = true } = {}) {
   const root = path.resolve(rootPath);
   const previousSettings = preserveSettings ? { ...db.settings } : {};
   vaultStorage?.close();
@@ -311,6 +323,9 @@ async function activateVault(rootPath, { legacySounds = [], legacyCategoryOrder 
   db.categoryOrder = savedFolderOrder.length ? savedFolderOrder : legacyCategoryOrder;
   db.categories = [...new Set(db.sounds.map((sound) => sound.categoryPath).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, 'ko'));
+  // Show the cached library right away — the folder repair and full rescan
+  // below can take minutes when the vault lives on cloud storage.
+  mainWindow?.webContents.send('library-updated', { ...librarySnapshot(), updateReason: 'vault-cached' });
   await repairDuplicateCategoryFolders();
   await rescanWatchedFolders({ reportProgress: false });
   await vaultStorage.backupPortableMetadata('startup').catch((error) => console.error('Vault backup failed:', error.message));
@@ -436,6 +451,7 @@ function librarySnapshot() {
     .sort((a, b) => a.localeCompare(b, 'ko', { numeric: true }));
   db.categoryOrder = [...savedOrder, ...unordered];
   return {
+    loading: startupLoading,
     sounds: db.sounds.map(publicSound),
     categories: db.categories,
     categoryPaths: categoryPaths.sort((a, b) => a.localeCompare(b, 'ko')),
@@ -776,6 +792,7 @@ async function rescanChangedFolders(folders, { reportProgress = false } = {}) {
 }
 
 async function runAutoRescan(reason = 'folder-change') {
+  if (startupLoading) return;
   if (autoScanRunning) {
     autoScanPending = true;
     return;
@@ -1079,15 +1096,24 @@ function configureAutoUpdates() {
 }
 
 if (singleInstanceLock) app.whenReady().then(async () => {
-  await loadDb();
-  await pruneWaveformDiskCache();
-  await pruneTemporaryClips();
+  // Show the window immediately; the vault scan (potentially slow on cloud
+  // storage like Google Drive) runs afterwards and pushes 'library-updated'.
   await createWindow();
   configureAutoUpdates();
-  refreshFolderWatchers();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+  try {
+    await loadDb();
+    await pruneWaveformDiskCache();
+    await pruneTemporaryClips();
+  } catch (error) {
+    console.error('Startup library load failed:', error);
+  } finally {
+    startupLoading = false;
+    refreshFolderWatchers();
+    mainWindow?.webContents.send('library-updated', { ...librarySnapshot(), updateReason: 'startup' });
+  }
 });
 
 app.on('window-all-closed', () => {
