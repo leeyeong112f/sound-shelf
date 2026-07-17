@@ -37,6 +37,7 @@ let db = { version: 1, sounds: [], categories: [], categoryOrder: [], settings: 
 let vaultStorage = null;
 let activeVault = null;
 let saveTimer;
+let savePending = false;
 let shortcutCapture = false;
 let updateStartupTimer;
 let updateCheckTimer;
@@ -508,8 +509,9 @@ async function saveDb() {
 }
 
 function queueSave() {
+  savePending = true;
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => saveDb().catch(console.error), 150);
+  saveTimer = setTimeout(() => saveDb().catch(console.error).finally(() => { savePending = false; }), 150);
 }
 
 function publicSound(sound) {
@@ -923,17 +925,24 @@ function scheduleAutoRescan(reason = 'folder-change', changedPath = '') {
 async function pollRemoteEdits() {
   if (startupLoading || !vaultStorage || !activeVault) return;
   if (!fs.existsSync(activeVault.root)) return;
+  // 로컬 편집이 자기 편집 파일에 안착하기 전에 병합하면, applyMergedState의 전체
+  // 교체가 방금 편집을 되돌리고 다음 saveDb가 그것을 baseline과 같다고 보아 영구
+  // 유실시킨다. 저장 대기 중이거나 스캔 중이면 이번 회차를 건너뛴다.
+  if (savePending || autoScanRunning) return;
   const stamps = await vaultStorage.editFileStamps(db.settings.machineId).catch(() => null);
   if (!stamps) return;
   const fingerprint = JSON.stringify(stamps);
   if (fingerprint === lastEditStamps) return;
-  lastEditStamps = fingerprint;
 
   const [portableMetadata, savedFolderOrder, editSources] = await Promise.all([
     vaultStorage.loadMetadata(),
     vaultStorage.loadFolderOrder(),
     vaultStorage.loadEditSources()
   ]);
+  // await 사이에 로컬 편집이 들어왔으면 이번 회차를 포기한다. fingerprint를 저장하지
+  // 않으므로 다음 tick에서 다시 시도한다. 이 지점 이후는 동기 실행이라 안전하다.
+  if (savePending || autoScanRunning) return;
+  lastEditStamps = fingerprint;
   const merged = mergeVaultState(
     { sounds: portableMetadata.sounds, folderOrder: savedFolderOrder },
     editSources
