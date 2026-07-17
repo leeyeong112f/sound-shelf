@@ -69,6 +69,13 @@ async function loadDb() {
   dbPath = path.join(app.getPath('userData'), 'sound-library.json');
   try {
     db = cleanDb(JSON.parse(await fsp.readFile(dbPath, 'utf8')));
+    for (const sound of db.sounds) {
+      const inferred = inferCategoryPath(sound.path);
+      sound.categoryPath = sound.categoryPath || (inferred !== '미분류' ? inferred : sound.category || '미분류');
+      sound.category = sound.categoryPath.split('/').filter(Boolean).pop() || '미분류';
+    }
+    db.categories = [...new Set(db.sounds.map((sound) => sound.categoryPath).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b, 'ko'));
   } catch (error) {
     if (error.code !== 'ENOENT') console.error('Could not load library:', error);
     await saveDb();
@@ -95,6 +102,8 @@ function librarySnapshot() {
   return {
     sounds: db.sounds.map(publicSound),
     categories: db.categories,
+    categoryPaths: [...new Set(db.sounds.map((sound) => sound.categoryPath || sound.category).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b, 'ko')),
     watchedFolders: db.settings.watchedFolders,
     shortcuts: db.settings.shortcuts,
     previewVolume: db.settings.previewVolume
@@ -108,6 +117,21 @@ function stableId(filePath) {
 function inferCategory(filePath) {
   const parent = path.basename(path.dirname(filePath));
   return parent && parent !== path.parse(filePath).root ? parent : '미분류';
+}
+
+function inferCategoryPath(filePath) {
+  const absolute = path.resolve(filePath);
+  const roots = [...db.settings.watchedFolders]
+    .map((folder) => path.resolve(folder))
+    .sort((a, b) => b.length - a.length);
+  const root = roots.find((folder) => {
+    const relative = path.relative(folder, absolute);
+    return relative && !relative.startsWith('..') && !path.isAbsolute(relative);
+  });
+  if (!root) return inferCategory(filePath);
+  const relativeFolder = path.dirname(path.relative(root, absolute));
+  if (!relativeFolder || relativeFolder === '.') return '미분류';
+  return relativeFolder.split(path.sep).filter(Boolean).join('/');
 }
 
 async function probeAudio(filePath) {
@@ -165,12 +189,14 @@ async function indexFiles(filePaths) {
     const current = existingById.get(id);
     const needsProbe = !current || current.modifiedAt !== stat.mtimeMs || current.size !== stat.size;
     const technical = needsProbe ? await probeAudio(filePath) : current;
+    const categoryPath = current?.categoryPath || inferCategoryPath(filePath);
     const next = {
       id,
       path: filePath,
       fileName: path.basename(filePath),
       title: current?.title || path.basename(filePath, path.extname(filePath)),
-      category: current?.category || inferCategory(filePath),
+      categoryPath,
+      category: categoryPath.split('/').filter(Boolean).pop() || current?.category || inferCategory(filePath),
       tags: current?.tags || [],
       notes: current?.notes || '',
       favorite: Boolean(current?.favorite),
@@ -199,7 +225,7 @@ async function indexFiles(filePaths) {
     }
   }
 
-  db.categories = [...new Set([...db.categories, ...db.sounds.map((sound) => sound.category).filter(Boolean)])]
+  db.categories = [...new Set(db.sounds.map((sound) => sound.categoryPath || sound.category).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, 'ko'));
   await saveDb();
   return { ...librarySnapshot(), scanResult: { added, updated, total } };
@@ -241,7 +267,7 @@ async function moveFile(source, destination) {
   }
 }
 
-async function moveSoundToFolder(sound, folder, category) {
+async function moveSoundToFolder(sound, folder, categoryPath) {
   await fsp.mkdir(folder, { recursive: true });
   const destination = path.resolve(path.dirname(sound.path)) === path.resolve(folder)
     ? sound.path
@@ -252,11 +278,12 @@ async function moveSoundToFolder(sound, folder, category) {
   sound.path = destination;
   sound.fileName = path.basename(destination);
   sound.id = stableId(destination);
-  sound.category = category || inferCategory(destination);
+  sound.categoryPath = categoryPath || inferCategoryPath(destination);
+  sound.category = sound.categoryPath.split('/').filter(Boolean).pop() || inferCategory(destination);
   sound.modifiedAt = stat.mtimeMs;
   sound.size = stat.size;
   waveformCache.clear();
-  db.categories = [...new Set([...db.categories, sound.category].filter(Boolean))]
+  db.categories = [...new Set([...db.categories, sound.categoryPath].filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, 'ko'));
   await saveDb();
   return { ...librarySnapshot(), moved: { oldId, id: sound.id, path: destination } };
@@ -317,7 +344,10 @@ ipcMain.handle('library:add-paths', async (_event, paths) => {
   const files = [];
   for (const itemPath of [...new Set(paths || [])]) {
     const stat = await fsp.stat(itemPath).catch(() => null);
-    if (stat?.isDirectory()) files.push(...await walkAudioFiles(itemPath));
+    if (stat?.isDirectory()) {
+      if (!db.settings.watchedFolders.includes(itemPath)) db.settings.watchedFolders.push(itemPath);
+      files.push(...await walkAudioFiles(itemPath));
+    }
     else if (stat?.isFile() && AUDIO_EXTENSIONS.has(path.extname(itemPath).toLowerCase())) files.push(itemPath);
   }
   return indexFiles([...new Set(files)]);
@@ -347,7 +377,11 @@ ipcMain.handle('library:update', async (_event, payload) => {
   for (const key of allowed) {
     if (Object.hasOwn(payload, key)) sound[key] = payload[key];
   }
-  if (sound.category && !db.categories.includes(sound.category)) db.categories.push(sound.category);
+  if (Object.hasOwn(payload, 'category')) {
+    sound.categoryPath = String(payload.category || '미분류').split(/[\\/>]+/).map((part) => part.trim()).filter(Boolean).join('/') || '미분류';
+    sound.category = sound.categoryPath.split('/').pop();
+  }
+  if (sound.categoryPath && !db.categories.includes(sound.categoryPath)) db.categories.push(sound.categoryPath);
   db.categories.sort((a, b) => a.localeCompare(b, 'ko'));
   queueSave();
   return librarySnapshot();
@@ -366,7 +400,9 @@ ipcMain.handle('library:move-folder', async (_event, id) => {
 
 ipcMain.handle('library:move-category', async (_event, { id, category }) => {
   const sound = db.sounds.find((item) => item.id === id);
-  const safeCategory = String(category || '').trim().replace(/[\\/:*?"<>|]/g, '-');
+  const categoryParts = String(category || '').split(/[\\/>]+/)
+    .map((part) => part.trim().replace(/[:*?"<>|]/g, '-')).filter(Boolean);
+  const safeCategory = categoryParts.join('/');
   if (!sound || !fs.existsSync(sound.path)) throw new Error('원본 파일을 찾을 수 없습니다.');
   if (!safeCategory) throw new Error('카테고리 이름을 입력해 주세요.');
   const source = path.resolve(sound.path);
@@ -383,7 +419,7 @@ ipcMain.handle('library:move-category', async (_event, { id, category }) => {
     root = result.filePaths[0];
     db.settings.watchedFolders.push(root);
   }
-  return moveSoundToFolder(sound, path.join(root, safeCategory), safeCategory);
+  return moveSoundToFolder(sound, path.join(root, ...categoryParts), safeCategory);
 });
 
 ipcMain.handle('shortcuts:set', async (_event, shortcuts) => {

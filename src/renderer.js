@@ -19,6 +19,7 @@ const SHORTCUT_LABELS = {
 const state = {
   sounds: [],
   categories: [],
+  categoryPaths: [],
   watchedFolders: [],
   filter: 'all',
   query: '',
@@ -31,7 +32,8 @@ const state = {
   selections: new Map(),
   shortcuts: { ...DEFAULT_SHORTCUTS },
   view: 'library',
-  previewVolume: 0.8
+  previewVolume: 0.8,
+  collapsedCategories: new Set()
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -103,10 +105,14 @@ function filteredSounds() {
   const query = state.query.trim().toLocaleLowerCase('ko');
   return state.sounds.filter((sound) => {
     if (state.filter === 'favorites' && !sound.favorite) return false;
-    if (state.filter.startsWith('category:') && sound.category !== state.filter.slice(9)) return false;
+    if (state.filter.startsWith('category:')) {
+      const selectedPath = state.filter.slice(9);
+      const soundPath = sound.categoryPath || sound.category || '미분류';
+      if (soundPath !== selectedPath && !soundPath.startsWith(`${selectedPath}/`)) return false;
+    }
     if (state.filter.startsWith('tag:') && !(sound.tags || []).includes(state.filter.slice(4))) return false;
     if (!query) return true;
-    const haystack = [sound.title, sound.fileName, sound.category, sound.notes, ...(sound.tags || [])]
+    const haystack = [sound.title, sound.fileName, sound.category, sound.categoryPath, sound.notes, ...(sound.tags || [])]
       .join(' ').toLocaleLowerCase('ko');
     return query.split(/\s+/).every((word) => haystack.includes(word));
   }).sort((a, b) => a.title.localeCompare(b.title, 'ko', { numeric: true }));
@@ -116,6 +122,7 @@ function setLibrary(snapshot) {
   if (!snapshot) return;
   state.sounds = snapshot.sounds || [];
   state.categories = snapshot.categories || [];
+  state.categoryPaths = snapshot.categoryPaths || snapshot.categories || [];
   state.watchedFolders = snapshot.watchedFolders || [];
   state.shortcuts = { ...DEFAULT_SHORTCUTS, ...(snapshot.shortcuts || {}) };
   state.previewVolume = Number.isFinite(Number(snapshot.previewVolume)) ? Number(snapshot.previewVolume) : 0.8;
@@ -144,14 +151,47 @@ function displayShortcut(value) {
     .replace('Backspace', '⌫').replace('Comma', ',').replace('Space', 'Space').replaceAll('+', '');
 }
 
+function buildCategoryTree(paths) {
+  const root = { children: new Map() };
+  paths.forEach((categoryPath) => {
+    let parent = root;
+    let currentPath = '';
+    String(categoryPath).split('/').filter(Boolean).forEach((name) => {
+      currentPath = currentPath ? `${currentPath}/${name}` : name;
+      if (!parent.children.has(name)) parent.children.set(name, { name, path: currentPath, children: new Map() });
+      parent = parent.children.get(name);
+    });
+  });
+  return root;
+}
+
+function renderCategoryNodes(nodes, depth = 0) {
+  return [...nodes.values()]
+    .sort((a, b) => a.name.localeCompare(b.name, 'ko', { numeric: true }))
+    .map((node) => {
+      const hasChildren = node.children.size > 0;
+      const collapsed = state.collapsedCategories.has(node.path);
+      const active = state.filter === `category:${node.path}` ? 'active' : '';
+      const count = state.sounds.filter((sound) => {
+        const soundPath = sound.categoryPath || sound.category || '미분류';
+        return soundPath === node.path || soundPath.startsWith(`${node.path}/`);
+      }).length;
+      const children = hasChildren && !collapsed ? renderCategoryNodes(node.children, depth + 1) : '';
+      return `<div class="category-tree-node">
+        <div class="category-tree-row ${active}" style="--tree-depth:${depth}">
+          <button class="tree-toggle ${hasChildren ? '' : 'empty'}" data-category-toggle="${escapeHtml(node.path)}" ${hasChildren ? '' : 'disabled'}>${hasChildren ? (collapsed ? '▸' : '▾') : ''}</button>
+          <button class="tree-label" data-category="${escapeHtml(node.path)}" title="${escapeHtml(node.path)}">${escapeHtml(node.name)}</button>
+          <b>${count}</b>
+        </div>${children}
+      </div>`;
+    }).join('');
+}
+
 function renderSidebar() {
   $('#allCount').textContent = state.sounds.length;
   $('#favoriteCount').textContent = state.sounds.filter((sound) => sound.favorite).length;
-  $('#categoryList').innerHTML = state.categories.map((category) => {
-    const count = state.sounds.filter((sound) => sound.category === category).length;
-    const active = state.filter === `category:${category}` ? 'active' : '';
-    return `<button class="nav-item ${active}" data-category="${escapeHtml(category)}"><span>●</span>${escapeHtml(category)}<b>${count}</b></button>`;
-  }).join('');
+  $('#categoryList').innerHTML = renderCategoryNodes(buildCategoryTree(state.categoryPaths).children)
+    || '<div class="dim" style="padding:6px 10px">카테고리 없음</div>';
   $('#tagList').innerHTML = allTags().map((tag) => {
     const count = state.sounds.filter((sound) => (sound.tags || []).includes(tag)).length;
     const active = state.filter === `tag:${tag}` ? 'active' : '';
@@ -160,7 +200,7 @@ function renderSidebar() {
   document.querySelectorAll('.nav-item[data-filter]').forEach((button) => {
     button.classList.toggle('active', button.dataset.filter === state.filter);
   });
-  $('#categoryOptions').innerHTML = state.categories.map((category) => `<option value="${escapeHtml(category)}"></option>`).join('');
+  $('#categoryOptions').innerHTML = state.categoryPaths.map((category) => `<option value="${escapeHtml(category)}"></option>`).join('');
   $('#searchShortcutHint').textContent = displayShortcut(state.shortcuts.search);
 }
 
@@ -181,7 +221,7 @@ function renderList() {
       <button class="play-button" data-action="play" title="미리 듣기">${isPlaying ? '❚❚' : '▶'}</button>
       <div class="sound-name"><strong>${escapeHtml(sound.title)}</strong><small>${escapeHtml(sound.fileName)}${sound.missing ? ' · 파일 없음' : ''}</small></div>
       <div class="mini-waveform-wrap"><canvas class="mini-waveform" data-waveform-id="${sound.id}"></canvas><div class="mini-playhead"></div></div>
-      <span class="category-pill">${escapeHtml(sound.category || '미분류')}</span>
+      <span class="category-pill" title="${escapeHtml(sound.categoryPath || sound.category || '미분류')}">${escapeHtml(sound.category || '미분류')}</span>
       <span class="dim">${formatDuration(sound.duration)}</span>
       <span class="dim">${escapeHtml((sound.codec || sound.fileName.split('.').pop()).toUpperCase())}</span>
       <span class="dim">${sound.channels || '—'}</span>
@@ -205,7 +245,7 @@ function renderInspector() {
   $('.app-shell').classList.toggle('inspector-closed', !visible);
   if (!visible) return;
   $('#editTitle').value = sound.title || '';
-  $('#editCategory').value = sound.category || '';
+  $('#editCategory').value = sound.categoryPath || sound.category || '';
   $('#editTags').value = (sound.tags || []).join(', ');
   $('#editNotes').value = sound.notes || '';
   $('#largePlay').textContent = state.playingId === sound.id && !player.paused ? '❚❚' : '▶';
@@ -552,7 +592,7 @@ async function moveSelectedToCategory() {
   const category = await openInputDialog({
     title: '카테고리 폴더로 이동',
     description: `“${sound.title}” 파일을 이동할 카테고리를 입력하세요.`,
-    value: sound.category || '', placeholder: '예: UI 효과음', options: state.categories
+    value: sound.categoryPath || sound.category || '', placeholder: '예: Trains/Horn', options: state.categoryPaths
   });
   if (!category) return;
   showToast(`${category} 폴더로 파일 이동 중…`, 10000);
@@ -746,8 +786,15 @@ detailSelection.addEventListener('dragstart', (event) => {
 document.addEventListener('click', (event) => {
   const filterButton = event.target.closest('[data-filter]');
   const categoryButton = event.target.closest('[data-category]');
+  const categoryToggle = event.target.closest('[data-category-toggle]');
   const tagButton = event.target.closest('[data-tag]');
   if (filterButton) { state.view = 'library'; state.filter = filterButton.dataset.filter; render(); }
+  if (categoryToggle) {
+    const categoryPath = categoryToggle.dataset.categoryToggle;
+    if (state.collapsedCategories.has(categoryPath)) state.collapsedCategories.delete(categoryPath);
+    else state.collapsedCategories.add(categoryPath);
+    renderSidebar();
+  }
   if (categoryButton) { state.view = 'library'; state.filter = `category:${categoryButton.dataset.category}`; render(); }
   if (tagButton) { state.view = 'library'; state.filter = `tag:${tagButton.dataset.tag}`; render(); }
 });
