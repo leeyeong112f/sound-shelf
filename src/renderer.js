@@ -719,7 +719,7 @@ async function updateSelected(changes) {
   saveDebounce = setTimeout(async () => setLibrary(await window.soundLibrary.updateSound({ id: sound.id, ...changes })), 250);
 }
 
-function openInputDialog({ title, description, value = '', placeholder = '', options = [] }) {
+function openInputDialog({ title, description, value = '', placeholder = '', options = [], confirmWithShiftSpace = false }) {
   return new Promise((resolve) => {
     const backdrop = $('#inputDialog');
     const field = $('#inputDialogField');
@@ -739,22 +739,28 @@ function openInputDialog({ title, description, value = '', placeholder = '', opt
       $('#inputDialogForm').removeEventListener('submit', submit);
       $('#inputDialogCancel').removeEventListener('click', cancel);
       backdrop.removeEventListener('click', outside);
-      document.removeEventListener('keydown', escape, true);
+      document.removeEventListener('keydown', handleDialogKeydown, true);
       resolve(result);
     };
     const submit = (event) => { event.preventDefault(); finish(field.value.trim()); };
     const cancel = () => finish(null);
     const outside = (event) => { if (event.target === backdrop) finish(null); };
-    const escape = (event) => {
-      if (event.key !== 'Escape') return;
+    const handleDialogKeydown = (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        finish(null);
+        return;
+      }
+      if (!confirmWithShiftSpace || event.key !== ' ' || !event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) return;
       event.preventDefault();
       event.stopPropagation();
-      finish(null);
+      finish(field.value.trim());
     };
     $('#inputDialogForm').addEventListener('submit', submit);
     $('#inputDialogCancel').addEventListener('click', cancel);
     backdrop.addEventListener('click', outside);
-    document.addEventListener('keydown', escape, true);
+    document.addEventListener('keydown', handleDialogKeydown, true);
   });
 }
 
@@ -1074,9 +1080,10 @@ async function renameSelectedSound() {
   const currentName = fileNameWithoutExtension(sound.fileName);
   const name = await openInputDialog({
     title: '사운드 이름 변경',
-    description: '실제 오디오 파일명도 함께 변경됩니다. 확장자는 그대로 유지됩니다.',
+    description: '실제 오디오 파일명도 함께 변경됩니다. Enter 또는 Shift+Space로 확인할 수 있습니다.',
     value: currentName,
-    placeholder: '새 사운드 이름'
+    placeholder: '새 사운드 이름',
+    confirmWithShiftSpace: true
   });
   if (!name || name === currentName) return;
   try {
