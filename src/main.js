@@ -2,9 +2,11 @@ const { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } = require('ele
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 const crypto = require('node:crypto');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
+const { VaultStorage, normalizedRelativePath, relativePathInside, writeJsonAtomic } = require('./vault-storage');
 
 const execFileAsync = promisify(execFile);
 const AUDIO_EXTENSIONS = new Set([
@@ -21,13 +23,16 @@ const DEFAULT_SHORTCUTS = {
   favorite: 'Meta+Shift+F',
   settings: 'Meta+Comma',
   playPause: 'Space',
+  renameSound: 'Enter',
   insertResolve: 'Meta+F',
   newSubfolder: 'Meta+Shift+N'
 };
 
 let mainWindow;
 let dbPath;
-let db = { version: 1, sounds: [], categories: [], settings: { watchedFolders: [] } };
+let db = { version: 1, sounds: [], categories: [], categoryOrder: [], settings: { watchedFolders: [] } };
+let vaultStorage = null;
+let activeVault = null;
 let saveTimer;
 let shortcutCapture = false;
 const waveformCache = new Map();
@@ -39,7 +44,9 @@ const folderWatchers = new Map();
 let watcherTimer;
 let autoScanRunning = false;
 let autoScanPending = false;
-let performanceStats = { storage: 'JSON', loadMs: 0, fileSize: 0, soundCount: 0, sqliteRecommended: false };
+const pendingScanFolders = new Set();
+let lastFullScanAt = 0;
+let performanceStats = { storage: '볼트 + 로컬 SQLite 캐시', loadMs: 0, fileSize: 0, soundCount: 0, sqliteRecommended: false };
 const singleInstanceLock = app.requestSingleInstanceLock();
 
 if (!singleInstanceLock) app.quit();
@@ -48,6 +55,13 @@ else app.on('second-instance', () => {
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
+});
+
+// Sound Shelf never needs a secondary browser window. In particular, deny
+// Chromium's built-in audio document viewer if a file URL is accidentally
+// opened by a native drag/drop gesture.
+app.on('web-contents-created', (_event, contents) => {
+  contents.setWindowOpenHandler(() => ({ action: 'deny' }));
 });
 
 function findMediaTool(name) {
@@ -70,9 +84,10 @@ function findPython() {
 
 function cleanDb(candidate) {
   return {
-    version: 2,
+    version: 3,
     sounds: Array.isArray(candidate?.sounds) ? candidate.sounds : [],
     categories: Array.isArray(candidate?.categories) ? candidate.categories : [],
+    categoryOrder: Array.isArray(candidate?.categoryOrder) ? candidate.categoryOrder : [],
     settings: {
       watchedFolders: Array.isArray(candidate?.settings?.watchedFolders)
         ? candidate.settings.watchedFolders
@@ -80,7 +95,9 @@ function cleanDb(candidate) {
       shortcuts: { ...DEFAULT_SHORTCUTS, ...(candidate?.settings?.shortcuts || {}) },
       previewVolume: Number.isFinite(Number(candidate?.settings?.previewVolume))
         ? Math.max(0, Math.min(1, Number(candidate.settings.previewVolume)))
-        : 0.8
+        : 0.8,
+      currentVaultRoot: candidate?.settings?.currentVaultRoot || candidate?.settings?.watchedFolders?.[0] || '',
+      currentVaultId: candidate?.settings?.currentVaultId || ''
     }
   };
 }
@@ -134,7 +151,7 @@ function deduplicateSoundsByPath(sounds) {
     if (!sound?.path) continue;
     const key = normalizedFsPath(sound.path);
     const existing = unique.get(key);
-    sound.id = stableId(sound.path);
+    sound.id ||= crypto.randomUUID();
     if (!existing) {
       unique.set(key, sound);
       continue;
@@ -143,12 +160,147 @@ function deduplicateSoundsByPath(sounds) {
     existing.favorite = Boolean(existing.favorite || sound.favorite);
     existing.rating = Math.max(Number(existing.rating || 0), Number(sound.rating || 0));
     existing.notes = existing.notes || sound.notes || '';
+    existing.keyAnalysis = existing.keyAnalysis || sound.keyAnalysis || null;
     existing.title = existing.title || sound.title || path.basename(existing.path, path.extname(existing.path));
     existing.createdAt = Math.min(Number(existing.createdAt || Date.now()), Number(sound.createdAt || Date.now()));
     existing.modifiedAt = Math.max(Number(existing.modifiedAt || 0), Number(sound.modifiedAt || 0));
     existing.size = Math.max(Number(existing.size || 0), Number(sound.size || 0));
   }
   return [...unique.values()];
+}
+
+function activeVaultRoot() {
+  return activeVault?.root || db.settings.currentVaultRoot || db.settings.watchedFolders[0] || '';
+}
+
+function soundRelativePath(filePath) {
+  const root = activeVaultRoot();
+  return root ? relativePathInside(root, filePath) : null;
+}
+
+function portableSound(sound) {
+  const relativePath = sound.relativePath || soundRelativePath(sound.path);
+  if (!relativePath) return null;
+  return {
+    id: sound.id || crypto.randomUUID(),
+    relativePath,
+    fileName: sound.fileName || path.basename(relativePath),
+    title: sound.title || path.basename(relativePath, path.extname(relativePath)),
+    tags: [...new Set(sound.tags || [])],
+    notes: sound.notes || '',
+    favorite: Boolean(sound.favorite),
+    rating: Number(sound.rating || 0),
+    createdAt: Number(sound.createdAt || Date.now()),
+    modifiedAt: Number(sound.modifiedAt || 0),
+    size: Number(sound.size || 0),
+    contentHash: sound.contentHash || '',
+    keyAnalysis: sound.keyAnalysis || null
+  };
+}
+
+function hydratePortableSound(metadata, cache, root) {
+  const relativePath = normalizedRelativePath(metadata.relativePath);
+  const filePath = path.join(root, ...relativePath.split('/'));
+  const categoryPath = inferCategoryPath(filePath);
+  return {
+    ...(cache || {}),
+    id: metadata.id || cache?.id || crypto.randomUUID(),
+    relativePath,
+    path: filePath,
+    fileName: path.basename(filePath),
+    title: metadata.title || path.basename(filePath, path.extname(filePath)),
+    categoryPath,
+    category: categoryPath.split('/').filter(Boolean).pop() || '미분류',
+    tags: Array.isArray(metadata.tags) ? metadata.tags : [],
+    notes: metadata.notes || '',
+    favorite: Boolean(metadata.favorite),
+    rating: Number(metadata.rating || 0),
+    createdAt: Number(metadata.createdAt || Date.now()),
+    modifiedAt: Number(cache?.modifiedAt || metadata.modifiedAt || 0),
+    size: Number(cache?.size || metadata.size || 0),
+    duration: Number(cache?.duration || 0),
+    sampleRate: Number(cache?.sampleRate || 0),
+    channels: Number(cache?.channels || 0),
+    codec: cache?.codec || '',
+    bitRate: Number(cache?.bitRate || 0),
+    embeddedMetadata: cache?.embeddedMetadata || {},
+    embeddedTags: cache?.embeddedTags || [],
+    metadataVersion: Number(cache?.metadataVersion || 0),
+    technicalCached: Boolean(cache),
+    contentHash: metadata.contentHash || cache?.contentHash || '',
+    contentHashKey: cache?.contentHashKey || '',
+    keyAnalysis: metadata.keyAnalysis || null
+  };
+}
+
+async function activateVault(rootPath, { legacySounds = [], legacyCategoryOrder = db.categoryOrder || [], preserveSettings = true } = {}) {
+  const root = path.resolve(rootPath);
+  const previousSettings = preserveSettings ? { ...db.settings } : {};
+  vaultStorage?.close();
+  vaultStorage = new VaultStorage(root, app.getPath('userData'));
+  activeVault = await vaultStorage.initialize({ create: true });
+  db.settings = {
+    ...previousSettings,
+    shortcuts: { ...DEFAULT_SHORTCUTS, ...(previousSettings.shortcuts || {}) },
+    previewVolume: Number.isFinite(Number(previousSettings.previewVolume)) ? Number(previousSettings.previewVolume) : 0.8,
+    watchedFolders: [root],
+    currentVaultRoot: root,
+    currentVaultId: activeVault.id
+  };
+  const [portableMetadata, savedFolderOrder] = await Promise.all([
+    vaultStorage.loadMetadata(),
+    vaultStorage.loadFolderOrder()
+  ]);
+  const cached = vaultStorage.cachedSounds();
+  const cacheById = new Map(cached.map((sound) => [sound.id, sound]));
+  const cacheByRelativePath = new Map(cached.map((sound) => [normalizedRelativePath(sound.relativePath), sound]));
+  const hydrated = portableMetadata.sounds
+    .filter((sound) => sound?.relativePath)
+    .map((sound) => hydratePortableSound(
+      sound,
+      cacheById.get(sound.id) || cacheByRelativePath.get(normalizedRelativePath(sound.relativePath)),
+      root
+    ));
+  const byRelativePath = new Map(hydrated.map((sound) => [sound.relativePath, sound]));
+
+  for (const legacy of legacySounds || []) {
+    if (!legacy?.path) continue;
+    const relativePath = relativePathInside(root, legacy.path);
+    if (!relativePath) continue;
+    const current = byRelativePath.get(relativePath);
+    if (current) {
+      current.tags = [...new Set([...(current.tags || []), ...(legacy.tags || [])])];
+      current.notes ||= legacy.notes || '';
+      current.keyAnalysis ||= legacy.keyAnalysis || null;
+      current.favorite = Boolean(current.favorite || legacy.favorite);
+      current.rating = Math.max(Number(current.rating || 0), Number(legacy.rating || 0));
+      continue;
+    }
+    const filePath = path.join(root, ...relativePath.split('/'));
+    const categoryPath = inferCategoryPath(filePath);
+    const migrated = {
+      ...legacy,
+      id: legacy.id || crypto.randomUUID(),
+      relativePath,
+      path: filePath,
+      fileName: path.basename(filePath),
+      categoryPath,
+      category: categoryPath.split('/').filter(Boolean).pop() || '미분류',
+      technicalCached: Boolean(legacy.codec || legacy.duration || legacy.sampleRate || legacy.metadataVersion)
+    };
+    hydrated.push(migrated);
+    byRelativePath.set(relativePath, migrated);
+  }
+
+  db.sounds = deduplicateSoundsByPath(hydrated);
+  db.categoryOrder = savedFolderOrder.length ? savedFolderOrder : legacyCategoryOrder;
+  db.categories = [...new Set(db.sounds.map((sound) => sound.categoryPath).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'ko'));
+  await repairDuplicateCategoryFolders();
+  await rescanWatchedFolders({ reportProgress: false });
+  await vaultStorage.backupPortableMetadata('startup').catch((error) => console.error('Vault backup failed:', error.message));
+  refreshFolderWatchers();
+  return librarySnapshot();
 }
 
 async function repairDuplicateCategoryFolders() {
@@ -185,24 +337,20 @@ async function loadDb() {
     await createAutomaticBackup('startup').catch((error) => console.error('Automatic backup failed:', error.message));
     db = cleanDb(JSON.parse(await fsp.readFile(dbPath, 'utf8')));
     db.settings.watchedFolders = canonicalizeWatchedFolders(db.settings.watchedFolders);
-    await repairDuplicateCategoryFolders();
-    db.sounds = deduplicateSoundsByPath(db.sounds);
-    for (const sound of db.sounds) {
-      const inferred = inferCategoryPath(sound.path);
-      sound.categoryPath = inferred || sound.categoryPath || sound.category || '미분류';
-      sound.category = sound.categoryPath.split('/').filter(Boolean).pop() || '미분류';
+    const preferredRoot = db.settings.currentVaultRoot || db.settings.watchedFolders.find((folder) => fs.existsSync(folder));
+    if (preferredRoot && fs.existsSync(preferredRoot)) {
+      await activateVault(preferredRoot, { legacySounds: db.sounds });
+    } else {
+      db.sounds = deduplicateSoundsByPath(db.sounds);
+      await saveDb();
     }
-    const categoryGroups = await Promise.all(db.settings.watchedFolders.map(walkCategoryFolders));
-    db.categories = [...new Set([...categoryGroups.flat(), ...db.sounds.map((sound) => sound.categoryPath)].filter(Boolean))]
-      .sort((a, b) => a.localeCompare(b, 'ko'));
-    await saveDb();
   } catch (error) {
     if (error.code !== 'ENOENT') console.error('Could not load library:', error);
     await saveDb();
   }
   const stat = await fsp.stat(dbPath).catch(() => ({ size: 0 }));
   performanceStats = {
-    storage: 'JSON',
+    storage: activeVault ? '볼트 + 로컬 SQLite 캐시' : 'JSON 호환 모드',
     loadMs: Number((performance.now() - startedAt).toFixed(2)),
     fileSize: Number(stat.size || 0),
     soundCount: db.sounds.length,
@@ -211,6 +359,18 @@ async function loadDb() {
 }
 
 async function saveDb() {
+  if (vaultStorage && activeVault) {
+    for (const sound of db.sounds) {
+      const relativePath = soundRelativePath(sound.path);
+      if (relativePath) sound.relativePath = relativePath;
+    }
+    const portableSounds = db.sounds.map(portableSound).filter(Boolean);
+    await Promise.all([
+      vaultStorage.saveMetadata(portableSounds),
+      vaultStorage.saveFolderOrder(db.categoryOrder || [])
+    ]);
+    vaultStorage.replaceTechnicalCache(db.sounds.filter((sound) => sound.relativePath));
+  }
   await fsp.mkdir(path.dirname(dbPath), { recursive: true });
   const temporary = `${dbPath}.tmp`;
   await fsp.writeFile(temporary, JSON.stringify(db, null, 2), 'utf8');
@@ -218,7 +378,8 @@ async function saveDb() {
   const stat = await fsp.stat(dbPath).catch(() => ({ size: 0 }));
   performanceStats.fileSize = Number(stat.size || 0);
   performanceStats.soundCount = db.sounds.length;
-  performanceStats.sqliteRecommended = db.sounds.length >= 10000 || stat.size >= 20 * 1024 * 1024;
+  performanceStats.storage = activeVault ? '볼트 + 로컬 SQLite 캐시' : 'JSON 호환 모드';
+  performanceStats.sqliteRecommended = false;
 }
 
 function queueSave() {
@@ -230,21 +391,46 @@ function publicSound(sound) {
   return { ...sound, missing: !fs.existsSync(sound.path) };
 }
 
-function librarySnapshot() {
+function vaultSnapshot() {
+  if (activeVault) {
+    return {
+      ...activeVault,
+      connected: fs.existsSync(activeVault.root),
+      soundCount: db.sounds.length,
+      metadataPath: vaultStorage?.metadataPath || '',
+      folderOrderPath: vaultStorage?.folderOrderPath || ''
+    };
+  }
+  if (!db.settings.currentVaultId) return null;
   return {
-    sounds: db.sounds.map(publicSound),
-    categories: db.categories,
-    categoryPaths: [...new Set([...db.categories, ...db.sounds.map((sound) => sound.categoryPath || sound.category)].filter(Boolean))]
-      .sort((a, b) => a.localeCompare(b, 'ko')),
-    watchedFolders: db.settings.watchedFolders,
-    shortcuts: db.settings.shortcuts,
-    previewVolume: db.settings.previewVolume,
-    performance: { ...performanceStats, soundCount: db.sounds.length }
+    id: db.settings.currentVaultId,
+    name: path.basename(db.settings.currentVaultRoot || '이동된 볼트').normalize('NFC'),
+    root: db.settings.currentVaultRoot || '',
+    connected: false,
+    soundCount: db.sounds.length,
+    metadataPath: '',
+    folderOrderPath: ''
   };
 }
 
-function stableId(filePath) {
-  return crypto.createHash('sha1').update(normalizedFsPath(filePath)).digest('hex');
+function librarySnapshot() {
+  const categoryPaths = [...new Set([...db.categories, ...db.sounds.map((sound) => sound.categoryPath || sound.category)].filter(Boolean))];
+  const savedOrder = [...new Set(db.categoryOrder || [])].filter((category) => categoryPaths.includes(category));
+  const unordered = categoryPaths
+    .filter((category) => !savedOrder.includes(category))
+    .sort((a, b) => a.localeCompare(b, 'ko', { numeric: true }));
+  db.categoryOrder = [...savedOrder, ...unordered];
+  return {
+    sounds: db.sounds.map(publicSound),
+    categories: db.categories,
+    categoryPaths: categoryPaths.sort((a, b) => a.localeCompare(b, 'ko')),
+    categoryOrder: db.categoryOrder,
+    watchedFolders: db.settings.watchedFolders,
+    shortcuts: db.settings.shortcuts,
+    previewVolume: db.settings.previewVolume,
+    vault: vaultSnapshot(),
+    performance: { ...performanceStats, soundCount: db.sounds.length }
+  };
 }
 
 function waveformCacheKey(sound) {
@@ -392,23 +578,36 @@ async function walkCategoryFolders(rootPath) {
 }
 
 async function indexFiles(filePaths, { reportProgress = true, categoryFolders = null } = {}) {
-  const existingById = new Map(db.sounds.map((sound) => [sound.id, sound]));
+  const existingByPath = new Map(db.sounds.map((sound) => [normalizedFsPath(sound.path), sound]));
+  const existingByRelativePath = new Map(db.sounds
+    .filter((sound) => sound.relativePath)
+    .map((sound) => [normalizedRelativePath(sound.relativePath), sound]));
   let added = 0;
   let updated = 0;
   const total = filePaths.length;
 
   for (let index = 0; index < total; index += 1) {
     const filePath = path.resolve(filePaths[index]);
-    const id = stableId(filePath);
+    const relativePath = soundRelativePath(filePath);
     const stat = await fsp.stat(filePath).catch(() => null);
     if (!stat?.isFile()) continue;
 
-    const current = existingById.get(id);
-    const needsProbe = !current || current.modifiedAt !== stat.mtimeMs || current.size !== stat.size;
+    let current = existingByPath.get(normalizedFsPath(filePath))
+      || (relativePath ? existingByRelativePath.get(relativePath) : null);
+    if (!current) {
+      const normalizedName = path.basename(filePath).normalize('NFC').toLocaleLowerCase('ko');
+      const missingMatches = db.sounds.filter((sound) => !fs.existsSync(sound.path)
+        && path.basename(sound.path).normalize('NFC').toLocaleLowerCase('ko') === normalizedName
+        && Number(sound.size) === Number(stat.size));
+      if (missingMatches.length === 1) current = missingMatches[0];
+    }
+    const id = current?.id || crypto.randomUUID();
+    const needsProbe = !current || !current.technicalCached || current.modifiedAt !== stat.mtimeMs || current.size !== stat.size;
     const technical = needsProbe ? await probeAudio(filePath) : current;
     const categoryPath = current?.categoryPath || inferCategoryPath(filePath);
     const next = {
       id,
+      relativePath: relativePath || current?.relativePath || '',
       path: filePath,
       fileName: path.basename(filePath),
       title: current?.title || path.basename(filePath, path.extname(filePath)),
@@ -429,16 +628,20 @@ async function indexFiles(filePaths, { reportProgress = true, categoryFolders = 
       embeddedMetadata: technical.embeddedMetadata || current?.embeddedMetadata || {},
       embeddedTags: technical.embeddedTags || current?.embeddedTags || [],
       metadataVersion: technical.metadataVersion || current?.metadataVersion || 0,
+      technicalCached: true,
       contentHash: needsProbe ? '' : (current?.contentHash || ''),
       contentHashKey: needsProbe ? '' : (current?.contentHashKey || '')
     };
 
     if (current) {
       Object.assign(current, next);
+      existingByPath.set(normalizedFsPath(filePath), current);
+      if (relativePath) existingByRelativePath.set(relativePath, current);
       updated += 1;
     } else {
       db.sounds.push(next);
-      existingById.set(id, next);
+      existingByPath.set(normalizedFsPath(filePath), next);
+      if (relativePath) existingByRelativePath.set(relativePath, next);
       added += 1;
     }
 
@@ -459,30 +662,46 @@ async function relinkMissingFromFiles(filePaths) {
   const existingByPath = new Map(
     db.sounds
       .filter((sound) => fs.existsSync(sound.path))
-      .map((sound) => [normalizeFsPath(sound.path), sound])
+      .map((sound) => [normalizedFsPath(sound.path), sound])
   );
   const candidates = new Map();
+  const candidateStats = [];
   for (const filePath of filePaths) {
     const stat = await fsp.stat(filePath).catch(() => null);
     if (!stat) continue;
+    candidateStats.push({ filePath, size: stat.size });
     const key = `${path.basename(filePath).normalize('NFC').toLocaleLowerCase('ko')}:${stat.size}`;
     if (!candidates.has(key)) candidates.set(key, []);
     candidates.get(key).push(filePath);
   }
   const idChanges = {};
   const mergedIds = new Set();
+  const candidateHashes = new Map();
   let relinked = 0;
   for (const sound of missing) {
     const key = `${path.basename(sound.path).normalize('NFC').toLocaleLowerCase('ko')}:${sound.size}`;
-    const matches = candidates.get(key) || [];
+    let matches = candidates.get(key) || [];
+    if (matches.length !== 1 && sound.contentHash) {
+      const contentMatches = [];
+      for (const candidate of candidateStats.filter((item) => Number(item.size) === Number(sound.size))) {
+        let contentHash = candidateHashes.get(candidate.filePath);
+        if (!contentHash) {
+          contentHash = await hashFile(candidate.filePath).catch(() => '');
+          candidateHashes.set(candidate.filePath, contentHash);
+        }
+        if (contentHash === sound.contentHash) contentMatches.push(candidate.filePath);
+      }
+      if (contentMatches.length === 1) matches = contentMatches;
+    }
     if (matches.length !== 1) continue;
     const oldId = sound.id;
     const matchPath = matches[0];
-    const existing = existingByPath.get(normalizeFsPath(matchPath));
+    const existing = existingByPath.get(normalizedFsPath(matchPath));
     if (existing && existing !== sound) {
       existing.tags = [...new Set([...(existing.tags || []), ...(sound.tags || [])])];
       existing.embeddedTags = [...new Set([...(existing.embeddedTags || []), ...(sound.embeddedTags || [])])];
       if (!existing.notes && sound.notes) existing.notes = sound.notes;
+      if (!existing.keyAnalysis && sound.keyAnalysis) existing.keyAnalysis = sound.keyAnalysis;
       existing.favorite = Boolean(existing.favorite || sound.favorite);
       existing.rating = Math.max(Number(existing.rating || 0), Number(sound.rating || 0));
       existing.createdAt = Math.min(Number(existing.createdAt || Date.now()), Number(sound.createdAt || Date.now()));
@@ -491,11 +710,11 @@ async function relinkMissingFromFiles(filePaths) {
     } else {
       sound.path = matchPath;
       sound.fileName = path.basename(matchPath);
-      sound.id = stableId(matchPath);
+      sound.relativePath = soundRelativePath(matchPath) || sound.relativePath || '';
       sound.categoryPath = inferCategoryPath(matchPath);
       sound.category = sound.categoryPath.split('/').pop();
-      existingByPath.set(normalizeFsPath(matchPath), sound);
-      idChanges[oldId] = sound.id;
+      existingByPath.set(normalizedFsPath(matchPath), sound);
+      idChanges[oldId] = oldId;
     }
     relinked += 1;
   }
@@ -510,13 +729,35 @@ async function rescanWatchedFolders({ reportProgress = true } = {}) {
     Promise.all(db.settings.watchedFolders.map(walkCategoryFolders))
   ]);
   const files = [...new Set(groups.flat())];
-  const snapshot = await indexFiles(files, { reportProgress, categoryFolders: [...new Set(categoryGroups.flat())] });
+  lastFullScanAt = Date.now();
   const relinkResult = await relinkMissingFromFiles(files);
-  if (!relinkResult.relinked) return snapshot;
+  const snapshot = await indexFiles(files, { reportProgress, categoryFolders: [...new Set(categoryGroups.flat())] });
   db.categories = [...new Set([...categoryGroups.flat(), ...db.sounds.map((sound) => sound.categoryPath)].filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, 'ko'));
   await saveDb();
   return { ...librarySnapshot(), idChanges: relinkResult.idChanges, relinkResult };
+}
+
+async function rescanChangedFolders(folders, { reportProgress = false } = {}) {
+  const root = activeVaultRoot();
+  if (!root) return rescanWatchedFolders({ reportProgress });
+  const usable = [...new Set(folders || [])]
+    .map((folder) => path.resolve(folder))
+    .filter((folder) => relativePathInside(root, folder) !== null && fs.existsSync(folder));
+  if (!usable.length) return rescanWatchedFolders({ reportProgress });
+  const minimal = usable.filter((folder, index, all) => !all.some((other, otherIndex) => {
+    if (index === otherIndex) return false;
+    const relative = path.relative(other, folder);
+    return relative && !relative.startsWith('..') && !path.isAbsolute(relative);
+  }));
+  const files = [...new Set((await Promise.all(minimal.map(walkAudioFiles))).flat())];
+  const relinkResult = await relinkMissingFromFiles(files);
+  await indexFiles(files, { reportProgress });
+  const categoryGroups = await Promise.all(db.settings.watchedFolders.map(walkCategoryFolders));
+  db.categories = [...new Set([...categoryGroups.flat(), ...db.sounds.map((sound) => sound.categoryPath)].filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'ko'));
+  await saveDb();
+  return { ...librarySnapshot(), idChanges: relinkResult.idChanges, relinkResult, partialScan: true };
 }
 
 async function runAutoRescan(reason = 'folder-change') {
@@ -526,7 +767,11 @@ async function runAutoRescan(reason = 'folder-change') {
   }
   autoScanRunning = true;
   try {
-    const snapshot = await rescanWatchedFolders({ reportProgress: false });
+    const changedFolders = [...pendingScanFolders];
+    pendingScanFolders.clear();
+    const snapshot = changedFolders.length && reason !== 'window-focus'
+      ? await rescanChangedFolders(changedFolders, { reportProgress: false })
+      : await rescanWatchedFolders({ reportProgress: false });
     mainWindow?.webContents.send('library-updated', { ...snapshot, updateReason: reason });
   } catch (error) {
     console.error('Automatic library refresh failed:', error);
@@ -539,9 +784,10 @@ async function runAutoRescan(reason = 'folder-change') {
   }
 }
 
-function scheduleAutoRescan(reason = 'folder-change') {
+function scheduleAutoRescan(reason = 'folder-change', changedPath = '') {
+  if (changedPath) pendingScanFolders.add(changedPath);
   clearTimeout(watcherTimer);
-  watcherTimer = setTimeout(() => runAutoRescan(reason), 700);
+  watcherTimer = setTimeout(() => runAutoRescan(reason), 900);
 }
 
 function refreshFolderWatchers() {
@@ -555,7 +801,13 @@ function refreshFolderWatchers() {
   for (const folder of watched) {
     if (folderWatchers.has(folder) || !fs.existsSync(folder)) continue;
     try {
-      const watcher = fs.watch(folder, { recursive: process.platform === 'darwin' }, () => scheduleAutoRescan('folder-change'));
+      const watcher = fs.watch(folder, { recursive: process.platform === 'darwin' }, (_eventType, fileName) => {
+        const relativeName = String(fileName || '');
+        if (!relativeName || relativeName.split(path.sep).includes('.sound-shelf')) return;
+        const changedPath = path.join(folder, relativeName);
+        const stat = fs.existsSync(changedPath) ? fs.statSync(changedPath) : null;
+        scheduleAutoRescan('folder-change', stat?.isDirectory() ? changedPath : path.dirname(changedPath));
+      });
       watcher.on('error', (error) => console.error(`Folder watcher failed (${folder}):`, error.message));
       folderWatchers.set(folder, watcher);
     } catch (error) {
@@ -663,7 +915,7 @@ function updateSoundsForCategoryMove(sourceCategory, destinationCategory, source
     const relativeFile = path.relative(sourceFolder, sound.path);
     sound.path = path.join(destinationFolder, relativeFile);
     sound.fileName = path.basename(sound.path);
-    sound.id = stableId(sound.path);
+    sound.relativePath = soundRelativePath(sound.path) || sound.relativePath || '';
     idChanges[oldId] = sound.id;
   }
   db.categories = [...new Set(db.categories.map((category) => {
@@ -671,6 +923,11 @@ function updateSoundsForCategoryMove(sourceCategory, destinationCategory, source
     if (category.startsWith(`${sourceCategory}/`)) return `${destinationCategory}${category.slice(sourceCategory.length)}`;
     return category;
   }))].sort((a, b) => a.localeCompare(b, 'ko'));
+  db.categoryOrder = [...new Set((db.categoryOrder || []).map((category) => {
+    if (category === sourceCategory) return destinationCategory;
+    if (category.startsWith(`${sourceCategory}/`)) return `${destinationCategory}${category.slice(sourceCategory.length)}`;
+    return category;
+  }))];
   waveformCache.clear();
   return idChanges;
 }
@@ -685,6 +942,7 @@ async function moveCategoryDirectory(sourceCategory, targetCategory) {
   if (!sourceFolder || !targetFolder || !fs.existsSync(sourceFolder)) throw new Error('이동할 폴더를 찾을 수 없습니다.');
   await fsp.mkdir(targetFolder, { recursive: true });
   const destinationFolder = path.join(targetFolder, path.basename(sourceFolder));
+  if (path.resolve(destinationFolder) === path.resolve(sourceFolder)) return librarySnapshot();
   if (fs.existsSync(destinationFolder)) throw new Error('대상 폴더에 같은 이름의 폴더가 이미 있습니다.');
   await moveFile(sourceFolder, destinationFolder);
   const destinationCategory = target === '미분류'
@@ -696,17 +954,18 @@ async function moveCategoryDirectory(sourceCategory, targetCategory) {
   return { ...librarySnapshot(), idChanges, categoryMove: { from: source, to: destinationCategory } };
 }
 
-async function copyFileIntoCategory(filePath, categoryPath) {
+async function moveFileIntoCategory(filePath, categoryPath) {
   const folder = categoryFolderPath(categoryPath);
   if (!folder) throw new Error('대상 카테고리 폴더를 찾을 수 없습니다.');
   await fsp.mkdir(folder, { recursive: true });
   const destination = uniqueDestination(folder, path.basename(filePath));
-  await fsp.copyFile(filePath, destination);
+  await moveFile(filePath, destination);
   return destination;
 }
 
 async function moveSoundToFolder(sound, folder, categoryPath, { save = true } = {}) {
-  await fsp.mkdir(folder, { recursive: true });
+  const folderStat = await fsp.stat(folder).catch(() => null);
+  if (!folderStat?.isDirectory()) throw new Error('선택한 카테고리 폴더가 존재하지 않습니다. 기존 폴더를 선택해 주세요.');
   const destination = path.resolve(path.dirname(sound.path)) === path.resolve(folder)
     ? sound.path
     : uniqueDestination(folder, sound.fileName);
@@ -715,7 +974,7 @@ async function moveSoundToFolder(sound, folder, categoryPath, { save = true } = 
   const stat = await fsp.stat(destination);
   sound.path = destination;
   sound.fileName = path.basename(destination);
-  sound.id = stableId(destination);
+  sound.relativePath = soundRelativePath(destination) || sound.relativePath || '';
   sound.categoryPath = categoryPath || inferCategoryPath(destination);
   sound.category = sound.categoryPath.split('/').filter(Boolean).pop() || inferCategory(destination);
   sound.modifiedAt = stat.mtimeMs;
@@ -738,6 +997,8 @@ function hashFile(filePath) {
 }
 
 async function createWindow() {
+  const appPage = path.join(__dirname, 'index.html');
+  const appPageUrl = pathToFileURL(appPage).href;
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -752,13 +1013,19 @@ async function createWindow() {
       sandbox: true
     }
   });
-  await mainWindow.loadFile(path.join(__dirname, 'index.html'));
-  mainWindow.on('focus', () => scheduleAutoRescan('window-focus'));
+  mainWindow.webContents.on('will-navigate', (event, navigationUrl) => {
+    if (navigationUrl === appPageUrl || navigationUrl.startsWith(`${appPageUrl}#`)) return;
+    event.preventDefault();
+  });
+  await mainWindow.loadFile(appPage);
+  mainWindow.on('focus', () => {
+    if (Date.now() - lastFullScanAt > 5 * 60 * 1000) scheduleAutoRescan('window-focus');
+  });
   mainWindow.webContents.on('before-input-event', (event, input) => {
     if (shortcutCapture) return;
     if (input.type !== 'keyDown' || input.isAutoRepeat) return;
     const shortcut = normalizedShortcutFromInput(input);
-    if (shortcut === 'Space') return;
+    if (shortcut === 'Space' || shortcut === 'Enter') return;
     if (!Object.values(db.settings.shortcuts).includes(shortcut)) return;
     event.preventDefault();
     mainWindow.webContents.send('shortcut-triggered', shortcut);
@@ -783,50 +1050,155 @@ app.on('before-quit', () => {
   clearTimeout(watcherTimer);
   for (const watcher of folderWatchers.values()) watcher.close();
   folderWatchers.clear();
+  vaultStorage?.close();
 });
 
 ipcMain.handle('library:get', () => librarySnapshot());
 
 ipcMain.handle('library:add-files', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: '사운드 파일 추가',
+    title: '볼트로 이동할 사운드 파일 선택',
     properties: ['openFile', 'multiSelections'],
     filters: [{ name: 'Audio', extensions: [...AUDIO_EXTENSIONS].map((ext) => ext.slice(1)) }]
   });
   if (result.canceled) return null;
-  return indexFiles(result.filePaths);
+  const moved = [];
+  const root = activeVaultRoot();
+  if (!root) throw new Error('먼저 사운드 볼트를 열어 주세요.');
+  for (const filePath of result.filePaths) {
+    if (relativePathInside(root, filePath)) moved.push(filePath);
+    else {
+      const destination = uniqueDestination(root, path.basename(filePath));
+      await moveFile(filePath, destination);
+      moved.push(destination);
+    }
+  }
+  return indexFiles(moved);
 });
 
 ipcMain.handle('library:add-paths', async (_event, paths) => {
   const files = [];
+  const root = activeVaultRoot();
+  if (!root) throw new Error('먼저 사운드 볼트를 열어 주세요.');
   for (const itemPath of [...new Set(paths || [])]) {
     const stat = await fsp.stat(itemPath).catch(() => null);
     if (stat && isTrashPath(itemPath)) {
       throw new Error('휴지통 파일은 왼쪽의 원하는 카테고리 또는 선택한 카테고리 화면에 놓아주세요.');
     }
     if (stat?.isDirectory()) {
-      if (!db.settings.watchedFolders.includes(itemPath)) db.settings.watchedFolders.push(itemPath);
-      files.push(...await walkAudioFiles(itemPath));
+      if (relativePathInside(root, itemPath)) files.push(...await walkAudioFiles(itemPath));
+      else {
+        const destination = uniqueDestination(root, path.basename(itemPath));
+        await moveDirectory(itemPath, destination);
+        files.push(...await walkAudioFiles(destination));
+      }
     }
-    else if (stat?.isFile() && AUDIO_EXTENSIONS.has(path.extname(itemPath).toLowerCase())) files.push(itemPath);
+    else if (stat?.isFile() && AUDIO_EXTENSIONS.has(path.extname(itemPath).toLowerCase())) {
+      if (relativePathInside(root, itemPath)) files.push(itemPath);
+      else {
+        const destination = uniqueDestination(root, path.basename(itemPath));
+        await moveFile(itemPath, destination);
+        files.push(destination);
+      }
+    }
   }
-  db.settings.watchedFolders = canonicalizeWatchedFolders(db.settings.watchedFolders);
   refreshFolderWatchers();
   return indexFiles([...new Set(files)]);
 });
 
 ipcMain.handle('library:add-folder', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: '사운드 폴더 추가',
+    title: 'Sound Shelf 볼트 열기',
     properties: ['openDirectory']
   });
   if (result.canceled) return null;
-  const folder = result.filePaths[0];
-  if (!db.settings.watchedFolders.includes(folder)) db.settings.watchedFolders.push(folder);
-  db.settings.watchedFolders = canonicalizeWatchedFolders(db.settings.watchedFolders);
-  refreshFolderWatchers();
-  const files = await walkAudioFiles(folder);
-  return indexFiles(files);
+  await saveDb();
+  return activateVault(result.filePaths[0], { legacySounds: [], legacyCategoryOrder: [] });
+});
+
+ipcMain.handle('vault:open', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '기존 Sound Shelf 볼트 열기',
+    properties: ['openDirectory']
+  });
+  if (result.canceled) return null;
+  await saveDb();
+  return activateVault(result.filePaths[0], { legacySounds: [], legacyCategoryOrder: [] });
+});
+
+ipcMain.handle('vault:create', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '새 볼트로 사용할 폴더 선택 또는 생성',
+    buttonLabel: '이 폴더를 볼트로 사용',
+    properties: ['openDirectory', 'createDirectory']
+  });
+  if (result.canceled) return null;
+  const selected = result.filePaths[0];
+  const manifestPath = path.join(selected, '.sound-shelf', 'vault.json');
+  if (fs.existsSync(manifestPath)) throw new Error('이미 Sound Shelf 볼트인 폴더입니다. “기존 볼트 열기”를 사용해 주세요.');
+  await saveDb();
+  return activateVault(selected, { legacySounds: [], legacyCategoryOrder: [] });
+});
+
+ipcMain.handle('vault:locate', async () => {
+  const expectedVaultId = activeVault?.id || db.settings.currentVaultId;
+  if (!expectedVaultId) throw new Error('다시 연결할 볼트 정보가 없습니다.');
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '이동된 현재 볼트의 새 위치 선택',
+    properties: ['openDirectory']
+  });
+  if (result.canceled) return null;
+  const selected = result.filePaths[0];
+  const manifestPath = path.join(selected, '.sound-shelf', 'vault.json');
+  const manifest = JSON.parse(await fsp.readFile(manifestPath, 'utf8').catch(() => {
+    throw new Error('선택한 폴더에 Sound Shelf 볼트 정보가 없습니다.');
+  }));
+  if (manifest.id !== expectedVaultId) throw new Error('현재 볼트와 다른 볼트입니다. 다른 볼트는 “기존 볼트 열기”로 열어 주세요.');
+  return activateVault(selected, { legacySounds: [], legacyCategoryOrder: [] });
+});
+
+ipcMain.handle('vault:move', async () => {
+  const root = activeVaultRoot();
+  if (!activeVault || !root || !fs.existsSync(root)) throw new Error('이동할 현재 볼트를 찾을 수 없습니다.');
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '현재 볼트를 옮길 상위 폴더 선택',
+    buttonLabel: '이 위치로 이동',
+    properties: ['openDirectory', 'createDirectory']
+  });
+  if (result.canceled) return null;
+  const parent = path.resolve(result.filePaths[0]);
+  const relativeToVault = path.relative(root, parent);
+  if (!relativeToVault.startsWith('..') && !path.isAbsolute(relativeToVault)) {
+    throw new Error('현재 볼트의 하위 폴더 안으로는 볼트를 이동할 수 없습니다.');
+  }
+  const destination = path.join(parent, path.basename(root));
+  if (normalizedFsPath(destination) === normalizedFsPath(root)) return librarySnapshot();
+  if (fs.existsSync(destination)) throw new Error('대상 위치에 같은 이름의 폴더가 이미 있습니다.');
+  await saveDb();
+  await vaultStorage.backupPortableMetadata('before-move');
+  for (const watcher of folderWatchers.values()) watcher.close();
+  folderWatchers.clear();
+  vaultStorage.close();
+  try {
+    await moveDirectory(root, destination);
+  } catch (error) {
+    if (fs.existsSync(root)) await activateVault(root, { legacySounds: [], legacyCategoryOrder: [] });
+    throw error;
+  }
+  return activateVault(destination, { legacySounds: [], legacyCategoryOrder: [] });
+});
+
+ipcMain.handle('vault:check', async () => {
+  if (!vaultStorage) throw new Error('현재 열린 볼트가 없습니다.');
+  const result = await vaultStorage.integrityCheck();
+  return { ...result, vault: activeVault };
+});
+
+ipcMain.handle('vault:reveal', async () => {
+  const root = activeVaultRoot();
+  if (!root || !fs.existsSync(root)) throw new Error('현재 볼트 폴더를 찾을 수 없습니다.');
+  shell.showItemInFolder(path.join(root, '.sound-shelf'));
+  return true;
 });
 
 ipcMain.handle('library:rescan', async () => {
@@ -850,6 +1222,30 @@ ipcMain.handle('library:update', async (_event, payload) => {
   return librarySnapshot();
 });
 
+ipcMain.handle('library:rename', async (_event, { id, name }) => {
+  const sound = db.sounds.find((item) => item.id === id);
+  if (!sound || !fs.existsSync(sound.path)) throw new Error('이름을 바꿀 원본 파일을 찾을 수 없습니다.');
+  const safeName = String(name || '').trim().replace(/[\\/:*?"<>|]/g, '-').replace(/^\.+/, '').trim();
+  if (!safeName) throw new Error('새 사운드 이름을 입력해 주세요.');
+  const extension = path.extname(sound.path);
+  const destination = path.join(path.dirname(sound.path), `${safeName}${extension}`);
+  const oldId = sound.id;
+  if (normalizedFsPath(destination) !== normalizedFsPath(sound.path)) {
+    if (fs.existsSync(destination)) throw new Error('같은 이름의 파일이 이미 있습니다.');
+    await fsp.rename(sound.path, destination);
+  }
+  const stat = await fsp.stat(destination);
+  sound.path = destination;
+  sound.fileName = path.basename(destination);
+  sound.title = safeName;
+  sound.relativePath = soundRelativePath(destination) || sound.relativePath || '';
+  sound.modifiedAt = stat.mtimeMs;
+  sound.size = stat.size;
+  waveformCache.clear();
+  await saveDb();
+  return { ...librarySnapshot(), idChanges: { [oldId]: sound.id }, moved: { oldId, id: sound.id, path: destination } };
+});
+
 ipcMain.handle('library:update-batch', async (_event, { ids, updates, addTags }) => {
   const selected = new Set(ids || []);
   const allowed = ['favorite', 'rating'];
@@ -863,20 +1259,35 @@ ipcMain.handle('library:update-batch', async (_event, { ids, updates, addTags })
 });
 
 ipcMain.handle('library:move-category-batch', async (_event, { ids, category }) => {
-  const categoryParts = normalizeCategoryPath(category).split('/').filter(Boolean);
-  if (!categoryParts.length) throw new Error('카테고리 이름을 입력해 주세요.');
+  const normalizedCategory = normalizeCategoryPath(category);
+  const rootCategory = normalizedCategory === '미분류';
+  const categoryParts = rootCategory ? [] : normalizedCategory.split('/').filter(Boolean);
+  if (!rootCategory && !categoryParts.length) throw new Error('카테고리 이름을 입력해 주세요.');
+  const targetFolder = categoryFolderPath(normalizedCategory);
+  const targetStat = targetFolder ? await fsp.stat(targetFolder).catch(() => null) : null;
+  if (!targetStat?.isDirectory()) throw new Error('해당 카테고리 폴더가 없습니다. 목록에 있는 기존 폴더만 선택해 주세요.');
   const selected = db.sounds.filter((sound) => (ids || []).includes(sound.id));
   const idChanges = {};
+  let moved = 0;
+  let skippedMissing = 0;
   for (const sound of selected) {
-    if (!fs.existsSync(sound.path)) continue;
+    if (!fs.existsSync(sound.path)) {
+      skippedMissing += 1;
+      continue;
+    }
     const root = watchedRootForFile(sound.path) || db.settings.watchedFolders[0];
     if (!root) throw new Error('라이브러리 루트 폴더를 찾을 수 없습니다.');
     const oldId = sound.id;
-    await moveSoundToFolder(sound, path.join(root, ...categoryParts), categoryParts.join('/'), { save: false });
+    await moveSoundToFolder(sound, targetFolder, rootCategory ? '미분류' : categoryParts.join('/'), { save: false });
     idChanges[oldId] = sound.id;
+    moved += 1;
   }
   await saveDb();
-  return { ...librarySnapshot(), idChanges };
+  return {
+    ...librarySnapshot(),
+    idChanges,
+    moveResult: { requested: (ids || []).length, matched: selected.length, moved, skippedMissing }
+  };
 });
 
 ipcMain.handle('library:remove-batch', async (_event, { ids, trashFiles }) => {
@@ -899,7 +1310,18 @@ ipcMain.handle('library:backup-export', async () => {
   });
   if (result.canceled || !result.filePath) return null;
   await saveDb();
-  await fsp.copyFile(dbPath, result.filePath);
+  if (vaultStorage && activeVault) {
+    await writeJsonAtomic(result.filePath, {
+      type: 'sound-shelf-portable-backup',
+      schemaVersion: 1,
+      vault: { id: activeVault.id, name: activeVault.name },
+      metadata: await vaultStorage.loadMetadata(),
+      folderOrder: await vaultStorage.loadFolderOrder(),
+      createdAt: new Date().toISOString()
+    });
+  } else {
+    await fsp.copyFile(dbPath, result.filePath);
+  }
   return { ok: true, path: result.filePath };
 });
 
@@ -911,12 +1333,17 @@ ipcMain.handle('library:backup-import', async () => {
   if (result.canceled) return null;
   const candidate = JSON.parse(await fsp.readFile(result.filePaths[0], 'utf8'));
   await createAutomaticBackup('before-restore');
-  db = validateImportedDb(candidate);
-  db.settings.watchedFolders = canonicalizeWatchedFolders(db.settings.watchedFolders);
-  db.sounds = deduplicateSoundsByPath(db.sounds);
-  await saveDb();
-  refreshFolderWatchers();
-  return librarySnapshot();
+  if (candidate.type === 'sound-shelf-portable-backup' && candidate.metadata?.sounds && vaultStorage) {
+    await vaultStorage.backupPortableMetadata('before-restore');
+    await vaultStorage.saveMetadata(candidate.metadata.sounds);
+    await vaultStorage.saveFolderOrder(candidate.folderOrder || []);
+    return activateVault(activeVaultRoot(), { legacySounds: [] });
+  }
+  const imported = validateImportedDb(candidate);
+  const root = activeVaultRoot() || imported.settings.watchedFolders[0];
+  if (!root) throw new Error('백업을 복원할 볼트 폴더를 찾을 수 없습니다.');
+  db.settings = { ...db.settings, ...imported.settings };
+  return activateVault(root, { legacySounds: imported.sounds });
 });
 
 ipcMain.handle('library:collect-metadata', async () => {
@@ -926,6 +1353,7 @@ ipcMain.handle('library:collect-metadata', async () => {
     const sound = existing[index];
     const metadata = await probeAudio(sound.path);
     Object.assign(sound, metadata);
+    sound.technicalCached = true;
     updated += 1;
     if (index % 5 === 0 || index === existing.length - 1) {
       mainWindow?.webContents.send('scan-progress', { current: index + 1, total: existing.length, fileName: sound.fileName });
@@ -983,17 +1411,26 @@ ipcMain.handle('library:relink-one', async (_event, id) => {
     filters: [{ name: 'Audio', extensions: [...AUDIO_EXTENSIONS].map((ext) => ext.slice(1)) }]
   });
   if (result.canceled) return null;
-  const filePath = result.filePaths[0];
+  let filePath = result.filePaths[0];
+  const root = activeVaultRoot();
+  if (root && !relativePathInside(root, filePath)) {
+    const folder = categoryFolderPath(sound.categoryPath || sound.category || '미분류') || root;
+    await fsp.mkdir(folder, { recursive: true });
+    const destination = uniqueDestination(folder, path.basename(filePath));
+    await moveFile(filePath, destination);
+    filePath = destination;
+  }
   const stat = await fsp.stat(filePath);
   const oldId = sound.id;
   sound.path = filePath;
   sound.fileName = path.basename(filePath);
-  sound.id = stableId(filePath);
+  sound.relativePath = soundRelativePath(filePath) || sound.relativePath || '';
   sound.size = stat.size;
   sound.modifiedAt = stat.mtimeMs;
   sound.categoryPath = inferCategoryPath(filePath);
   sound.category = sound.categoryPath.split('/').pop();
   Object.assign(sound, await probeAudio(filePath));
+  sound.technicalCached = true;
   db.sounds = deduplicateSoundsByPath(db.sounds);
   await saveDb();
   return { ...librarySnapshot(), idChanges: { [oldId]: sound.id } };
@@ -1007,7 +1444,12 @@ ipcMain.handle('library:move-folder', async (_event, id) => {
     properties: ['openDirectory', 'createDirectory']
   });
   if (result.canceled) return null;
-  return moveSoundToFolder(sound, result.filePaths[0]);
+  const selectedFolder = result.filePaths[0];
+  const root = activeVaultRoot();
+  if (!root || relativePathInside(root, selectedFolder) === null) {
+    throw new Error('사운드는 현재 볼트 안의 폴더로만 이동할 수 있습니다.');
+  }
+  return moveSoundToFolder(sound, selectedFolder, inferCategoryPath(path.join(selectedFolder, sound.fileName)));
 });
 
 ipcMain.handle('library:move-category', async (_event, { id, category }) => {
@@ -1017,19 +1459,12 @@ ipcMain.handle('library:move-category', async (_event, { id, category }) => {
   const safeCategory = categoryParts.join('/');
   if (!sound || !fs.existsSync(sound.path)) throw new Error('원본 파일을 찾을 수 없습니다.');
   if (!safeCategory) throw new Error('카테고리 이름을 입력해 주세요.');
-  let root = watchedRootForFile(sound.path) || db.settings.watchedFolders[0];
-  if (!root) {
-    const result = await dialog.showOpenDialog(mainWindow, {
-      title: '카테고리 폴더를 만들 라이브러리 위치 선택',
-      properties: ['openDirectory', 'createDirectory']
-    });
-    if (result.canceled) return null;
-    root = result.filePaths[0];
-    db.settings.watchedFolders.push(root);
-    db.settings.watchedFolders = canonicalizeWatchedFolders(db.settings.watchedFolders);
-    refreshFolderWatchers();
-  }
-  return moveSoundToFolder(sound, path.join(root, ...categoryParts), safeCategory);
+  const root = watchedRootForFile(sound.path) || activeVaultRoot();
+  if (!root) throw new Error('현재 사운드 볼트를 찾을 수 없습니다.');
+  const targetFolder = categoryFolderPath(safeCategory);
+  const targetStat = targetFolder ? await fsp.stat(targetFolder).catch(() => null) : null;
+  if (!targetStat?.isDirectory()) throw new Error('해당 카테고리 폴더가 없습니다. 목록에 있는 기존 폴더만 선택해 주세요.');
+  return moveSoundToFolder(sound, targetFolder, safeCategory);
 });
 
 ipcMain.handle('category:create', async (_event, { parentCategory, name }) => {
@@ -1043,6 +1478,7 @@ ipcMain.handle('category:create', async (_event, { parentCategory, name }) => {
   await fsp.mkdir(folder, { recursive: true });
   const categoryPath = parent && parent !== '미분류' ? `${parent}/${safeName}` : safeName;
   if (!db.categories.includes(categoryPath)) db.categories.push(categoryPath);
+  db.categoryOrder = [...new Set([...(db.categoryOrder || []), categoryPath])];
   db.categories.sort((a, b) => a.localeCompare(b, 'ko'));
   await saveDb();
   return librarySnapshot();
@@ -1065,6 +1501,70 @@ ipcMain.handle('category:rename', async (_event, { category, name }) => {
   return { ...librarySnapshot(), idChanges, categoryMove: { from: sourceCategory, to: destinationCategory } };
 });
 
+ipcMain.handle('category:move-up', async (_event, category) => {
+  const source = normalizeCategoryPath(category);
+  const parts = source.split('/').filter(Boolean);
+  if (parts.length < 2) throw new Error('이미 최상위 폴더입니다.');
+  const target = parts.slice(0, -2).join('/') || '미분류';
+  return moveCategoryDirectory(source, target);
+});
+
+ipcMain.handle('category:reorder', async (_event, { categories, referenceCategory, position }) => {
+  const reference = normalizeCategoryPath(referenceCategory);
+  const requested = [...new Set((categories || []).map(normalizeCategoryPath))]
+    .filter(Boolean);
+  const sources = requested.filter((category) => !requested.some((other) => other !== category && category.startsWith(`${other}/`)));
+  const rootDrop = position === 'root';
+  if ((!reference && !rootDrop) || !sources.length) throw new Error('이동할 폴더 위치를 찾을 수 없습니다.');
+  if (sources.includes(reference)) return librarySnapshot();
+  const targetParent = rootDrop
+    ? ''
+    : position === 'inside'
+      ? reference
+      : reference.includes('/') ? reference.slice(0, reference.lastIndexOf('/')) : '';
+  const moved = [];
+  const idChanges = {};
+  let categoryMove = null;
+  for (const source of sources) {
+    if (source === '미분류') {
+      if (targetParent) throw new Error('미분류는 최상위 카테고리 안에서 순서만 변경할 수 있습니다.');
+      moved.push(source);
+      continue;
+    }
+    if (targetParent === source || targetParent.startsWith(`${source}/`)) {
+      throw new Error('폴더를 자기 하위 위치로 이동할 수 없습니다.');
+    }
+    const sourceParent = source.includes('/') ? source.slice(0, source.lastIndexOf('/')) : '';
+    let destination = source;
+    if (sourceParent !== targetParent) {
+      const snapshot = await moveCategoryDirectory(source, targetParent || '미분류');
+      destination = targetParent ? `${targetParent}/${source.split('/').pop()}` : source.split('/').pop();
+      Object.assign(idChanges, snapshot.idChanges || {});
+      categoryMove = { from: source, to: destination };
+    }
+    moved.push(destination);
+  }
+  const directSiblings = db.categories.filter((category) => {
+    const parent = category.includes('/') ? category.slice(0, category.lastIndexOf('/')) : '';
+    return parent === targetParent;
+  });
+  const orderIndex = new Map((db.categoryOrder || []).map((category, index) => [category, index]));
+  directSiblings.sort((a, b) => {
+    const ai = orderIndex.has(a) ? orderIndex.get(a) : Number.MAX_SAFE_INTEGER;
+    const bi = orderIndex.has(b) ? orderIndex.get(b) : Number.MAX_SAFE_INTEGER;
+    return ai - bi || a.localeCompare(b, 'ko', { numeric: true });
+  });
+  const ordered = directSiblings.filter((category) => !moved.includes(category));
+  let insertAt = ['before', 'after'].includes(position) ? ordered.indexOf(reference) : ordered.length;
+  if (insertAt < 0) insertAt = ordered.length;
+  else if (position === 'after') insertAt += 1;
+  ordered.splice(insertAt, 0, ...moved);
+  const siblingSet = new Set(directSiblings);
+  db.categoryOrder = [...(db.categoryOrder || []).filter((category) => !siblingSet.has(category)), ...ordered];
+  await saveDb();
+  return { ...librarySnapshot(), idChanges, categoryMove };
+});
+
 ipcMain.handle('category:trash', async (_event, category) => {
   const normalized = normalizeCategoryPath(category);
   if (!normalized || normalized === '미분류') throw new Error('미분류 루트는 삭제할 수 없습니다.');
@@ -1076,6 +1576,24 @@ ipcMain.handle('category:trash', async (_event, category) => {
     return soundCategory !== normalized && !soundCategory?.startsWith(`${normalized}/`);
   });
   db.categories = db.categories.filter((item) => item !== normalized && !item.startsWith(`${normalized}/`));
+  waveformCache.clear();
+  await saveDb();
+  return librarySnapshot();
+});
+
+ipcMain.handle('category:trash-batch', async (_event, categories) => {
+  const normalized = [...new Set((categories || []).map(normalizeCategoryPath))].filter((item) => item && item !== '미분류');
+  const targets = normalized.filter((item) => !normalized.some((other) => other !== item && item.startsWith(`${other}/`)));
+  if (!targets.length) throw new Error('삭제할 폴더가 없습니다.');
+  for (const category of targets) {
+    const folder = categoryFolderPath(category);
+    if (folder && fs.existsSync(folder)) await shell.trashItem(folder);
+    db.sounds = db.sounds.filter((sound) => {
+      const soundCategory = sound.categoryPath || sound.category;
+      return soundCategory !== category && !soundCategory?.startsWith(`${category}/`);
+    });
+    db.categories = db.categories.filter((item) => item !== category && !item.startsWith(`${category}/`));
+  }
   waveformCache.clear();
   await saveDb();
   return librarySnapshot();
@@ -1095,9 +1613,9 @@ ipcMain.handle('category:add-files', async (_event, category) => {
     filters: [{ name: 'Audio', extensions: [...AUDIO_EXTENSIONS].map((ext) => ext.slice(1)) }]
   });
   if (result.canceled) return null;
-  const copied = [];
-  for (const filePath of result.filePaths) copied.push(await copyFileIntoCategory(filePath, category));
-  return indexFiles(copied);
+  const moved = [];
+  for (const filePath of result.filePaths) moved.push(await moveFileIntoCategory(filePath, category));
+  return indexFiles(moved);
 });
 
 ipcMain.handle('category:drop-paths', async (_event, { category, paths }) => {
@@ -1105,7 +1623,7 @@ ipcMain.handle('category:drop-paths', async (_event, { category, paths }) => {
   const targetFolder = categoryFolderPath(targetCategory);
   if (!targetFolder) throw new Error('대상 폴더를 찾을 수 없습니다.');
   let snapshot = null;
-  const copiedFiles = [];
+  const movedFiles = [];
   let needsRescan = false;
   for (const itemPath of [...new Set(paths || [])]) {
     const stat = await fsp.stat(itemPath).catch(() => null);
@@ -1116,8 +1634,7 @@ ipcMain.handle('category:drop-paths', async (_event, { category, paths }) => {
         snapshot = await moveCategoryDirectory(sourceCategory, targetCategory);
       } else {
         const destination = uniqueDestination(targetFolder, path.basename(itemPath));
-        if (isTrashPath(itemPath)) await moveDirectory(itemPath, destination);
-        else await fsp.cp(itemPath, destination, { recursive: true, errorOnExist: true, force: false });
+        await moveDirectory(itemPath, destination);
         needsRescan = true;
       }
       continue;
@@ -1128,10 +1645,10 @@ ipcMain.handle('category:drop-paths', async (_event, { category, paths }) => {
     else if (isTrashPath(itemPath)) {
       const destination = uniqueDestination(targetFolder, path.basename(itemPath));
       await moveFile(itemPath, destination);
-      copiedFiles.push(destination);
-    } else copiedFiles.push(await copyFileIntoCategory(itemPath, targetCategory));
+      movedFiles.push(destination);
+    } else movedFiles.push(await moveFileIntoCategory(itemPath, targetCategory));
   }
-  if (copiedFiles.length) snapshot = await indexFiles(copiedFiles);
+  if (movedFiles.length) snapshot = await indexFiles(movedFiles);
   if (needsRescan) snapshot = await rescanWatchedFolders({ reportProgress: false });
   if (!snapshot) snapshot = await rescanWatchedFolders({ reportProgress: false });
   return snapshot;
@@ -1211,6 +1728,37 @@ ipcMain.handle('library:waveform', async (_event, id) => {
   return job;
 });
 
+ipcMain.handle('library:analyze-key', async (_event, { id, force = false }) => {
+  const sound = db.sounds.find((item) => item.id === id);
+  if (!sound || !fs.existsSync(sound.path)) throw new Error('분석할 원본 사운드 파일을 찾을 수 없습니다.');
+  const cached = sound.keyAnalysis;
+  if (!force && cached && Number(cached.sourceModifiedAt) === Number(sound.modifiedAt)) {
+    return { ...librarySnapshot(), keyAnalysisResult: { id: sound.id, analysis: cached, cached: true } };
+  }
+  try {
+    const script = await fsp.readFile(path.join(__dirname, 'key_detect.py'), 'utf8');
+    const { stdout } = await execFileAsync(findPython(), [
+      '-c', script,
+      sound.path,
+      findMediaTool('ffmpeg')
+    ], { maxBuffer: 1024 * 1024 * 4, timeout: 240000 });
+    const line = stdout.trim().split('\n').filter(Boolean).pop();
+    if (!line) throw new Error('조성 분석 결과가 없습니다.');
+    const result = JSON.parse(line);
+    if (!result.ok) throw new Error(result.message || '조성 분석에 실패했습니다.');
+    const analysis = {
+      ...result,
+      analyzedAt: Date.now(),
+      sourceModifiedAt: sound.modifiedAt
+    };
+    sound.keyAnalysis = analysis;
+    await saveDb();
+    return { ...librarySnapshot(), keyAnalysisResult: { id: sound.id, analysis, cached: false } };
+  } catch (error) {
+    throw new Error(`조성 분석 실패: ${error.message}`);
+  }
+});
+
 ipcMain.handle('library:prepare-clip', async (_event, payload) => {
   const sound = db.sounds.find((item) => item.id === payload?.id);
   if (!sound || !fs.existsSync(sound.path)) {
@@ -1268,13 +1816,17 @@ ipcMain.handle('resolve:insert', async (_event, sound) => {
   }
 });
 
-function startNativeDrag(event, filePath) {
-  if (!filePath || !fs.existsSync(filePath)) return;
+function startNativeDrag(event, filePaths) {
+  const files = (Array.isArray(filePaths) ? filePaths : [filePaths])
+    .filter((filePath) => filePath && fs.existsSync(filePath))
+    .map((filePath) => path.resolve(filePath));
+  if (!files.length) return;
   try {
     const iconBuffer = fs.readFileSync(path.join(__dirname, 'drag-icon.png'));
     const icon = nativeImage.createFromBuffer(iconBuffer).resize({ width: 48, height: 48 });
     if (icon.isEmpty()) throw new Error('드래그 아이콘을 읽을 수 없습니다.');
-    event.sender.startDrag({ file: path.resolve(filePath), icon });
+    if (files.length === 1) event.sender.startDrag({ file: files[0], icon });
+    else event.sender.startDrag({ files, icon });
   } catch (error) {
     console.error('Native drag failed:', error);
     event.sender.send('drag-error', error.message);
@@ -1282,4 +1834,7 @@ function startNativeDrag(event, filePath) {
 }
 
 ipcMain.on('library:start-drag', startNativeDrag);
-ipcMain.on('category:start-drag', (event, category) => startNativeDrag(event, categoryFolderPath(category)));
+ipcMain.on('category:start-drag', (event, categories) => {
+  const folders = (Array.isArray(categories) ? categories : [categories]).map((category) => categoryFolderPath(category));
+  startNativeDrag(event, folders);
+});

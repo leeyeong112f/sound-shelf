@@ -16,15 +16,15 @@
           <button class="nav-item" data-filter="favorites"><span>★</span> 즐겨찾기 <b id="favoriteCount">0</b></button>
         </nav>
         <div class="sidebar-groups">
-          <div class="section-label">카테고리 폴더</div>
+          <div class="section-label category-root-heading" data-root-drop title="폴더를 여기에 드롭하면 최상위로 이동"><span>카테고리 폴더</span><button id="newRootCategoryBtn" title="새 최상위 폴더 만들기" aria-label="새 최상위 폴더 만들기">＋</button></div>
           <div id="categoryList" class="category-list"></div>
           <div class="section-label">태그</div>
           <div id="tagList" class="category-list tag-list"></div>
         </div>
         <div class="sidebar-bottom">
-          <button id="addFolderBtn" class="primary-button">＋ 폴더 추가</button>
-          <button id="addFilesBtn" class="subtle-button">파일 추가</button>
-          <button id="settingsBtn" class="subtle-button">⚙ 단축키 설정</button>
+          <button id="addFolderBtn" class="primary-button">볼트 열기</button>
+          <button id="addFilesBtn" class="subtle-button">파일을 볼트로 이동</button>
+          <button id="settingsBtn" class="subtle-button">⚙ 설정</button>
         </div>
       </aside>
 
@@ -71,7 +71,7 @@
             <button id="detailPlayButton" class="detail-play" title="재생/정지 (Space)">▶</button>
             <div class="audition-title">
               <strong id="detailSoundName">목록에서 사운드 이름을 선택하세요</strong>
-              <small>Space 재생 · 파형 드래그로 구간 선택 · 선택 영역을 Resolve로 드래그</small>
+              <small>파형 클릭: 해당 위치 재생 · 플레이헤드 드래그: 위치 조절 · 구간 드래그: 시작점부터 재생</small>
             </div>
             <button id="clearRangeButton" class="clear-range hidden">선택 해제</button>
             <div class="volume-control" title="미리듣기 음량">
@@ -87,15 +87,21 @@
             <canvas id="detailWaveformCanvas"></canvas>
             <div id="detailWaveformLoading" class="detail-waveform-loading">파형 생성 중…</div>
             <div id="detailSelection" class="detail-selection hidden" draggable="false" title="클릭: 구간 재생 · 드래그: 선택 구간 전달"><span></span></div>
-            <div id="detailPlayhead" class="detail-playhead"></div>
+            <div id="detailPlayhead" class="detail-playhead" title="드래그하여 재생 위치 조절"></div>
           </div>
         </section>
 
         <section id="settingsPanel" class="settings-panel hidden">
           <div class="settings-heading">
-            <div><div class="eyebrow">PREFERENCES</div><h1>단축키 설정</h1><p>단축키 버튼을 누른 뒤 원하는 키 조합을 입력하세요.</p></div>
+            <div><div class="eyebrow">PREFERENCES</div><h1>Sound Shelf 설정</h1><p>볼트, 백업과 단축키를 한곳에서 관리합니다.</p></div>
             <button id="closeSettingsBtn" class="subtle-button">완료</button>
           </div>
+          <div class="vault-settings">
+            <div class="vault-settings-title"><div><span class="vault-badge">PORTABLE VAULT</span><h2 id="vaultName">열린 볼트 없음</h2><p id="vaultPath">볼트 폴더를 선택해 주세요.</p></div><button id="revealVaultBtn" class="subtle-button">Finder에서 보기</button></div>
+            <div class="tool-grid"><button id="openVaultBtn" class="primary-button">기존 볼트 열기</button><button id="createVaultBtn" class="subtle-button">새 볼트 만들기</button><button id="moveVaultBtn" class="subtle-button">현재 볼트 위치 변경</button><button id="locateVaultBtn" class="subtle-button">이동된 볼트 다시 연결</button><button id="checkVaultBtn" class="subtle-button">연결 상태 검사</button></div>
+            <p id="vaultHealth" class="performance-info">태그·별점·메모·Key 결과는 볼트 안에, 파형과 검색 캐시는 이 Mac에 저장됩니다.</p>
+          </div>
+          <h2 class="settings-section-title">단축키</h2>
           <div id="shortcutList" class="shortcut-list"></div>
           <div class="library-tools">
             <h2>라이브러리 관리</h2>
@@ -128,7 +134,6 @@
       </aside>
     </div>
 
-    <div id="dropOverlay" class="drop-overlay hidden"><div>＋ 사운드 파일 또는 폴더 추가</div></div>
     <div id="inputDialog" class="dialog-backdrop hidden">
       <form id="inputDialogForm" class="input-dialog">
         <h2 id="inputDialogTitle">입력</h2>
@@ -139,7 +144,7 @@
       </form>
     </div>
     <div id="contextMenu" class="context-menu hidden" role="menu"></div>
-    <div id="resultsDialog" class="dialog-backdrop hidden"><div class="results-dialog"><div class="results-heading"><h2>중복 파일 검사</h2><button id="closeResultsBtn">×</button></div><div id="resultsContent"></div></div></div>
+    <div id="resultsDialog" class="dialog-backdrop hidden"><div class="results-dialog"><div class="results-heading"><h2 id="resultsTitle">중복 파일 검사</h2><button id="closeResultsBtn">×</button></div><div id="resultsContent"></div></div></div>
     <div id="scanToast" class="toast hidden"></div>
     <audio id="audioPlayer"></audio>
     <script src="renderer.js"></script>

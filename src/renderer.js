@@ -2,6 +2,7 @@ const DEFAULT_SHORTCUTS = {
   search: 'Meta+S', moveCategory: 'Meta+M', editTags: 'Meta+T', addFiles: 'Meta+O',
   addFolder: 'Meta+Shift+O', trash: 'Meta+Backspace', reveal: 'Meta+Shift+R',
   favorite: 'Meta+Shift+F', settings: 'Meta+Comma', playPause: 'Space',
+  renameSound: 'Enter',
   insertResolve: 'Meta+F', newSubfolder: 'Meta+Shift+N'
 };
 const SHORTCUT_LABELS = {
@@ -9,12 +10,13 @@ const SHORTCUT_LABELS = {
   moveCategory: ['카테고리 폴더로 이동', '선택 파일을 실제 카테고리 폴더로 이동'],
   editTags: ['태그 편집', '선택 사운드의 태그 입력'],
   addFiles: ['파일 추가', '오디오 파일 선택'],
-  addFolder: ['폴더 추가', '오디오 폴더 등록'],
+  addFolder: ['볼트 열기', '다른 Sound Shelf 볼트 선택'],
   trash: ['원본 파일 삭제', '선택 파일을 macOS 휴지통으로 이동'],
   reveal: ['Finder에서 보기', '선택 파일 위치 열기'],
   favorite: ['즐겨찾기 전환', '선택 사운드 별표 켜기/끄기'],
   settings: ['단축키 설정', '이 설정 화면 열기'],
   playPause: ['재생/일시정지', '선택 사운드 미리 듣기'],
+  renameSound: ['사운드 이름 변경', '실제 오디오 파일명을 함께 변경'],
   insertResolve: ['Fairlight로 보내기', '선택 사운드(구간 선택 시 그 구간만)를 Resolve 타임헤드에 삽입'],
   newSubfolder: ['새 하위 폴더', '현재 보고 있는 카테고리 안에 새 폴더 생성']
 };
@@ -23,6 +25,7 @@ const state = {
   sounds: [],
   categories: [],
   categoryPaths: [],
+  categoryOrder: [],
   watchedFolders: [],
   filter: 'all',
   query: '',
@@ -39,11 +42,14 @@ const state = {
   view: 'library',
   previewVolume: 0.8,
   collapsedCategories: new Set(),
+  selectedCategories: new Set(),
+  categoryAnchor: null,
   sortBy: 'title',
   sortDirection: 1,
   minimumRating: 0,
   fileFilter: 'all',
   performance: null,
+  vault: null,
   visibleSounds: []
 };
 
@@ -109,6 +115,30 @@ function selectedSound() {
   return state.sounds.find((sound) => sound.id === state.selectedId);
 }
 
+function moveSoundSelectionWithArrow(direction) {
+  if (!state.visibleSounds.length) return;
+  const currentIndex = state.visibleSounds.findIndex((sound) => sound.id === state.selectedId);
+  const fallbackIndex = direction > 0 ? 0 : state.visibleSounds.length - 1;
+  const nextIndex = currentIndex < 0
+    ? fallbackIndex
+    : Math.max(0, Math.min(state.visibleSounds.length - 1, currentIndex + direction));
+  const nextSound = state.visibleSounds[nextIndex];
+  if (!nextSound) return;
+  state.selectedId = nextSound.id;
+  state.selectedIds = new Set([nextSound.id]);
+  state.selectionAnchorId = nextSound.id;
+
+  const rowTop = nextIndex * VIRTUAL_ROW_HEIGHT;
+  const rowBottom = rowTop + VIRTUAL_ROW_HEIGHT;
+  if (rowTop < list.scrollTop) list.scrollTop = rowTop;
+  else if (rowBottom > list.scrollTop + list.clientHeight) list.scrollTop = Math.max(0, rowBottom - list.clientHeight);
+
+  renderVirtualRows();
+  updateBatchToolbar();
+  renderInspector();
+  renderDetailPanel();
+}
+
 function showToast(message, duration = 3000) {
   const toast = $('#scanToast');
   toast.textContent = message;
@@ -124,7 +154,7 @@ function filteredSounds() {
     if (state.filter.startsWith('category:')) {
       const selectedPath = state.filter.slice(9);
       const soundPath = sound.categoryPath || sound.category || '미분류';
-      if (soundPath !== selectedPath && !soundPath.startsWith(`${selectedPath}/`)) return false;
+      if (soundPath !== selectedPath) return false;
     }
     if (state.filter.startsWith('tag:') && !(sound.tags || []).includes(state.filter.slice(4))) return false;
     if (Number(sound.rating || 0) < state.minimumRating) return false;
@@ -153,10 +183,12 @@ function setLibrary(snapshot) {
   state.sounds = snapshot.sounds || [];
   state.categories = snapshot.categories || [];
   state.categoryPaths = snapshot.categoryPaths || snapshot.categories || [];
+  state.categoryOrder = snapshot.categoryOrder || [];
   state.watchedFolders = snapshot.watchedFolders || [];
   state.shortcuts = { ...DEFAULT_SHORTCUTS, ...(snapshot.shortcuts || {}) };
   state.previewVolume = Number.isFinite(Number(snapshot.previewVolume)) ? Number(snapshot.previewVolume) : 0.8;
   state.performance = snapshot.performance || state.performance;
+  state.vault = snapshot.vault || null;
   player.volume = state.previewVolume;
   if (state.previewVolume > 0) lastAudibleVolume = state.previewVolume;
   if (snapshot.moved?.oldId && state.selectedId === snapshot.moved.oldId) state.selectedId = snapshot.moved.id;
@@ -170,6 +202,16 @@ function setLibrary(snapshot) {
       state.filter = `category:${snapshot.categoryMove.to}${current.slice(snapshot.categoryMove.from.length)}`;
     }
   }
+  if (snapshot.categoryMove) {
+    state.selectedCategories = new Set([...state.selectedCategories].map((category) => {
+      if (category === snapshot.categoryMove.from) return snapshot.categoryMove.to;
+      if (category.startsWith(`${snapshot.categoryMove.from}/`)) return `${snapshot.categoryMove.to}${category.slice(snapshot.categoryMove.from.length)}`;
+      return category;
+    }));
+  }
+  const validCategories = new Set(state.categoryPaths);
+  state.selectedCategories = new Set([...state.selectedCategories].filter((category) => validCategories.has(category)));
+  if (state.categoryAnchor && !validCategories.has(state.categoryAnchor)) state.categoryAnchor = null;
   render();
 }
 
@@ -207,19 +249,24 @@ function buildCategoryTree(paths) {
 }
 
 function renderCategoryNodes(nodes, depth = 0) {
+  const orderIndex = new Map(state.categoryOrder.map((category, index) => [category, index]));
   return [...nodes.values()]
-    .sort((a, b) => a.name.localeCompare(b.name, 'ko', { numeric: true }))
+    .sort((a, b) => {
+      const ai = orderIndex.has(a.path) ? orderIndex.get(a.path) : Number.MAX_SAFE_INTEGER;
+      const bi = orderIndex.has(b.path) ? orderIndex.get(b.path) : Number.MAX_SAFE_INTEGER;
+      return ai - bi || a.name.localeCompare(b.name, 'ko', { numeric: true });
+    })
     .map((node) => {
       const hasChildren = node.children.size > 0;
       const collapsed = state.collapsedCategories.has(node.path);
       const active = state.filter === `category:${node.path}` ? 'active' : '';
       const count = state.sounds.filter((sound) => {
         const soundPath = sound.categoryPath || sound.category || '미분류';
-        return soundPath === node.path || soundPath.startsWith(`${node.path}/`);
+        return soundPath === node.path;
       }).length;
       const children = hasChildren && !collapsed ? renderCategoryNodes(node.children, depth + 1) : '';
       return `<div class="category-tree-node">
-        <div class="category-tree-row ${active}" data-category-row="${escapeHtml(node.path)}" draggable="${node.path !== '미분류'}">
+        <div class="category-tree-row ${active} ${state.selectedCategories.has(node.path) ? 'multi-selected' : ''}" data-category-row="${escapeHtml(node.path)}" draggable="true">
           <button class="tree-toggle ${hasChildren ? '' : 'empty'}" data-category-toggle="${escapeHtml(node.path)}" ${hasChildren ? `aria-expanded="${!collapsed}" title="하위 폴더 ${collapsed ? '펼치기' : '접기'}"` : 'disabled'}>${hasChildren ? (collapsed ? '▶' : '▼') : ''}</button>
           <button class="tree-label" data-category="${escapeHtml(node.path)}" title="${escapeHtml(node.path)}">${escapeHtml(node.name)}</button>
           <b>${count}</b>
@@ -328,6 +375,7 @@ function renderInspector() {
     ['채널', sound.channels || '—'],
     ['코덱', (sound.codec || '—').toUpperCase()],
     ['크기', formatSize(sound.size)],
+    ['조성(Key)', currentKeyAnalysis(sound)?.detected ? `${currentKeyAnalysis(sound).display} · ${Math.round(currentKeyAnalysis(sound).confidence * 100)}%` : (currentKeyAnalysis(sound) ? '조성 불명확' : '우클릭하여 분석')],
     ['내장 설명', sound.embeddedMetadata?.description || sound.embeddedMetadata?.comment || '—'],
     ['내장 키워드', (sound.embeddedTags || []).join(', ') || '—']
   ].map(([key, value]) => `<div class="fact"><span>${key}</span><b>${value}</b></div>`).join('');
@@ -373,7 +421,15 @@ function renderSettings() {
       <button class="shortcut-capture" data-shortcut-action="${action}">${displayShortcut(state.shortcuts[action])}</button>
     </div>`).join('');
   const stats = state.performance;
-  if (stats) $('#performanceInfo').textContent = `저장 방식: ${stats.storage} · ${Number(stats.soundCount).toLocaleString()}개 · ${formatSize(stats.fileSize)} · 시작 로드 ${stats.loadMs}ms · 가상 목록 ${stats.virtualRenderMs || '—'}ms · ${stats.sqliteRecommended ? 'SQLite 전환 권장 규모' : '현재는 JSON이 더 가볍고 충분히 빠름'}`;
+  if (stats) $('#performanceInfo').textContent = `저장 방식: ${stats.storage} · ${Number(stats.soundCount).toLocaleString()}개 · 로컬 복구 정보 ${formatSize(stats.fileSize)} · 시작 로드 ${stats.loadMs}ms · 가상 목록 ${stats.virtualRenderMs || '—'}ms`;
+  $('#vaultName').textContent = state.vault?.name || '열린 볼트 없음';
+  $('#vaultPath').textContent = state.vault
+    ? `${state.vault.connected === false ? '연결 끊김 · ' : ''}${state.vault.root}`
+    : '볼트 폴더를 선택해 주세요.';
+  $('#revealVaultBtn').disabled = !state.vault?.connected;
+  $('#moveVaultBtn').disabled = !state.vault?.connected;
+  $('#locateVaultBtn').disabled = !state.vault;
+  $('#checkVaultBtn').disabled = !state.vault?.connected;
 }
 
 function render() {
@@ -567,6 +623,25 @@ async function playSelection(sound, selection, resume = false) {
   await player.play().catch(() => {});
 }
 
+async function seekAndPlay(sound, requestedTime) {
+  if (!sound || sound.missing || !sound.duration) return;
+  const targetTime = Math.max(0, Math.min(sound.duration - 0.001, Number(requestedTime) || 0));
+  state.playRangeEnd = null;
+  if (state.playingId !== sound.id) {
+    player.src = fileUrl(sound.path);
+    state.playingId = sound.id;
+  }
+  if (player.readyState < 1) {
+    await Promise.race([
+      new Promise((resolve) => player.addEventListener('loadedmetadata', resolve, { once: true })),
+      new Promise((resolve) => setTimeout(resolve, 800))
+    ]);
+  }
+  try { player.currentTime = targetTime; } catch {}
+  updateTransportDisplay();
+  await player.play().catch(() => {});
+}
+
 async function toggleSelectedPlayback() {
   const sound = selectedSound();
   if (!sound) return;
@@ -648,19 +723,30 @@ function openInputDialog({ title, description, value = '', placeholder = '', opt
     field.setAttribute('list', options.length ? 'inputDialogOptions' : '');
     backdrop.classList.remove('hidden');
     requestAnimationFrame(() => { field.focus(); field.select(); });
+    let settled = false;
     const finish = (result) => {
+      if (settled) return;
+      settled = true;
       backdrop.classList.add('hidden');
       $('#inputDialogForm').removeEventListener('submit', submit);
       $('#inputDialogCancel').removeEventListener('click', cancel);
       backdrop.removeEventListener('click', outside);
+      document.removeEventListener('keydown', escape, true);
       resolve(result);
     };
     const submit = (event) => { event.preventDefault(); finish(field.value.trim()); };
     const cancel = () => finish(null);
     const outside = (event) => { if (event.target === backdrop) finish(null); };
+    const escape = (event) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      finish(null);
+    };
     $('#inputDialogForm').addEventListener('submit', submit);
     $('#inputDialogCancel').addEventListener('click', cancel);
     backdrop.addEventListener('click', outside);
+    document.addEventListener('keydown', escape, true);
   });
 }
 
@@ -669,16 +755,18 @@ async function moveSelectedToCategory() {
   if (!sound) return showToast('먼저 이동할 사운드를 선택해 주세요.');
   const category = await openInputDialog({
     title: '카테고리 폴더로 이동',
-    description: `“${sound.title}” 파일을 이동할 카테고리를 입력하세요.`,
+    description: `“${sound.title}” 파일을 이동할 기존 카테고리를 선택하세요. 새 폴더는 만들지 않습니다.`,
     value: sound.categoryPath || sound.category || '', placeholder: '예: Trains/Horn', options: state.categoryPaths
   });
   if (!category) return;
-  showToast(`${category} 폴더로 파일 이동 중…`, 10000);
+  const existingCategory = state.categoryPaths.find((item) => item.normalize('NFC') === category.normalize('NFC'));
+  if (!existingCategory) return showToast('목록에 있는 기존 카테고리 폴더만 선택할 수 있습니다.', 5000);
+  showToast(`${existingCategory} 폴더로 파일 이동 중…`, 10000);
   try {
-    const snapshot = await window.soundLibrary.moveSoundToCategory({ id: sound.id, category });
+    const snapshot = await window.soundLibrary.moveSoundToCategory({ id: sound.id, category: existingCategory });
     if (!snapshot) return;
     setLibrary(snapshot);
-    showToast(`파일을 “${category}” 카테고리 폴더로 이동했습니다.`);
+    showToast(`파일을 “${existingCategory}” 카테고리 폴더로 이동했습니다.`);
   } catch (error) {
     showToast(`이동 실패: ${error.message}`, 5000);
   }
@@ -715,21 +803,37 @@ async function addTagsToSelection() {
 async function moveSelectionToCategory() {
   const ids = selectedIdList();
   if (!ids.length) return showToast('먼저 사운드를 선택해 주세요.');
-  const category = await openInputDialog({ title: '선택 항목 카테고리 이동', description: `${ids.length}개 원본 파일을 실제 카테고리 폴더로 이동합니다.`, placeholder: '예: 예능 효과음/황당', options: state.categoryPaths });
+  const category = await openInputDialog({ title: '선택 항목 카테고리 이동', description: `${ids.length}개 원본 파일을 이미 존재하는 카테고리 폴더로 이동합니다. 새 폴더는 만들지 않습니다.`, placeholder: '목록에서 기존 폴더 선택', options: state.categoryPaths });
   if (!category) return;
+  const existingCategory = state.categoryPaths.find((item) => item.normalize('NFC') === category.normalize('NFC'));
+  if (!existingCategory) return showToast('목록에 있는 기존 카테고리 폴더만 선택할 수 있습니다.', 5000);
   showToast(`${ids.length}개 파일 이동 중…`, 20000);
-  setLibrary(await window.soundLibrary.moveSoundsToCategory({ ids, category }));
-  showToast(`${ids.length}개 파일을 이동했습니다.`);
+  try {
+    const snapshot = await window.soundLibrary.moveSoundsToCategory({ ids, category: existingCategory });
+    setLibrary(snapshot);
+    const movedCount = Number(snapshot.moveResult?.moved ?? ids.length);
+    showToast(`${movedCount}개 파일을 이동했습니다.`);
+  } catch (error) {
+    showToast(`이동 실패: ${error.message}`, 5000);
+  }
 }
 
 async function trashSelection() {
   const ids = selectedIdList();
   if (!ids.length || !confirm(`선택한 ${ids.length}개 원본 파일을 휴지통으로 이동할까요?`)) return;
-  setLibrary(await window.soundLibrary.removeSoundsBatch({ ids, trashFiles: true }));
-  state.selectedIds.clear();
-  state.selectedId = null;
-  render();
-  showToast(`${ids.length}개 파일을 휴지통으로 이동했습니다.`);
+  if (state.playingId && ids.includes(state.playingId)) player.pause();
+  showToast(`${ids.length}개 파일을 휴지통으로 이동하는 중…`, 15000);
+  try {
+    const snapshot = await window.soundLibrary.removeSoundsBatch({ ids, trashFiles: true });
+    state.selectedIds.clear();
+    state.selectedId = null;
+    state.selectionAnchorId = null;
+    state.inspectorOpen = false;
+    setLibrary(snapshot);
+    showToast(`${ids.length}개 파일을 휴지통으로 이동했습니다.`);
+  } catch (error) {
+    showToast(`삭제 실패: ${error.message}`, 5000);
+  }
 }
 
 async function moveSelectedToFolder() {
@@ -774,6 +878,24 @@ async function renameCategory(category) {
   }
 }
 
+async function trashSelectedCategories() {
+  const categories = pruneNestedCategories([...state.selectedCategories]);
+  if (!categories.length) return;
+  if (!confirm(`선택한 ${categories.length}개 폴더와 안의 모든 파일을 macOS 휴지통으로 이동할까요?`)) return;
+  try {
+    if (state.filter.startsWith('category:')) {
+      const current = state.filter.slice(9);
+      if (categories.some((category) => current === category || current.startsWith(`${category}/`))) state.filter = 'all';
+    }
+    state.selectedCategories.clear();
+    state.categoryAnchor = null;
+    setLibrary(await window.soundLibrary.trashCategoryFolders(categories));
+    showToast(`${categories.length}개 폴더를 휴지통으로 이동했습니다.`);
+  } catch (error) {
+    showToast(`폴더 삭제 실패: ${error.message}`, 5000);
+  }
+}
+
 async function trashCategory(category) {
   if (!confirm(`“${category}” 폴더와 안의 모든 파일을 macOS 휴지통으로 이동할까요?`)) return;
   try {
@@ -790,7 +912,7 @@ async function addFilesToCategory(category) {
     const snapshot = await window.soundLibrary.addFilesToCategory(category);
     if (snapshot) {
       setLibrary(snapshot);
-      showToast('파일을 폴더에 복사해 추가했습니다.');
+      showToast('파일을 폴더로 이동했습니다.');
     }
   } catch (error) {
     showToast(`파일 추가 실패: ${error.message}`, 5000);
@@ -798,6 +920,66 @@ async function addFilesToCategory(category) {
 }
 
 let contextTarget = null;
+
+function currentKeyAnalysis(sound) {
+  const analysis = sound?.keyAnalysis;
+  if (!analysis || Number(analysis.sourceModifiedAt) !== Number(sound.modifiedAt)) return null;
+  return analysis;
+}
+
+function keyConfidenceLabel(confidence) {
+  const value = Number(confidence || 0);
+  if (value >= 0.75) return '높음';
+  if (value >= 0.52) return '보통';
+  return '낮음';
+}
+
+function showKeyAnalysisResult(sound, analysis) {
+  const confidence = Math.round(Number(analysis?.confidence || 0) * 100);
+  $('#resultsTitle').textContent = '사운드 조성(Key) 분석';
+  if (analysis?.detected) {
+    $('#resultsContent').innerHTML = `
+      <div class="key-result">
+        <div class="key-result-name">${escapeHtml(analysis.display)}</div>
+        <div class="key-result-korean">${escapeHtml(analysis.korean)} · Camelot ${escapeHtml(analysis.camelot)}</div>
+        <div class="key-metrics">
+          <div><span>신뢰도</span><b>${confidence}% · ${keyConfidenceLabel(analysis.confidence)}</b></div>
+          <div><span>튜닝 편차</span><b>${Number(analysis.tuningCents || 0) >= 0 ? '+' : ''}${Number(analysis.tuningCents || 0).toFixed(1)} cent</b></div>
+          <div><span>분석 대상</span><b>${escapeHtml(sound.title)}</b></div>
+        </div>
+        <p class="key-explanation">장·단조 프로파일, 코드 구성음, 시간대별 음정 안정성과 잡음 비율을 함께 분석한 결과입니다.</p>
+        <div class="key-alternatives"><strong>가까운 후보</strong>${(analysis.alternatives || []).map((candidate) => `<span>${escapeHtml(candidate.display)} · ${escapeHtml(candidate.camelot)}</span>`).join('')}</div>
+      </div>`;
+  } else {
+    $('#resultsContent').innerHTML = `
+      <div class="key-result uncertain">
+        <div class="key-result-name">조성 불명확</div>
+        <div class="key-result-korean">${escapeHtml(analysis?.reason || '이 사운드에서 안정적인 조성을 찾지 못했습니다.')}</div>
+        <div class="key-metrics"><div><span>추정 신뢰도</span><b>${confidence}% · 낮음</b></div><div><span>분석 대상</span><b>${escapeHtml(sound.title)}</b></div></div>
+        <p class="key-explanation">충격음·노이즈·짧은 효과음에는 음악적인 Key가 없을 수 있으므로 임의의 조성을 표시하지 않습니다.</p>
+        ${(analysis?.alternatives || []).length ? `<div class="key-alternatives"><strong>참고 후보(미확정)</strong>${analysis.alternatives.map((candidate) => `<span>${escapeHtml(candidate.display)} · ${escapeHtml(candidate.camelot)}</span>`).join('')}</div>` : ''}
+      </div>`;
+  }
+  $('#resultsDialog').classList.remove('hidden');
+}
+
+async function analyzeSelectedKey(force = true) {
+  const sound = selectedSound();
+  if (!sound) return showToast('먼저 조성을 분석할 사운드를 선택해 주세요.');
+  if (sound.missing) return showToast('원본 파일을 찾을 수 없습니다.');
+  showToast('조성(Key)을 분석하는 중… 긴 BGM은 시간이 조금 걸릴 수 있습니다.', 240000);
+  try {
+    const snapshot = await window.soundLibrary.analyzeKey({ id: sound.id, force });
+    const analysis = snapshot.keyAnalysisResult?.analysis;
+    setLibrary(snapshot);
+    const updated = state.sounds.find((item) => item.id === sound.id) || sound;
+    showKeyAnalysisResult(updated, analysis);
+    showToast(analysis.detected ? `${analysis.display} · 신뢰도 ${Math.round(analysis.confidence * 100)}%` : '안정적인 조성을 찾지 못했습니다.', 6000);
+  } catch (error) {
+    showToast(error.message, 7000);
+  }
+}
+
 function hideContextMenu() {
   $('#contextMenu').classList.add('hidden');
   contextTarget = null;
@@ -813,18 +995,26 @@ function showContextMenu(event, target) {
     const collapsed = state.collapsedCategories.has(target.category);
     menu.innerHTML = `
       ${hasChildren ? `<button data-context-action="toggle-category">하위 폴더 ${collapsed ? '펼치기' : '접기'}</button><div class="separator"></div>` : ''}
-      <button data-context-action="new-folder">새 하위 폴더</button>
+      <button data-context-action="new-folder">${protectedRoot ? '새 최상위 폴더' : '새 하위 폴더'}</button>
       <button data-context-action="add-files">이 폴더에 파일 추가…</button>
       <button data-context-action="reveal-category">Finder에서 보기</button>
-      ${protectedRoot ? '' : '<div class="separator"></div><button data-context-action="rename-category">이름 변경…</button><button class="danger" data-context-action="trash-category">폴더를 휴지통으로</button>'}`;
+      ${!protectedRoot && target.category.includes('/') ? '<button data-context-action="move-category-up">상위 폴더로 한 단계 이동</button>' : ''}
+      ${protectedRoot ? '' : '<div class="separator"></div><button data-context-action="rename-category">이름 변경…</button><button class="danger" data-context-action="trash-category">폴더를 휴지통으로</button>'}
+      ${state.selectedCategories.size > 1 && state.selectedCategories.has(target.category)
+        ? `<div class="separator"></div><button class="danger" data-context-action="trash-selected-categories">선택한 ${state.selectedCategories.size}개 폴더를 휴지통으로</button>`
+        : ''}`;
   } else {
     const targetSound = state.sounds.find((sound) => sound.id === target.id);
+    const keyAnalysis = currentKeyAnalysis(targetSound);
+    const selectedSoundCount = state.selectedIds.has(target.id) ? state.selectedIds.size : 1;
     menu.innerHTML = `
       ${targetSound?.missing ? '<button data-context-action="relink-sound">누락 파일 재연결…</button><div class="separator"></div>' : ''}
+      ${keyAnalysis ? `<button data-context-action="view-key">조성(Key): ${escapeHtml(keyAnalysis.detected ? `${keyAnalysis.display} · ${Math.round(keyAnalysis.confidence * 100)}%` : '불명확')}</button><button data-context-action="analyze-key">조성 다시 분석…</button><div class="separator"></div>` : '<button data-context-action="analyze-key">조성(Key) 분석…</button><div class="separator"></div>'}
+      <button data-context-action="rename-sound">이름 변경…</button>
       <button data-context-action="move-category">카테고리 폴더로 이동…</button>
       <button data-context-action="move-folder">다른 폴더로 이동…</button>
       <button data-context-action="reveal-sound">Finder에서 보기</button>
-      <div class="separator"></div><button class="danger" data-context-action="trash-sound">원본 파일을 휴지통으로</button>`;
+      <div class="separator"></div><button class="danger" data-context-action="trash-sound">${selectedSoundCount > 1 ? `선택한 ${selectedSoundCount}개 파일을 휴지통으로` : '원본 파일을 휴지통으로'}</button>`;
   }
   menu.classList.remove('hidden');
   const rect = menu.getBoundingClientRect();
@@ -833,15 +1023,7 @@ function showContextMenu(event, target) {
 }
 
 async function trashSelected() {
-  const sound = selectedSound();
-  if (!sound) return showToast('먼저 삭제할 사운드를 선택해 주세요.');
-  if (!confirm(`“${sound.title}” 원본 파일을 macOS 휴지통으로 이동할까요?\n이 항목은 라이브러리에서도 삭제됩니다.`)) return;
-  if (state.playingId === sound.id) player.pause();
-  state.selectedId = null;
-  state.selectedIds.delete(sound.id);
-  state.inspectorOpen = false;
-  setLibrary(await window.soundLibrary.removeSound({ id: sound.id, trashFile: true }));
-  showToast('원본 파일을 휴지통으로 이동했습니다.');
+  return trashSelection();
 }
 
 async function toggleFavoriteSelected() {
@@ -873,10 +1055,34 @@ async function insertSelectedIntoResolve() {
   showToast(result.message, result.ok ? 2200 : 6000);
 }
 
+function fileNameWithoutExtension(fileName) {
+  return String(fileName || '').replace(/\.[^.]+$/, '');
+}
+
+async function renameSelectedSound() {
+  const sound = selectedSound();
+  if (!sound) return showToast('먼저 이름을 바꿀 사운드를 선택해 주세요.');
+  if (sound.missing) return showToast('원본 파일을 찾을 수 없습니다.');
+  const currentName = fileNameWithoutExtension(sound.fileName);
+  const name = await openInputDialog({
+    title: '사운드 이름 변경',
+    description: '실제 오디오 파일명도 함께 변경됩니다. 확장자는 그대로 유지됩니다.',
+    value: currentName,
+    placeholder: '새 사운드 이름'
+  });
+  if (!name || name === currentName) return;
+  try {
+    setLibrary(await window.soundLibrary.renameSound({ id: sound.id, name }));
+    showToast('사운드 이름과 실제 파일명을 변경했습니다.');
+  } catch (error) {
+    showToast(`이름 변경 실패: ${error.message}`, 5000);
+  }
+}
+
 async function runShortcut(action) {
   if (action === 'search') {
     state.view = 'library'; render(); $('#searchInput').focus(); $('#searchInput').select();
-  } else if (action === 'moveCategory') await moveSelectedToCategory();
+  } else if (action === 'moveCategory') await moveSelectionToCategory();
   else if (action === 'editTags') await editSelectedTags();
   else if (action === 'addFiles') setLibrary(await window.soundLibrary.addFiles());
   else if (action === 'addFolder') setLibrary(await window.soundLibrary.addFolder());
@@ -885,6 +1091,7 @@ async function runShortcut(action) {
   else if (action === 'favorite') await toggleFavoriteSelected();
   else if (action === 'settings') openSettings();
   else if (action === 'playPause') toggleSelectedPlayback();
+  else if (action === 'renameSound') await renameSelectedSound();
   else if (action === 'insertResolve') await insertSelectedIntoResolve();
   else if (action === 'newSubfolder') {
     const parent = state.filter.startsWith('category:') ? state.filter.slice(9) : '미분류';
@@ -964,28 +1171,77 @@ list.addEventListener('scroll', () => {
   virtualRenderFrame = requestAnimationFrame(renderVirtualRows);
 });
 
+let internalNativeDrag = false;
+let internalDragResetTimer = null;
+let internalDraggedCategories = [];
+let internalDraggedSoundIds = [];
+const CATEGORY_DRAG_TYPE = 'application/x-sound-shelf-categories';
+
+function markInternalNativeDrag(kind = 'sound') {
+  internalNativeDrag = kind;
+  clearTimeout(internalDragResetTimer);
+  internalDragResetTimer = setTimeout(() => { internalNativeDrag = false; }, 30000);
+}
+
+function clearInternalNativeDrag() {
+  internalNativeDrag = false;
+  internalDraggedCategories = [];
+  internalDraggedSoundIds = [];
+  clearTimeout(internalDragResetTimer);
+  internalDragResetTimer = null;
+}
+
 list.addEventListener('dragstart', (event) => {
   const row = event.target.closest('.sound-row');
   if (!row) return event.preventDefault();
   const sound = state.sounds.find((item) => item.id === row.dataset.id);
   event.preventDefault();
-  if (!sound?.missing) window.soundLibrary.startDrag(sound.path);
+  if (!sound?.missing) {
+    const draggedSounds = state.selectedIds.size > 1 && state.selectedIds.has(sound.id)
+      ? state.sounds.filter((item) => state.selectedIds.has(item.id) && !item.missing)
+      : [sound];
+    internalDraggedSoundIds = draggedSounds.map((item) => item.id);
+    markInternalNativeDrag();
+    window.soundLibrary.startDrag(draggedSounds.map((item) => item.path));
+  }
 });
 
 $('#categoryList').addEventListener('dragstart', (event) => {
   const row = event.target.closest('[data-category-row]');
-  if (!row || row.dataset.categoryRow === '미분류') return event.preventDefault();
-  event.preventDefault();
-  window.soundLibrary.startCategoryDrag(row.dataset.categoryRow);
+  if (!row) return event.preventDefault();
+  const dragged = row.dataset.categoryRow;
+  const categories = state.selectedCategories.size > 1 && state.selectedCategories.has(dragged)
+    ? pruneNestedCategories([...state.selectedCategories])
+    : [dragged];
+  internalDraggedCategories = categories;
+  markInternalNativeDrag('category');
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData(CATEGORY_DRAG_TYPE, JSON.stringify(categories));
+  event.dataTransfer.setData('text/plain', categories.join('\n'));
+  if (event.dataTransfer.setDragImage) event.dataTransfer.setDragImage(row, 18, Math.min(18, row.clientHeight / 2));
+  row.classList.add('dragging');
 });
 
 document.addEventListener('contextmenu', (event) => {
   const categoryRow = event.target.closest('[data-category-row]');
-  if (categoryRow) return showContextMenu(event, { type: 'category', category: categoryRow.dataset.categoryRow });
+  if (categoryRow) {
+    if (state.selectedCategories.size && !state.selectedCategories.has(categoryRow.dataset.categoryRow)) {
+      state.selectedCategories.clear();
+      renderSidebar();
+    }
+    return showContextMenu(event, { type: 'category', category: categoryRow.dataset.categoryRow });
+  }
+  if (event.target.closest('[data-root-drop]')) return showContextMenu(event, { type: 'category', category: '미분류' });
   if (event.target.closest('#categoryList')) return showContextMenu(event, { type: 'category', category: '미분류' });
   const soundRow = event.target.closest('.sound-row');
   if (soundRow) {
     state.selectedId = soundRow.dataset.id;
+    if (!state.selectedIds.has(soundRow.dataset.id)) {
+      state.selectedIds = new Set([soundRow.dataset.id]);
+      state.selectionAnchorId = soundRow.dataset.id;
+      renderVirtualRows();
+      updateBatchToolbar();
+    }
     state.inspectorOpen = false;
     renderDetailPanel();
     return showContextMenu(event, { type: 'sound', id: soundRow.dataset.id });
@@ -1011,10 +1267,20 @@ detailWrap.addEventListener('pointerdown', (event) => {
   if (!sound?.duration) return;
   event.preventDefault();
   const ratio = waveformRatio(event);
-  selectionGesture = { id: sound.id, pointerId: event.pointerId, startRatio: ratio };
+  const scrubbing = Boolean(event.target.closest('#detailPlayhead'));
+  selectionGesture = {
+    id: sound.id,
+    pointerId: event.pointerId,
+    startRatio: ratio,
+    startX: event.clientX,
+    mode: scrubbing ? 'scrub' : 'pending',
+    ratio
+  };
+  if (scrubbing) {
+    player.pause();
+    $('#detailPlayhead').classList.add('scrubbing');
+  }
   detailWrap.setPointerCapture(event.pointerId);
-  state.selections.set(sound.id, { start: ratio * sound.duration, end: ratio * sound.duration, path: '', preparing: false });
-  updateDetailSelection();
 });
 
 detailWrap.addEventListener('pointermove', (event) => {
@@ -1022,28 +1288,50 @@ detailWrap.addEventListener('pointermove', (event) => {
   const sound = selectedSound();
   if (!sound || sound.id !== selectionGesture.id) return;
   const ratio = waveformRatio(event);
+  selectionGesture.ratio = ratio;
+  if (selectionGesture.mode === 'scrub') {
+    $('#detailCurrentTime').textContent = formatDetailedDuration(ratio * sound.duration);
+    $('#detailPlayhead').style.left = `${ratio * 100}%`;
+    return;
+  }
+  if (selectionGesture.mode === 'pending' && Math.abs(event.clientX - selectionGesture.startX) < 5) return;
+  selectionGesture.mode = 'selection';
   const start = Math.min(selectionGesture.startRatio, ratio) * sound.duration;
   const end = Math.max(selectionGesture.startRatio, ratio) * sound.duration;
   state.selections.set(sound.id, { start, end, path: '', preparing: false });
   updateDetailSelection();
 });
 
-detailWrap.addEventListener('pointerup', (event) => {
+detailWrap.addEventListener('pointerup', async (event) => {
   if (!selectionGesture || event.pointerId !== selectionGesture.pointerId) return;
   const sound = selectedSound();
-  const selection = sound ? state.selections.get(sound.id) : null;
+  const gesture = selectionGesture;
   if (detailWrap.hasPointerCapture(event.pointerId)) detailWrap.releasePointerCapture(event.pointerId);
   selectionGesture = null;
-  if (!sound || !selection) return;
+  $('#detailPlayhead').classList.remove('scrubbing');
+  if (!sound) return;
+  if (gesture.mode === 'scrub' || gesture.mode === 'pending') {
+    state.selections.delete(sound.id);
+    updateDetailSelection();
+    await seekAndPlay(sound, gesture.ratio * sound.duration);
+    return;
+  }
+  const selection = state.selections.get(sound.id);
+  if (!selection) return;
   if (selection.end - selection.start < 0.05) {
     state.selections.delete(sound.id);
     updateDetailSelection();
     return;
   }
   prepareSelection(sound, selection);
+  await playSelection(sound, selection);
 });
 
-detailWrap.addEventListener('pointercancel', () => { selectionGesture = null; });
+detailWrap.addEventListener('pointercancel', () => {
+  selectionGesture = null;
+  $('#detailPlayhead').classList.remove('scrubbing');
+  updateTransportDisplay();
+});
 detailSelection.addEventListener('click', () => {
   const sound = selectedSound();
   if (sound) playSelection(sound, state.selections.get(sound.id));
@@ -1051,8 +1339,44 @@ detailSelection.addEventListener('click', () => {
 detailSelection.addEventListener('dragstart', (event) => {
   event.preventDefault();
   const clipPath = detailSelection.dataset.clipPath;
-  if (clipPath) window.soundLibrary.startDrag(clipPath);
+  if (clipPath) {
+    markInternalNativeDrag();
+    window.soundLibrary.startDrag(clipPath);
+  }
 });
+
+function visibleCategoryOrder() {
+  return [...document.querySelectorAll('#categoryList [data-category-row]')].map((row) => row.dataset.categoryRow);
+}
+
+function pruneNestedCategories(paths) {
+  return paths.filter((candidate) => !paths.some((other) => other !== candidate && candidate.startsWith(`${other}/`)));
+}
+
+function clearCategorySelection() {
+  if (!state.selectedCategories.size) return;
+  state.selectedCategories.clear();
+  renderSidebar();
+}
+
+function toggleCategorySelection(categoryPath, { range = false } = {}) {
+  if (categoryPath === '미분류') return;
+  if (range) {
+    const order = visibleCategoryOrder();
+    const anchor = state.categoryAnchor && order.includes(state.categoryAnchor) ? state.categoryAnchor : categoryPath;
+    const start = order.indexOf(anchor);
+    const end = order.indexOf(categoryPath);
+    if (start < 0 || end < 0) return;
+    const [from, to] = start <= end ? [start, end] : [end, start];
+    state.selectedCategories = new Set(order.slice(from, to + 1).filter((item) => item !== '미분류'));
+    if (!order.includes(state.categoryAnchor)) state.categoryAnchor = anchor;
+  } else {
+    if (state.selectedCategories.has(categoryPath)) state.selectedCategories.delete(categoryPath);
+    else state.selectedCategories.add(categoryPath);
+    state.categoryAnchor = categoryPath;
+  }
+  renderSidebar();
+}
 
 function toggleCategoryCollapse(categoryPath) {
   const hasChildren = state.categoryPaths.some((category) => category.startsWith(`${categoryPath}/`));
@@ -1067,11 +1391,28 @@ document.addEventListener('click', (event) => {
   const categoryButton = event.target.closest('[data-category]');
   const categoryToggle = event.target.closest('[data-category-toggle]');
   const tagButton = event.target.closest('[data-tag]');
+  const categoryRowEl = event.target.closest('[data-category-row]');
+  const multiSelectClick = categoryRowEl && !categoryToggle && (event.shiftKey || event.metaKey);
+  if (multiSelectClick) {
+    event.preventDefault();
+    toggleCategorySelection(categoryRowEl.dataset.categoryRow, { range: event.shiftKey });
+    if (!event.target.closest('#contextMenu')) hideContextMenu();
+    return;
+  }
+  if (state.selectedCategories.size && !event.target.closest('#categoryList') && !event.target.closest('#contextMenu')) {
+    clearCategorySelection();
+  }
   if (filterButton) { state.view = 'library'; state.filter = filterButton.dataset.filter; render(); }
   if (categoryToggle) {
     toggleCategoryCollapse(categoryToggle.dataset.categoryToggle);
   }
-  if (categoryButton) { state.view = 'library'; state.filter = `category:${categoryButton.dataset.category}`; render(); }
+  if (categoryButton) {
+    state.view = 'library';
+    state.filter = `category:${categoryButton.dataset.category}`;
+    state.selectedCategories.clear();
+    state.categoryAnchor = categoryButton.dataset.category;
+    render();
+  }
   if (tagButton) { state.view = 'library'; state.filter = `tag:${tagButton.dataset.tag}`; render(); }
   if (!event.target.closest('#contextMenu')) hideContextMenu();
 });
@@ -1093,19 +1434,40 @@ $('#contextMenu').addEventListener('click', async (event) => {
     if (action === 'new-folder') return createSubfolder(target.category);
     if (action === 'add-files') return addFilesToCategory(target.category);
     if (action === 'rename-category') return renameCategory(target.category);
+    if (action === 'move-category-up') {
+      try {
+        setLibrary(await window.soundLibrary.moveCategoryUp(target.category));
+        showToast('폴더를 상위 단계로 이동했습니다.');
+      } catch (error) {
+        showToast(`폴더 이동 실패: ${error.message}`, 5000);
+      }
+      return;
+    }
     if (action === 'trash-category') return trashCategory(target.category);
+    if (action === 'trash-selected-categories') return trashSelectedCategories();
     if (action === 'reveal-category') {
       try { await window.soundLibrary.revealCategoryFolder(target.category); } catch (error) { showToast(error.message, 4000); }
     }
     return;
   }
+  const keepMultipleSelection = action === 'trash-sound'
+    && state.selectedIds.size > 1
+    && state.selectedIds.has(target.id);
   state.selectedId = target.id;
-  state.selectedIds = new Set([target.id]);
+  if (!keepMultipleSelection) state.selectedIds = new Set([target.id]);
   if (action === 'relink-sound') {
     const snapshot = await window.soundLibrary.relinkOne(target.id);
     if (snapshot) { setLibrary(snapshot); showToast('원본 파일을 재연결했습니다.'); }
     return;
   }
+  if (action === 'view-key') {
+    const sound = selectedSound();
+    const analysis = currentKeyAnalysis(sound);
+    if (analysis) showKeyAnalysisResult(sound, analysis);
+    return;
+  }
+  if (action === 'analyze-key') return analyzeSelectedKey(true);
+  if (action === 'rename-sound') return renameSelectedSound();
   if (action === 'move-category') return moveSelectedToCategory();
   if (action === 'move-folder') return moveSelectedToFolder();
   if (action === 'trash-sound') return trashSelected();
@@ -1130,10 +1492,60 @@ $('#batchFavoriteBtn').addEventListener('click', async () => setLibrary(await wi
 $('#batchTrashBtn').addEventListener('click', trashSelection);
 $('#clearSelectionBtn').addEventListener('click', () => { state.selectedIds.clear(); state.selectedId = null; render(); });
 $('#addFolderBtn').addEventListener('click', async () => setLibrary(await window.soundLibrary.addFolder()));
+$('#newRootCategoryBtn').addEventListener('click', (event) => {
+  event.stopPropagation();
+  createSubfolder('미분류');
+});
 $('#emptyAddBtn').addEventListener('click', async () => setLibrary(await window.soundLibrary.addFolder()));
 $('#addFilesBtn').addEventListener('click', async () => setLibrary(await window.soundLibrary.addFiles()));
 $('#rescanBtn').addEventListener('click', async () => setLibrary(await window.soundLibrary.rescan()));
 $('#settingsBtn').addEventListener('click', openSettings);
+$('#openVaultBtn').addEventListener('click', async () => {
+  try {
+    const snapshot = await window.soundLibrary.openVault();
+    if (!snapshot) return;
+    state.selectedIds.clear(); state.selectedId = null;
+    setLibrary(snapshot);
+    showToast(`“${snapshot.vault?.name || '볼트'}”를 열었습니다.`);
+  } catch (error) { alert(error.message); }
+});
+$('#createVaultBtn').addEventListener('click', async () => {
+  try {
+    const snapshot = await window.soundLibrary.createVault();
+    if (!snapshot) return;
+    state.selectedIds.clear(); state.selectedId = null;
+    setLibrary(snapshot);
+    showToast('새 Sound Shelf 볼트를 만들었습니다.');
+  } catch (error) { alert(error.message); }
+});
+$('#locateVaultBtn').addEventListener('click', async () => {
+  try {
+    const snapshot = await window.soundLibrary.locateVault();
+    if (!snapshot) return;
+    setLibrary(snapshot);
+    showToast('이동된 볼트의 새 위치를 연결했습니다.');
+  } catch (error) { alert(error.message); }
+});
+$('#moveVaultBtn').addEventListener('click', async () => {
+  if (!confirm('현재 볼트의 모든 사운드와 정리 정보를 선택한 위치로 실제 이동합니다. 계속할까요?')) return;
+  try {
+    const snapshot = await window.soundLibrary.moveVault();
+    if (!snapshot) return;
+    setLibrary(snapshot);
+    showToast('볼트 위치를 변경했습니다.', 5000);
+  } catch (error) { alert(error.message); }
+});
+$('#checkVaultBtn').addEventListener('click', async () => {
+  try {
+    const result = await window.soundLibrary.checkVault();
+    const message = `메타데이터 ${result.total.toLocaleString()}개 · 누락 ${result.missingFiles}개 · 중복 경로 ${result.duplicatePaths}개 · 로컬 캐시 ${result.cacheEntries.toLocaleString()}개`;
+    $('#vaultHealth').textContent = `${result.ok ? '✓ 볼트 구조 정상' : '⚠ 확인 필요'} · ${message}`;
+    showToast(result.ok ? '볼트 연결 상태가 정상입니다.' : '볼트에서 확인할 항목이 발견되었습니다.', 5000);
+  } catch (error) { alert(error.message); }
+});
+$('#revealVaultBtn').addEventListener('click', async () => {
+  try { await window.soundLibrary.revealVault(); } catch (error) { alert(error.message); }
+});
 $('#exportBackupBtn').addEventListener('click', async () => {
   const result = await window.soundLibrary.exportBackup();
   if (result?.ok) showToast(`백업을 저장했습니다: ${result.path}`, 5000);
@@ -1160,6 +1572,7 @@ $('#findDuplicatesBtn').addEventListener('click', async () => {
   showToast('같은 크기의 파일을 해시로 검사하는 중…', 60000);
   const result = await window.soundLibrary.findDuplicates();
   duplicateGroups = result.groups || [];
+  $('#resultsTitle').textContent = '중복 파일 검사';
   $('#resultsContent').innerHTML = duplicateGroups.length ? duplicateGroups.map((group, groupIndex) => `
     <div class="duplicate-group"><strong>동일 콘텐츠 ${group.length}개 · ${formatSize(group[0].size)}</strong>${group.map((sound, index) => `
       <div class="duplicate-file"><div><b>${escapeHtml(sound.title)}</b><br><small>${escapeHtml(sound.path)}</small></div>${index ? `<button data-duplicate-trash="${sound.id}" data-group="${groupIndex}">휴지통</button>` : '<span class="dim">유지</span>'}</div>`).join('')}</div>`).join('') : '<p>콘텐츠가 완전히 같은 중복 파일이 없습니다.</p>';
@@ -1263,6 +1676,19 @@ $('#removeBtn').addEventListener('click', async (event) => {
 
 document.addEventListener('keydown', (event) => {
   if (event.target.closest('.shortcut-capture.recording')) return;
+  const isSearchField = document.activeElement === $('#searchInput');
+  const isEditing = (!isSearchField && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName))
+    || document.activeElement.isContentEditable;
+  if (['ArrowUp', 'ArrowDown'].includes(event.key) && !isEditing && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    event.preventDefault();
+    moveSoundSelectionWithArrow(event.key === 'ArrowDown' ? 1 : -1);
+    return;
+  }
+  if (event.key === 'Escape' && state.selectedCategories.size) {
+    state.categoryAnchor = null;
+    clearCategorySelection();
+    return;
+  }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a' && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
     event.preventDefault();
     state.selectedIds = new Set(state.visibleSounds.map((sound) => sound.id));
@@ -1273,44 +1699,119 @@ document.addEventListener('keydown', (event) => {
   const shortcut = shortcutFromKeyboardEvent(event);
   const action = actionForShortcut(shortcut);
   if (!action) return;
+  if (shortcut === 'Enter' && ['INPUT', 'TEXTAREA', 'BUTTON', 'SELECT'].includes(document.activeElement.tagName)) return;
   if (shortcut === 'Space' && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
   event.preventDefault();
   runShortcut(action);
 });
 
-let dragDepth = 0;
+function clearCategoryDropIndicators() {
+  document.querySelectorAll('.category-tree-row.drag-over, .category-tree-row.drag-between-before, .category-tree-row.drag-between-after')
+    .forEach((row) => {
+      row.classList.remove('drag-over', 'drag-between-before', 'drag-between-after');
+      delete row.dataset.dropHint;
+    });
+  document.querySelectorAll('.root-drop-over').forEach((element) => element.classList.remove('root-drop-over'));
+}
+
+function categoryDropIntent(event) {
+  const row = event.target.closest('[data-category-row]');
+  if (!row) {
+    const root = event.target.closest('[data-root-drop], #categoryList');
+    return root ? { category: '미분류', mode: 'root', row: null, reference: '' } : null;
+  }
+  const category = row.dataset.categoryRow;
+  if (internalNativeDrag !== 'category') return { category, mode: 'child', row, reference: category };
+  const rect = row.getBoundingClientRect();
+  const ratio = rect.height ? (event.clientY - rect.top) / rect.height : 0.5;
+  if (internalDraggedCategories.includes('미분류')) {
+    const parent = category.includes('/') ? category.slice(0, category.lastIndexOf('/')) : '미분류';
+    return { category: parent, mode: ratio < 0.5 ? 'before' : 'after', row, reference: category };
+  }
+  if (ratio > 0.27 && ratio < 0.73) return { category, mode: 'child', row, reference: category };
+  const parent = category.includes('/') ? category.slice(0, category.lastIndexOf('/')) : '미분류';
+  return { category: parent, mode: ratio <= 0.27 ? 'before' : 'after', row, reference: category };
+}
+
+// A Finder/native audio drop must always be handled by Sound Shelf. Without
+// this capture-phase guard, Chromium can navigate to the dropped audio file
+// and show its black, standalone media-player window.
+for (const eventName of ['dragenter', 'dragover', 'drop']) {
+  window.addEventListener(eventName, (event) => {
+    if ([...(event.dataTransfer?.types || [])].includes('Files')) event.preventDefault();
+  }, { capture: true });
+}
+
 document.addEventListener('dragenter', (event) => {
-  if (!event.dataTransfer?.types.includes('Files')) return;
+  const internalCategory = internalNativeDrag === 'category' || event.dataTransfer?.types.includes(CATEGORY_DRAG_TYPE);
+  if (!internalCategory && !event.dataTransfer?.types.includes('Files')) return;
   event.preventDefault();
-  dragDepth += 1;
-  $('#dropOverlay').classList.remove('hidden');
 });
 document.addEventListener('dragover', (event) => {
-  if (!event.dataTransfer?.types.includes('Files')) return;
+  const internalCategory = internalNativeDrag === 'category' || event.dataTransfer?.types.includes(CATEGORY_DRAG_TYPE);
+  if (!internalCategory && !event.dataTransfer?.types.includes('Files')) return;
   event.preventDefault();
-  document.querySelectorAll('.category-tree-row.drag-over').forEach((row) => row.classList.remove('drag-over'));
-  const categoryRow = event.target.closest('[data-category-row]');
-  categoryRow?.classList.add('drag-over');
-  if (categoryRow || state.filter.startsWith('category:')) event.dataTransfer.dropEffect = 'move';
+  clearCategoryDropIndicators();
+  const intent = categoryDropIntent(event);
+  if (intent?.row) {
+    if (intent.mode === 'child') {
+      intent.row.classList.add('drag-over');
+      intent.row.dataset.dropHint = '하위 폴더로 이동';
+    } else {
+      intent.row.classList.add(intent.mode === 'before' ? 'drag-between-before' : 'drag-between-after');
+      intent.row.dataset.dropHint = intent.category === '미분류' ? '최상위로 이동' : '같은 상위 폴더로 이동';
+    }
+  } else if (intent?.mode === 'root') {
+    $('[data-root-drop]')?.classList.add('root-drop-over');
+  }
+  if (intent || state.filter.startsWith('category:')) event.dataTransfer.dropEffect = 'move';
 });
-document.addEventListener('dragleave', () => {
-  dragDepth = Math.max(0, dragDepth - 1);
-  if (!dragDepth) $('#dropOverlay').classList.add('hidden');
+document.addEventListener('dragleave', (event) => {
+  if (!event.relatedTarget) clearCategoryDropIndicators();
 });
 document.addEventListener('drop', async (event) => {
   event.preventDefault();
-  dragDepth = 0;
-  $('#dropOverlay').classList.add('hidden');
-  document.querySelectorAll('.category-tree-row.drag-over').forEach((row) => row.classList.remove('drag-over'));
+  const intent = categoryDropIntent(event);
+  const dragKind = internalNativeDrag;
+  const draggedCategories = [...internalDraggedCategories];
+  const draggedSoundIds = [...internalDraggedSoundIds];
+  const categoryMove = internalNativeDrag === 'category' && intent;
+  clearInternalNativeDrag();
+  clearCategoryDropIndicators();
+  if (categoryMove) {
+    showToast('폴더 순서를 변경하는 중…', 10000);
+    try {
+      setLibrary(await window.soundLibrary.reorderCategories({
+        categories: draggedCategories,
+        referenceCategory: intent.reference,
+        position: intent.mode === 'child' ? 'inside' : intent.mode
+      }));
+      showToast(intent.mode === 'child' ? '폴더를 하위 폴더로 이동했습니다.' : '폴더 위치와 순서를 변경했습니다.');
+    } catch (error) {
+      showToast(`순서 변경 실패: ${error.message}`, 5000);
+    }
+    return;
+  }
+  const selectedCategory = state.filter.startsWith('category:') ? state.filter.slice('category:'.length) : '';
+  const dropCategory = intent?.category || selectedCategory;
+  if (dragKind === 'sound' && draggedSoundIds.length && dropCategory) {
+    showToast(`“${dropCategory}” 폴더로 파일을 이동하는 중…`, 10000);
+    try {
+      setLibrary(await window.soundLibrary.moveSoundsToCategory({ ids: draggedSoundIds, category: dropCategory }));
+      showToast(`${draggedSoundIds.length}개 파일을 이동했습니다.`);
+    } catch (error) {
+      showToast(`이동 실패: ${error.message}`, 5000);
+    }
+    return;
+  }
   const files = [...(event.dataTransfer?.files || [])];
   if (!files.length) return;
-  const categoryRow = event.target.closest('[data-category-row]');
-  const selectedCategory = state.filter.startsWith('category:') ? state.filter.slice('category:'.length) : '';
-  const dropCategory = categoryRow?.dataset.categoryRow || selectedCategory;
   if (dropCategory) {
-    showToast(`“${dropCategory}” 폴더로 이동하는 중…`, 10000);
+    showToast(dropCategory === '미분류' ? '최상위 폴더로 이동하는 중…' : `“${dropCategory}” 폴더로 이동하는 중…`, 10000);
     try {
-      setLibrary(await window.soundLibrary.dropFilesToCategory(dropCategory, files));
+      const snapshot = await window.soundLibrary.dropFilesToCategory(dropCategory, files);
+      if (dropCategory !== '미분류') state.collapsedCategories.delete(dropCategory);
+      setLibrary(snapshot);
       showToast('파일 또는 폴더를 이동했습니다.');
     } catch (error) {
       showToast(`이동 실패: ${error.message}`, 5000);
@@ -1324,6 +1825,12 @@ document.addEventListener('drop', async (event) => {
   } catch (error) {
     showToast(`추가 실패: ${error.message}`, 5000);
   }
+});
+
+document.addEventListener('dragend', () => {
+  document.querySelectorAll('.category-tree-row.dragging').forEach((row) => row.classList.remove('dragging'));
+  clearCategoryDropIndicators();
+  clearInternalNativeDrag();
 });
 
 player.addEventListener('play', () => {
