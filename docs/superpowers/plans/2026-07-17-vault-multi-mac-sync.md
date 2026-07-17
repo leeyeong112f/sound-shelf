@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - **새 npm 의존성 추가 금지.** 테스트는 Node 내장 `node:test`를 쓴다.
-- **들여쓰기는 탭(tab).** 스페이스 아님.
+- **들여쓰기는 2스페이스.** 이 저장소의 JS 파일은 전부 2스페이스이고 탭은 한 줄도 없다. 주변 코드와 맞춘다.
 - **커밋 메시지는 한글.** 형식 `[타입] 설명` (feat, fix, docs, refactor, test, chore).
 - **정상 동작 중 볼트 공유 파일 쓰기는 0번.** `metadata.json`, `folder-order.json`, `vault.json`은 평상시 쓰지 않는다. 이 제약이 깨지면 설계 전체가 무의미해진다.
 - **`machineId`는 절대 볼트에 저장하지 않는다.** 로컬 `db.settings.machineId`에만 둔다. 볼트에 넣으면 동기화되어 두 Mac이 같은 ID를 갖는다.
@@ -61,141 +61,141 @@ const assert = require('node:assert');
 const { mergeVaultState } = require('../src/vault-sync');
 
 function sound(id, overrides = {}) {
-	return {
-		id,
-		relativePath: `액션/${id}.wav`,
-		fileName: `${id}.wav`,
-		title: id,
-		tags: [],
-		notes: '',
-		favorite: false,
-		rating: 0,
-		createdAt: 1000,
-		modifiedAt: 1000,
-		size: 100,
-		contentHash: '',
-		keyAnalysis: null,
-		...overrides
-	};
+  return {
+    id,
+    relativePath: `액션/${id}.wav`,
+    fileName: `${id}.wav`,
+    title: id,
+    tags: [],
+    notes: '',
+    favorite: false,
+    rating: 0,
+    createdAt: 1000,
+    modifiedAt: 1000,
+    size: 100,
+    contentHash: '',
+    keyAnalysis: null,
+    ...overrides
+  };
 }
 
 test('베이스만 있으면 베이스를 그대로 돌려준다', () => {
-	const base = { sounds: [sound('a'), sound('b')], folderOrder: ['액션'] };
-	const result = mergeVaultState(base, []);
-	assert.strictEqual(result.sounds.length, 2);
-	assert.deepStrictEqual(result.folderOrder, ['액션']);
-	assert.strictEqual(result.previewVolume, null);
+  const base = { sounds: [sound('a'), sound('b')], folderOrder: ['액션'] };
+  const result = mergeVaultState(base, []);
+  assert.strictEqual(result.sounds.length, 2);
+  assert.deepStrictEqual(result.folderOrder, ['액션']);
+  assert.strictEqual(result.previewVolume, null);
 });
 
 test('편집이 베이스를 이긴다', () => {
-	const base = { sounds: [sound('a', { tags: [] })], folderOrder: [] };
-	const edits = [{
-		machineId: 'mac-1',
-		sounds: { a: { ...sound('a', { tags: ['액션'] }), updatedAt: 500 } }
-	}];
-	const result = mergeVaultState(base, edits);
-	assert.deepStrictEqual(result.sounds[0].tags, ['액션']);
+  const base = { sounds: [sound('a', { tags: [] })], folderOrder: [] };
+  const edits = [{
+    machineId: 'mac-1',
+    sounds: { a: { ...sound('a', { tags: ['액션'] }), updatedAt: 500 } }
+  }];
+  const result = mergeVaultState(base, edits);
+  assert.deepStrictEqual(result.sounds[0].tags, ['액션']);
 });
 
 test('나중 updatedAt이 이긴다', () => {
-	const base = { sounds: [sound('a')], folderOrder: [] };
-	const edits = [
-		{ machineId: 'mac-1', sounds: { a: { ...sound('a', { title: '먼저' }), updatedAt: 100 } } },
-		{ machineId: 'mac-2', sounds: { a: { ...sound('a', { title: '나중' }), updatedAt: 200 } } }
-	];
-	const result = mergeVaultState(base, edits);
-	assert.strictEqual(result.sounds[0].title, '나중');
+  const base = { sounds: [sound('a')], folderOrder: [] };
+  const edits = [
+    { machineId: 'mac-1', sounds: { a: { ...sound('a', { title: '먼저' }), updatedAt: 100 } } },
+    { machineId: 'mac-2', sounds: { a: { ...sound('a', { title: '나중' }), updatedAt: 200 } } }
+  ];
+  const result = mergeVaultState(base, edits);
+  assert.strictEqual(result.sounds[0].title, '나중');
 });
 
 test('한쪽이 만지지 않은 사운드는 덮이지 않는다', () => {
-	const base = { sounds: [sound('a'), sound('b')], folderOrder: [] };
-	const edits = [
-		{ machineId: 'mac-1', sounds: { a: { ...sound('a', { title: 'A가 고침' }), updatedAt: 900 } } },
-		{ machineId: 'mac-2', sounds: { b: { ...sound('b', { title: 'B가 고침' }), updatedAt: 100 } } }
-	];
-	const result = mergeVaultState(base, edits);
-	const byId = Object.fromEntries(result.sounds.map((item) => [item.id, item]));
-	assert.strictEqual(byId.a.title, 'A가 고침');
-	assert.strictEqual(byId.b.title, 'B가 고침');
+  const base = { sounds: [sound('a'), sound('b')], folderOrder: [] };
+  const edits = [
+    { machineId: 'mac-1', sounds: { a: { ...sound('a', { title: 'A가 고침' }), updatedAt: 900 } } },
+    { machineId: 'mac-2', sounds: { b: { ...sound('b', { title: 'B가 고침' }), updatedAt: 100 } } }
+  ];
+  const result = mergeVaultState(base, edits);
+  const byId = Object.fromEntries(result.sounds.map((item) => [item.id, item]));
+  assert.strictEqual(byId.a.title, 'A가 고침');
+  assert.strictEqual(byId.b.title, 'B가 고침');
 });
 
 test('동률이면 machineId 사전순으로 결정적이다', () => {
-	const base = { sounds: [sound('a')], folderOrder: [] };
-	const edits = [
-		{ machineId: 'mac-z', sounds: { a: { ...sound('a', { title: 'Z' }), updatedAt: 500 } } },
-		{ machineId: 'mac-a', sounds: { a: { ...sound('a', { title: 'A' }), updatedAt: 500 } } }
-	];
-	assert.strictEqual(mergeVaultState(base, edits).sounds[0].title, 'Z');
-	assert.strictEqual(mergeVaultState(base, [...edits].reverse()).sounds[0].title, 'Z');
+  const base = { sounds: [sound('a')], folderOrder: [] };
+  const edits = [
+    { machineId: 'mac-z', sounds: { a: { ...sound('a', { title: 'Z' }), updatedAt: 500 } } },
+    { machineId: 'mac-a', sounds: { a: { ...sound('a', { title: 'A' }), updatedAt: 500 } } }
+  ];
+  assert.strictEqual(mergeVaultState(base, edits).sounds[0].title, 'Z');
+  assert.strictEqual(mergeVaultState(base, [...edits].reverse()).sounds[0].title, 'Z');
 });
 
 test('병합 순서를 바꿔도 같은 결과가 나온다', () => {
-	const base = { sounds: [sound('a'), sound('b')], folderOrder: [] };
-	const edits = [
-		{ machineId: 'mac-1', sounds: { a: { ...sound('a', { title: 'A1' }), updatedAt: 300 } } },
-		{ machineId: 'mac-2', sounds: { a: { ...sound('a', { title: 'A2' }), updatedAt: 400 } } }
-	];
-	const forward = mergeVaultState(base, edits);
-	const backward = mergeVaultState(base, [...edits].reverse());
-	assert.deepStrictEqual(forward.sounds, backward.sounds);
+  const base = { sounds: [sound('a'), sound('b')], folderOrder: [] };
+  const edits = [
+    { machineId: 'mac-1', sounds: { a: { ...sound('a', { title: 'A1' }), updatedAt: 300 } } },
+    { machineId: 'mac-2', sounds: { a: { ...sound('a', { title: 'A2' }), updatedAt: 400 } } }
+  ];
+  const forward = mergeVaultState(base, edits);
+  const backward = mergeVaultState(base, [...edits].reverse());
+  assert.deepStrictEqual(forward.sounds, backward.sounds);
 });
 
 test('삭제 표식이 이기면 결과에서 빠진다', () => {
-	const base = { sounds: [sound('a'), sound('b')], folderOrder: [] };
-	const edits = [{ machineId: 'mac-1', sounds: { a: { updatedAt: 500, deleted: true } } }];
-	const result = mergeVaultState(base, edits);
-	assert.deepStrictEqual(result.sounds.map((item) => item.id), ['b']);
+  const base = { sounds: [sound('a'), sound('b')], folderOrder: [] };
+  const edits = [{ machineId: 'mac-1', sounds: { a: { updatedAt: 500, deleted: true } } }];
+  const result = mergeVaultState(base, edits);
+  assert.deepStrictEqual(result.sounds.map((item) => item.id), ['b']);
 });
 
 test('삭제 표식보다 새로운 편집이 있으면 되살아난다', () => {
-	const base = { sounds: [sound('a')], folderOrder: [] };
-	const edits = [
-		{ machineId: 'mac-1', sounds: { a: { updatedAt: 500, deleted: true } } },
-		{ machineId: 'mac-2', sounds: { a: { ...sound('a', { title: '부활' }), updatedAt: 600 } } }
-	];
-	const result = mergeVaultState(base, edits);
-	assert.strictEqual(result.sounds.length, 1);
-	assert.strictEqual(result.sounds[0].title, '부활');
+  const base = { sounds: [sound('a')], folderOrder: [] };
+  const edits = [
+    { machineId: 'mac-1', sounds: { a: { updatedAt: 500, deleted: true } } },
+    { machineId: 'mac-2', sounds: { a: { ...sound('a', { title: '부활' }), updatedAt: 600 } } }
+  ];
+  const result = mergeVaultState(base, edits);
+  assert.strictEqual(result.sounds.length, 1);
+  assert.strictEqual(result.sounds[0].title, '부활');
 });
 
 test('베이스에 없는 사운드도 편집으로 추가된다', () => {
-	const base = { sounds: [], folderOrder: [] };
-	const edits = [{ machineId: 'mac-1', sounds: { z: { ...sound('z'), updatedAt: 100 } } }];
-	assert.strictEqual(mergeVaultState(base, edits).sounds[0].id, 'z');
+  const base = { sounds: [], folderOrder: [] };
+  const edits = [{ machineId: 'mac-1', sounds: { z: { ...sound('z'), updatedAt: 100 } } }];
+  assert.strictEqual(mergeVaultState(base, edits).sounds[0].id, 'z');
 });
 
 test('폴더 순서는 최신 것이 이긴다', () => {
-	const base = { sounds: [], folderOrder: ['베이스'] };
-	const edits = [
-		{ machineId: 'mac-1', sounds: {}, folderOrder: { updatedAt: 100, order: ['먼저'] } },
-		{ machineId: 'mac-2', sounds: {}, folderOrder: { updatedAt: 200, order: ['나중'] } }
-	];
-	assert.deepStrictEqual(mergeVaultState(base, edits).folderOrder, ['나중']);
+  const base = { sounds: [], folderOrder: ['베이스'] };
+  const edits = [
+    { machineId: 'mac-1', sounds: {}, folderOrder: { updatedAt: 100, order: ['먼저'] } },
+    { machineId: 'mac-2', sounds: {}, folderOrder: { updatedAt: 200, order: ['나중'] } }
+  ];
+  assert.deepStrictEqual(mergeVaultState(base, edits).folderOrder, ['나중']);
 });
 
 test('미리듣기 볼륨은 최신 것이 이긴다', () => {
-	const base = { sounds: [], folderOrder: [] };
-	const edits = [
-		{ machineId: 'mac-1', sounds: {}, settings: { updatedAt: 100, previewVolume: 0.2 } },
-		{ machineId: 'mac-2', sounds: {}, settings: { updatedAt: 200, previewVolume: 0.9 } }
-	];
-	assert.strictEqual(mergeVaultState(base, edits).previewVolume, 0.9);
+  const base = { sounds: [], folderOrder: [] };
+  const edits = [
+    { machineId: 'mac-1', sounds: {}, settings: { updatedAt: 100, previewVolume: 0.2 } },
+    { machineId: 'mac-2', sounds: {}, settings: { updatedAt: 200, previewVolume: 0.9 } }
+  ];
+  assert.strictEqual(mergeVaultState(base, edits).previewVolume, 0.9);
 });
 
 test('깨진 편집 소스는 무시하고 나머지를 병합한다', () => {
-	const base = { sounds: [sound('a')], folderOrder: [] };
-	const edits = [
-		null,
-		{ machineId: 'broken' },
-		{ machineId: 'mac-1', sounds: { a: { ...sound('a', { title: '정상' }), updatedAt: 100 } } }
-	];
-	assert.strictEqual(mergeVaultState(base, edits).sounds[0].title, '정상');
+  const base = { sounds: [sound('a')], folderOrder: [] };
+  const edits = [
+    null,
+    { machineId: 'broken' },
+    { machineId: 'mac-1', sounds: { a: { ...sound('a', { title: '정상' }), updatedAt: 100 } } }
+  ];
+  assert.strictEqual(mergeVaultState(base, edits).sounds[0].title, '정상');
 });
 
 test('updatedAt이 없는 편집 레코드는 베이스를 이기지 못한다', () => {
-	const base = { sounds: [sound('a', { title: '베이스' })], folderOrder: [] };
-	const edits = [{ machineId: 'mac-1', sounds: { a: { ...sound('a', { title: '무효' }) } } }];
-	assert.strictEqual(mergeVaultState(base, edits).sounds[0].title, '베이스');
+  const base = { sounds: [sound('a', { title: '베이스' })], folderOrder: [] };
+  const edits = [{ machineId: 'mac-1', sounds: { a: { ...sound('a', { title: '무효' }) } } }];
+  assert.strictEqual(mergeVaultState(base, edits).sounds[0].title, '베이스');
 });
 ```
 
@@ -219,71 +219,71 @@ const EDITS_SCHEMA_VERSION = 1;
 
 // 베이스 레코드에는 updatedAt이 없다. 0으로 취급하면 어떤 편집도 베이스를 이긴다.
 function stampOf(record) {
-	const value = Number(record?.updatedAt || 0);
-	return Number.isFinite(value) ? value : 0;
+  const value = Number(record?.updatedAt || 0);
+  return Number.isFinite(value) ? value : 0;
 }
 
 // 두 Mac이 각자 계산해도 같은 결론에 도달해야 한다. updatedAt이 같으면
 // machineId 사전순으로 결정한다.
 function beats(candidate, candidateMachine, current, currentMachine) {
-	if (!current) return true;
-	const candidateStamp = stampOf(candidate);
-	const currentStamp = stampOf(current);
-	if (candidateStamp !== currentStamp) return candidateStamp > currentStamp;
-	return String(candidateMachine || '') > String(currentMachine || '');
+  if (!current) return true;
+  const candidateStamp = stampOf(candidate);
+  const currentStamp = stampOf(current);
+  if (candidateStamp !== currentStamp) return candidateStamp > currentStamp;
+  return String(candidateMachine || '') > String(currentMachine || '');
 }
 
 function mergeVaultState(base, editSources) {
-	const winners = new Map();
-	const owners = new Map();
+  const winners = new Map();
+  const owners = new Map();
 
-	for (const sound of base?.sounds || []) {
-		if (!sound?.id) continue;
-		winners.set(sound.id, { ...sound, updatedAt: 0 });
-		owners.set(sound.id, '');
-	}
+  for (const sound of base?.sounds || []) {
+    if (!sound?.id) continue;
+    winners.set(sound.id, { ...sound, updatedAt: 0 });
+    owners.set(sound.id, '');
+  }
 
-	let folderOrder = { updatedAt: 0, order: base?.folderOrder || [] };
-	let folderOwner = '';
-	let volume = null;
-	let volumeStamp = 0;
-	let volumeOwner = '';
+  let folderOrder = { updatedAt: 0, order: base?.folderOrder || [] };
+  let folderOwner = '';
+  let volume = null;
+  let volumeStamp = 0;
+  let volumeOwner = '';
 
-	for (const source of editSources || []) {
-		if (!source || typeof source !== 'object') continue;
-		const machineId = String(source.machineId || '');
+  for (const source of editSources || []) {
+    if (!source || typeof source !== 'object') continue;
+    const machineId = String(source.machineId || '');
 
-		for (const [id, record] of Object.entries(source.sounds || {})) {
-			if (!id || !record || typeof record !== 'object') continue;
-			// updatedAt 이 없거나 잘못된 레코드는 무효로 본다. 이게 없으면 동률(0 대 0)
-			// 판정에서 machineId 비교가 걸려 잘못된 레코드가 베이스를 이겨버린다.
-			if (stampOf(record) <= 0) continue;
-			if (!beats(record, machineId, winners.get(id), owners.get(id))) continue;
-			winners.set(id, { ...record, id });
-			owners.set(id, machineId);
-		}
+    for (const [id, record] of Object.entries(source.sounds || {})) {
+      if (!id || !record || typeof record !== 'object') continue;
+      // updatedAt 이 없거나 잘못된 레코드는 무효로 본다. 이게 없으면 동률(0 대 0)
+      // 판정에서 machineId 비교가 걸려 잘못된 레코드가 베이스를 이겨버린다.
+      if (stampOf(record) <= 0) continue;
+      if (!beats(record, machineId, winners.get(id), owners.get(id))) continue;
+      winners.set(id, { ...record, id });
+      owners.set(id, machineId);
+    }
 
-		const order = source.folderOrder;
-		if (order && Array.isArray(order.order) && stampOf(order) > 0
-			&& beats(order, machineId, folderOrder, folderOwner)) {
-			folderOrder = order;
-			folderOwner = machineId;
-		}
+    const order = source.folderOrder;
+    if (order && Array.isArray(order.order) && stampOf(order) > 0
+      && beats(order, machineId, folderOrder, folderOwner)) {
+      folderOrder = order;
+      folderOwner = machineId;
+    }
 
-		const settings = source.settings;
-		if (settings && Number.isFinite(Number(settings.previewVolume)) && stampOf(settings) > 0
-			&& beats(settings, machineId, { updatedAt: volumeStamp }, volumeOwner)) {
-			volume = Number(settings.previewVolume);
-			volumeStamp = stampOf(settings);
-			volumeOwner = machineId;
-		}
-	}
+    const settings = source.settings;
+    if (settings && Number.isFinite(Number(settings.previewVolume)) && stampOf(settings) > 0
+      && beats(settings, machineId, { updatedAt: volumeStamp }, volumeOwner)) {
+      volume = Number(settings.previewVolume);
+      volumeStamp = stampOf(settings);
+      volumeOwner = machineId;
+    }
+  }
 
-	return {
-		sounds: [...winners.values()].filter((record) => !record.deleted),
-		folderOrder: [...new Set(folderOrder.order || [])],
-		previewVolume: volume
-	};
+  return {
+    sounds: [...winners.values()].filter((record) => !record.deleted),
+    folderOrder: [...new Set(folderOrder.order || [])],
+    previewVolume: volume
+  };
 }
 
 module.exports = { mergeVaultState, EDITS_SCHEMA_VERSION };
@@ -333,7 +333,7 @@ const EDITS_SCHEMA_VERSION = 1;
 `constructor` 안, `this.folderOrderPath = ...` 줄 다음에 추가:
 
 ```js
-		this.editsDirectory = path.join(this.controlDirectory, 'edits');
+    this.editsDirectory = path.join(this.controlDirectory, 'edits');
 ```
 
 - [ ] **Step 2: 편집 파일 읽기 구현**
@@ -341,62 +341,62 @@ const EDITS_SCHEMA_VERSION = 1;
 `src/vault-storage.js`의 `loadFolderOrder()` 메서드 다음에 추가:
 
 ```js
-	editFilePath(machineId) {
-		return path.join(this.editsDirectory, `${machineId}.json`);
-	}
+  editFilePath(machineId) {
+    return path.join(this.editsDirectory, `${machineId}.json`);
+  }
 
-	// edits/ 안의 *.json 을 전부 읽는다. Drive 충돌 사본(`mac-1 (1).json`)이
-	// 생기더라도 그 안의 편집을 잃지 않으려면 이름을 가리지 않고 읽어야 한다.
-	async loadEditSources() {
-		let entries = [];
-		try {
-			entries = await fsp.readdir(this.editsDirectory, { withFileTypes: true });
-		} catch (error) {
-			if (error.code !== 'ENOENT') throw error;
-			return [];
-		}
-		const sources = [];
-		for (const entry of entries) {
-			if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-			const filePath = path.join(this.editsDirectory, entry.name);
-			let candidate = null;
-			try {
-				candidate = JSON.parse(await fsp.readFile(filePath, 'utf8'));
-			} catch (error) {
-				// Drive가 내려받는 중이면 반쯤 쓰인 파일이 보일 수 있다.
-				// 이번 회차만 건너뛰고 다음 폴링에 다시 시도한다.
-				console.error(`Skipping unreadable edit file (${entry.name}):`, error.message);
-				continue;
-			}
-			if (candidate?.vaultId && candidate.vaultId !== this.manifest.id) continue;
-			sources.push({
-				machineId: String(candidate?.machineId || entry.name.replace(/\.json$/, '')),
-				sounds: candidate?.sounds && typeof candidate.sounds === 'object' ? candidate.sounds : {},
-				folderOrder: candidate?.folderOrder || null,
-				settings: candidate?.settings || null,
-				__fileName: entry.name
-			});
-		}
-		return sources;
-	}
+  // edits/ 안의 *.json 을 전부 읽는다. Drive 충돌 사본(`mac-1 (1).json`)이
+  // 생기더라도 그 안의 편집을 잃지 않으려면 이름을 가리지 않고 읽어야 한다.
+  async loadEditSources() {
+    let entries = [];
+    try {
+      entries = await fsp.readdir(this.editsDirectory, { withFileTypes: true });
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      return [];
+    }
+    const sources = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      const filePath = path.join(this.editsDirectory, entry.name);
+      let candidate = null;
+      try {
+        candidate = JSON.parse(await fsp.readFile(filePath, 'utf8'));
+      } catch (error) {
+        // Drive가 내려받는 중이면 반쯤 쓰인 파일이 보일 수 있다.
+        // 이번 회차만 건너뛰고 다음 폴링에 다시 시도한다.
+        console.error(`Skipping unreadable edit file (${entry.name}):`, error.message);
+        continue;
+      }
+      if (candidate?.vaultId && candidate.vaultId !== this.manifest.id) continue;
+      sources.push({
+        machineId: String(candidate?.machineId || entry.name.replace(/\.json$/, '')),
+        sounds: candidate?.sounds && typeof candidate.sounds === 'object' ? candidate.sounds : {},
+        folderOrder: candidate?.folderOrder || null,
+        settings: candidate?.settings || null,
+        __fileName: entry.name
+      });
+    }
+    return sources;
+  }
 
-	async editFileStamps(excludeMachineId = '') {
-		let entries = [];
-		try {
-			entries = await fsp.readdir(this.editsDirectory, { withFileTypes: true });
-		} catch (error) {
-			if (error.code !== 'ENOENT') throw error;
-			return [];
-		}
-		const exclude = `${excludeMachineId}.json`;
-		const stamps = [];
-		for (const entry of entries) {
-			if (!entry.isFile() || !entry.name.endsWith('.json') || entry.name === exclude) continue;
-			const stat = await fsp.stat(path.join(this.editsDirectory, entry.name)).catch(() => null);
-			if (stat) stamps.push({ name: entry.name, mtimeMs: stat.mtimeMs, size: stat.size });
-		}
-		return stamps.sort((a, b) => a.name.localeCompare(b.name));
-	}
+  async editFileStamps(excludeMachineId = '') {
+    let entries = [];
+    try {
+      entries = await fsp.readdir(this.editsDirectory, { withFileTypes: true });
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      return [];
+    }
+    const exclude = `${excludeMachineId}.json`;
+    const stamps = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.json') || entry.name === exclude) continue;
+      const stat = await fsp.stat(path.join(this.editsDirectory, entry.name)).catch(() => null);
+      if (stat) stamps.push({ name: entry.name, mtimeMs: stat.mtimeMs, size: stat.size });
+    }
+    return stamps.sort((a, b) => a.name.localeCompare(b.name));
+  }
 ```
 
 - [ ] **Step 3: 편집 파일 쓰기 구현**
@@ -404,22 +404,22 @@ const EDITS_SCHEMA_VERSION = 1;
 같은 파일, `editFileStamps()` 다음에 추가:
 
 ```js
-	// 이 Mac 자신의 파일만 쓴다. 두 Mac이 같은 파일을 건드리지 않는 것이
-	// 이 설계의 핵심이며, Drive 충돌 사본을 구조적으로 막는다.
-	async saveEdits(machineId, machineName, { sounds = {}, folderOrder = null, settings = null } = {}) {
-		await fsp.mkdir(this.editsDirectory, { recursive: true });
-		await writeJsonAtomic(this.editFilePath(machineId), {
-			type: 'sound-shelf-edits',
-			schemaVersion: EDITS_SCHEMA_VERSION,
-			vaultId: this.manifest.id,
-			machineId,
-			machineName: String(machineName || '').normalize('NFC'),
-			updatedAt: new Date().toISOString(),
-			sounds,
-			folderOrder,
-			settings
-		});
-	}
+  // 이 Mac 자신의 파일만 쓴다. 두 Mac이 같은 파일을 건드리지 않는 것이
+  // 이 설계의 핵심이며, Drive 충돌 사본을 구조적으로 막는다.
+  async saveEdits(machineId, machineName, { sounds = {}, folderOrder = null, settings = null } = {}) {
+    await fsp.mkdir(this.editsDirectory, { recursive: true });
+    await writeJsonAtomic(this.editFilePath(machineId), {
+      type: 'sound-shelf-edits',
+      schemaVersion: EDITS_SCHEMA_VERSION,
+      vaultId: this.manifest.id,
+      machineId,
+      machineName: String(machineName || '').normalize('NFC'),
+      updatedAt: new Date().toISOString(),
+      sounds,
+      folderOrder,
+      settings
+    });
+  }
 ```
 
 - [ ] **Step 4: `saveMetadata`의 공유 쓰기 제거**
@@ -429,22 +429,22 @@ const EDITS_SCHEMA_VERSION = 1;
 `src/vault-storage.js`의 `async saveMetadata(sounds) {` 줄을 다음으로 교체:
 
 ```js
-	// 베이스 스냅샷을 통째로 덮어쓴다. 두 Mac이 동시에 호출하면 Drive 충돌 사본이
-	// 생기므로 정상 편집 경로에서 호출하면 안 된다. 볼트 생성·가져오기처럼
-	// 단독 실행이 보장된 경우에만 쓴다.
-	async overwriteBaseMetadata(sounds) {
+  // 베이스 스냅샷을 통째로 덮어쓴다. 두 Mac이 동시에 호출하면 Drive 충돌 사본이
+  // 생기므로 정상 편집 경로에서 호출하면 안 된다. 볼트 생성·가져오기처럼
+  // 단독 실행이 보장된 경우에만 쓴다.
+  async overwriteBaseMetadata(sounds) {
 ```
 
 `module.exports`는 그대로 두고, 파일 끝의 exports에 상수를 추가:
 
 ```js
 module.exports = {
-	VaultStorage,
-	EDITS_SCHEMA_VERSION,
-	normalizedRelativePath,
-	relativePathInside,
-	readJson,
-	writeJsonAtomic
+  VaultStorage,
+  EDITS_SCHEMA_VERSION,
+  normalizedRelativePath,
+  relativePathInside,
+  readJson,
+  writeJsonAtomic
 };
 ```
 
@@ -453,7 +453,7 @@ module.exports = {
 Run: `node --check src/vault-storage.js && npm test`
 Expected: PASS — 문법 오류 없음, Task 1 테스트 13개 계속 통과
 
-이 시점에 `src/main.js`는 아직 `saveMetadata`를 호출하므로 앱은 깨진 상태다. Task 3에서 고친다.
+주의: 이 개명으로 `src/main.js`의 호출부 2곳(`saveDb`, `library:backup-import`)이 존재하지 않는 메서드를 부르게 된다. `npm run check`는 문법만 보므로 이를 잡지 못한다. Task 3이 `saveDb` 쪽을, Task 4가 `backup-import` 쪽을 고친다. **Task 4가 끝나기 전까지 앱은 저장·가져오기에서 깨진 상태다** — 중간에 앱을 띄워 확인하지 말 것.
 
 - [ ] **Step 6: 커밋**
 
@@ -495,17 +495,17 @@ let db = { version: 1, sounds: [], categories: [], categoryOrder: [], settings: 
 `cleanDb()`의 `settings` 객체(`src/main.js:96-106`)에서 `currentVaultId` 줄 다음에 추가:
 
 ```js
-			currentVaultId: candidate?.settings?.currentVaultId || '',
-			// 이 Mac만의 ID. 볼트에 저장하면 동기화되어 두 Mac이 같은 ID를 갖게 되므로
-			// 반드시 로컬 userData에만 둔다.
-			machineId: candidate?.settings?.machineId || crypto.randomUUID()
+      currentVaultId: candidate?.settings?.currentVaultId || '',
+      // 이 Mac만의 ID. 볼트에 저장하면 동기화되어 두 Mac이 같은 ID를 갖게 되므로
+      // 반드시 로컬 userData에만 둔다.
+      machineId: candidate?.settings?.machineId || crypto.randomUUID()
 ```
 
 `activateVaultNow()`가 `db.settings`를 재구성할 때 잃지 않도록, `src/main.js`의 `db.settings = {` 블록(현재 257번째 줄 근처)에서 `currentVaultId: activeVault.id` 다음에 추가:
 
 ```js
-		currentVaultId: activeVault.id,
-		machineId: previousSettings.machineId || crypto.randomUUID()
+    currentVaultId: activeVault.id,
+    machineId: previousSettings.machineId || crypto.randomUUID()
 ```
 
 - [ ] **Step 2: 동기화 상태 변수와 diff 함수 추가**
@@ -532,43 +532,43 @@ const { mergeVaultState } = require('./vault-sync');
 const EDITABLE_FIELDS = ['relativePath', 'fileName', 'title', 'tags', 'notes', 'favorite', 'rating', 'createdAt', 'modifiedAt', 'size', 'contentHash', 'keyAnalysis'];
 
 function sameSound(left, right) {
-	if (!left || !right) return false;
-	return EDITABLE_FIELDS.every((field) => JSON.stringify(left[field] ?? null) === JSON.stringify(right[field] ?? null));
+  if (!left || !right) return false;
+  return EDITABLE_FIELDS.every((field) => JSON.stringify(left[field] ?? null) === JSON.stringify(right[field] ?? null));
 }
 
 // saveDb 호출 지점이 코드 전역에 30곳 있다. 각 편집 지점에서 손으로 updatedAt을
 // 찍게 하면 하나만 빠뜨려도 그 편집이 조용히 동기화되지 않는다. 대신 저장 시점에
 // 베이스라인과 비교해 달라진 것만 골라낸다. 누락이 원천적으로 불가능하다.
 function collectLocalEdits() {
-	const now = Date.now();
-	const current = new Map();
-	for (const sound of db.sounds.map(portableSound).filter(Boolean)) current.set(sound.id, sound);
+  const now = Date.now();
+  const current = new Map();
+  for (const sound of db.sounds.map(portableSound).filter(Boolean)) current.set(sound.id, sound);
 
-	for (const [id, sound] of current) {
-		const baseline = syncBaseline.get(id);
-		if (baseline && !baseline.deleted && sameSound(baseline, sound)) continue;
-		ownEdits.sounds[id] = { ...sound, updatedAt: now };
-	}
+  for (const [id, sound] of current) {
+    const baseline = syncBaseline.get(id);
+    if (baseline && !baseline.deleted && sameSound(baseline, sound)) continue;
+    ownEdits.sounds[id] = { ...sound, updatedAt: now };
+  }
 
-	for (const [id, baseline] of syncBaseline) {
-		if (current.has(id) || baseline.deleted) continue;
-		ownEdits.sounds[id] = { updatedAt: now, deleted: true };
-	}
+  for (const [id, baseline] of syncBaseline) {
+    if (current.has(id) || baseline.deleted) continue;
+    ownEdits.sounds[id] = { updatedAt: now, deleted: true };
+  }
 
-	const order = [...new Set(db.categoryOrder || [])];
-	if (JSON.stringify(order) !== JSON.stringify(ownEdits.folderOrder?.order || null)) {
-		ownEdits.folderOrder = { updatedAt: now, order };
-	}
+  const order = [...new Set(db.categoryOrder || [])];
+  if (JSON.stringify(order) !== JSON.stringify(ownEdits.folderOrder?.order || null)) {
+    ownEdits.folderOrder = { updatedAt: now, order };
+  }
 
-	const volume = Number(db.settings.previewVolume);
-	if (Number.isFinite(volume) && volume !== ownEdits.settings?.previewVolume) {
-		ownEdits.settings = { updatedAt: now, previewVolume: volume };
-	}
+  const volume = Number(db.settings.previewVolume);
+  if (Number.isFinite(volume) && volume !== ownEdits.settings?.previewVolume) {
+    ownEdits.settings = { updatedAt: now, previewVolume: volume };
+  }
 
-	syncBaseline = new Map([...current].map(([id, sound]) => [id, { ...sound, updatedAt: ownEdits.sounds[id]?.updatedAt ?? syncBaseline.get(id)?.updatedAt ?? 0 }]));
-	for (const [id, record] of Object.entries(ownEdits.sounds)) {
-		if (record.deleted) syncBaseline.set(id, { id, deleted: true, updatedAt: record.updatedAt });
-	}
+  syncBaseline = new Map([...current].map(([id, sound]) => [id, { ...sound, updatedAt: ownEdits.sounds[id]?.updatedAt ?? syncBaseline.get(id)?.updatedAt ?? 0 }]));
+  for (const [id, record] of Object.entries(ownEdits.sounds)) {
+    if (record.deleted) syncBaseline.set(id, { id, deleted: true, updatedAt: record.updatedAt });
+  }
 }
 ```
 
@@ -578,17 +578,17 @@ function collectLocalEdits() {
 
 ```js
 async function saveDb() {
-	if (vaultStorage && activeVault) {
-		for (const sound of db.sounds) {
-			const relativePath = soundRelativePath(sound.path);
-			if (relativePath) sound.relativePath = relativePath;
-		}
-		collectLocalEdits();
-		// 볼트에는 내 편집 파일 하나만 쓴다. metadata.json / folder-order.json /
-		// vault.json 은 공유 파일이므로 정상 경로에서 건드리지 않는다.
-		await vaultStorage.saveEdits(db.settings.machineId, os.hostname(), ownEdits);
-		vaultStorage.replaceTechnicalCache(db.sounds.filter((sound) => sound.relativePath));
-	}
+  if (vaultStorage && activeVault) {
+    for (const sound of db.sounds) {
+      const relativePath = soundRelativePath(sound.path);
+      if (relativePath) sound.relativePath = relativePath;
+    }
+    collectLocalEdits();
+    // 볼트에는 내 편집 파일 하나만 쓴다. metadata.json / folder-order.json /
+    // vault.json 은 공유 파일이므로 정상 경로에서 건드리지 않는다.
+    await vaultStorage.saveEdits(db.settings.machineId, os.hostname(), ownEdits);
+    vaultStorage.replaceTechnicalCache(db.sounds.filter((sound) => sound.relativePath));
+  }
 ```
 
 (`saveDb()`의 나머지 — 로컬 `dbPath` 쓰기와 `performanceStats` 갱신 — 는 그대로 둔다.)
@@ -635,24 +635,24 @@ git commit -m "[feat] machineId 생성과 diff 기반 편집 감지 추가
 // 변경 여부는 id 목록이 아니라 사용자 편집 필드까지 비교해야 한다. 태그만 바뀌고
 // 목록 구성이 그대로인 경우가 이 기능의 주 사용 사례이기 때문이다.
 function editSignature(sounds) {
-	return JSON.stringify(sounds
-		.map((sound) => [sound.id, sound.title, sound.tags, sound.notes, sound.favorite, sound.rating])
-		.sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
+  return JSON.stringify(sounds
+    .map((sound) => [sound.id, sound.title, sound.tags, sound.notes, sound.favorite, sound.rating])
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
 }
 
 function applyMergedState(merged) {
-	const before = editSignature(db.sounds.map(portableSound).filter(Boolean));
-	const cacheById = new Map((vaultStorage?.cachedSounds() || []).map((item) => [item.id, item]));
-	const hydrated = merged.sounds
-		.filter((sound) => sound?.relativePath)
-		.map((sound) => hydratePortableSound(sound, cacheById.get(sound.id), activeVault.root));
-	db.sounds = deduplicateSoundsByPath(hydrated);
-	if (merged.folderOrder.length) db.categoryOrder = merged.folderOrder;
-	if (merged.previewVolume !== null) db.settings.previewVolume = merged.previewVolume;
-	db.categories = [...new Set(db.sounds.map((sound) => sound.categoryPath).filter(Boolean))]
-		.sort((a, b) => a.localeCompare(b, 'ko'));
-	syncBaseline = new Map(merged.sounds.map((sound) => [sound.id, sound]));
-	return before !== editSignature(db.sounds.map(portableSound).filter(Boolean));
+  const before = editSignature(db.sounds.map(portableSound).filter(Boolean));
+  const cacheById = new Map((vaultStorage?.cachedSounds() || []).map((item) => [item.id, item]));
+  const hydrated = merged.sounds
+    .filter((sound) => sound?.relativePath)
+    .map((sound) => hydratePortableSound(sound, cacheById.get(sound.id), activeVault.root));
+  db.sounds = deduplicateSoundsByPath(hydrated);
+  if (merged.folderOrder.length) db.categoryOrder = merged.folderOrder;
+  if (merged.previewVolume !== null) db.settings.previewVolume = merged.previewVolume;
+  db.categories = [...new Set(db.sounds.map((sound) => sound.categoryPath).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, 'ko'));
+  syncBaseline = new Map(merged.sounds.map((sound) => [sound.id, sound]));
+  return before !== editSignature(db.sounds.map(portableSound).filter(Boolean));
 }
 ```
 
@@ -661,43 +661,43 @@ function applyMergedState(merged) {
 `src/main.js`의 `activateVaultNow()` 안에서 `const [portableMetadata, savedFolderOrder] = await Promise.all([` 블록을 교체:
 
 ```js
-	const [portableMetadata, savedFolderOrder, editSources] = await Promise.all([
-		vaultStorage.loadMetadata(),
-		vaultStorage.loadFolderOrder(),
-		vaultStorage.loadEditSources()
-	]);
-	const merged = mergeVaultState(
-		{ sounds: portableMetadata.sounds, folderOrder: savedFolderOrder },
-		editSources
-	);
-	// 내 편집 파일의 내용을 메모리로 되살린다. 이걸 하지 않으면 다음 saveDb에서
-	// 내 과거 편집이 담긴 파일을 빈 내용으로 덮어써 유실된다.
-	const mine = editSources.find((source) => source.machineId === db.settings.machineId);
-	ownEdits = {
-		sounds: mine?.sounds ? { ...mine.sounds } : {},
-		folderOrder: mine?.folderOrder || null,
-		settings: mine?.settings || null
-	};
+  const [portableMetadata, savedFolderOrder, editSources] = await Promise.all([
+    vaultStorage.loadMetadata(),
+    vaultStorage.loadFolderOrder(),
+    vaultStorage.loadEditSources()
+  ]);
+  const merged = mergeVaultState(
+    { sounds: portableMetadata.sounds, folderOrder: savedFolderOrder },
+    editSources
+  );
+  // 내 편집 파일의 내용을 메모리로 되살린다. 이걸 하지 않으면 다음 saveDb에서
+  // 내 과거 편집이 담긴 파일을 빈 내용으로 덮어써 유실된다.
+  const mine = editSources.find((source) => source.machineId === db.settings.machineId);
+  ownEdits = {
+    sounds: mine?.sounds ? { ...mine.sounds } : {},
+    folderOrder: mine?.folderOrder || null,
+    settings: mine?.settings || null
+  };
 ```
 
 이어서 `const cached = vaultStorage.cachedSounds();` 아래의 `const hydrated = portableMetadata.sounds` 블록에서 `portableMetadata.sounds`를 `merged.sounds`로 바꾼다:
 
 ```js
-	const hydrated = merged.sounds
-		.filter((sound) => sound?.relativePath)
-		.map((sound) => hydratePortableSound(
-			sound,
-			cacheById.get(sound.id) || cacheByRelativePath.get(normalizedRelativePath(sound.relativePath)),
-			root
-		));
+  const hydrated = merged.sounds
+    .filter((sound) => sound?.relativePath)
+    .map((sound) => hydratePortableSound(
+      sound,
+      cacheById.get(sound.id) || cacheByRelativePath.get(normalizedRelativePath(sound.relativePath)),
+      root
+    ));
 ```
 
 그리고 `db.categoryOrder = savedFolderOrder.length ? savedFolderOrder : legacyCategoryOrder;` 를 교체:
 
 ```js
-	db.categoryOrder = merged.folderOrder.length ? merged.folderOrder : legacyCategoryOrder;
-	if (merged.previewVolume !== null) db.settings.previewVolume = merged.previewVolume;
-	syncBaseline = new Map(merged.sounds.map((sound) => [sound.id, sound]));
+  db.categoryOrder = merged.folderOrder.length ? merged.folderOrder : legacyCategoryOrder;
+  if (merged.previewVolume !== null) db.settings.previewVolume = merged.previewVolume;
+  syncBaseline = new Map(merged.sounds.map((sound) => [sound.id, sound]));
 ```
 
 - [ ] **Step 3: 백업이 병합 상태를 쓰도록 변경**
@@ -705,14 +705,14 @@ function applyMergedState(merged) {
 `src/main.js`에서 `metadata: await vaultStorage.loadMetadata(),` 를 찾아 교체:
 
 ```js
-		metadata: {
-			type: 'sound-shelf-metadata',
-			schemaVersion: 1,
-			vaultId: activeVault.id,
-			updatedAt: new Date().toISOString(),
-			// 편집 내용이 빠진 백업은 쓸모가 없다. 병합된 현재 상태를 쓴다.
-			sounds: db.sounds.map(portableSound).filter(Boolean)
-		},
+    metadata: {
+      type: 'sound-shelf-metadata',
+      schemaVersion: 1,
+      vaultId: activeVault.id,
+      updatedAt: new Date().toISOString(),
+      // 편집 내용이 빠진 백업은 쓸모가 없다. 병합된 현재 상태를 쓴다.
+      sounds: db.sounds.map(portableSound).filter(Boolean)
+    },
 ```
 
 `vaultStorage.saveMetadata(` 를 호출하는 남은 지점(`library:backup-import` 근처)을 `vaultStorage.overwriteBaseMetadata(` 로 바꾼다. 가져오기는 사용자가 명시적으로 실행하는 단독 작업이라 베이스를 덮어써도 안전하다.
@@ -757,42 +757,42 @@ git commit -m "[feat] 볼트 활성화 시 편집 파일을 병합해 적용
 // 제대로 발생시키는지 보장할 수 없다. mtime 폴링은 확실히 동작하고, Drive 자체의
 // 내려받기 지연이 훨씬 크므로 7초면 충분하다.
 async function pollRemoteEdits() {
-	if (startupLoading || !vaultStorage || !activeVault) return;
-	if (!fs.existsSync(activeVault.root)) return;
-	const stamps = await vaultStorage.editFileStamps(db.settings.machineId).catch(() => null);
-	if (!stamps) return;
-	const fingerprint = JSON.stringify(stamps);
-	if (fingerprint === lastEditStamps) return;
-	lastEditStamps = fingerprint;
+  if (startupLoading || !vaultStorage || !activeVault) return;
+  if (!fs.existsSync(activeVault.root)) return;
+  const stamps = await vaultStorage.editFileStamps(db.settings.machineId).catch(() => null);
+  if (!stamps) return;
+  const fingerprint = JSON.stringify(stamps);
+  if (fingerprint === lastEditStamps) return;
+  lastEditStamps = fingerprint;
 
-	const [portableMetadata, savedFolderOrder, editSources] = await Promise.all([
-		vaultStorage.loadMetadata(),
-		vaultStorage.loadFolderOrder(),
-		vaultStorage.loadEditSources()
-	]);
-	const merged = mergeVaultState(
-		{ sounds: portableMetadata.sounds, folderOrder: savedFolderOrder },
-		editSources
-	);
-	const changed = applyMergedState(merged);
-	if (!changed) return;
-	mainWindow?.webContents.send('library-updated', { ...librarySnapshot(), updateReason: 'remote-sync' });
+  const [portableMetadata, savedFolderOrder, editSources] = await Promise.all([
+    vaultStorage.loadMetadata(),
+    vaultStorage.loadFolderOrder(),
+    vaultStorage.loadEditSources()
+  ]);
+  const merged = mergeVaultState(
+    { sounds: portableMetadata.sounds, folderOrder: savedFolderOrder },
+    editSources
+  );
+  const changed = applyMergedState(merged);
+  if (!changed) return;
+  mainWindow?.webContents.send('library-updated', { ...librarySnapshot(), updateReason: 'remote-sync' });
 }
 
 function startSyncPolling() {
-	stopSyncPolling();
-	syncPollTimer = setInterval(() => {
-		// 볼트 활성화 큐에 얹어 스캔과 병합이 겹치지 않게 직렬화한다.
-		vaultActivationQueue = vaultActivationQueue
-			.catch(() => {})
-			.then(() => pollRemoteEdits())
-			.catch((error) => console.error('Remote sync poll failed:', error));
-	}, SYNC_POLL_MS);
+  stopSyncPolling();
+  syncPollTimer = setInterval(() => {
+    // 볼트 활성화 큐에 얹어 스캔과 병합이 겹치지 않게 직렬화한다.
+    vaultActivationQueue = vaultActivationQueue
+      .catch(() => {})
+      .then(() => pollRemoteEdits())
+      .catch((error) => console.error('Remote sync poll failed:', error));
+  }, SYNC_POLL_MS);
 }
 
 function stopSyncPolling() {
-	clearInterval(syncPollTimer);
-	syncPollTimer = null;
+  clearInterval(syncPollTimer);
+  syncPollTimer = null;
 }
 ```
 
@@ -801,14 +801,14 @@ function stopSyncPolling() {
 `src/main.js`의 `app.whenReady()` 블록 `finally` 안에서 `refreshFolderWatchers();` 다음에 추가:
 
 ```js
-		refreshFolderWatchers();
-		startSyncPolling();
+    refreshFolderWatchers();
+    startSyncPolling();
 ```
 
 `app.on('before-quit', ...)` 안에 추가:
 
 ```js
-	stopSyncPolling();
+  stopSyncPolling();
 ```
 
 - [ ] **Step 3: 렌더러 토스트 추가**
@@ -817,11 +817,11 @@ function stopSyncPolling() {
 
 ```js
 window.soundLibrary.onLibraryUpdated((snapshot) => {
-	setLibrary(snapshot);
-	if (snapshot.updateReason === 'folder-change') showToast('폴더 변경 사항을 자동으로 반영했습니다.', 1800);
-	if (snapshot.updateReason === 'startup') showToast('사운드 라이브러리를 불러왔습니다.', 1800);
-	if (snapshot.updateReason === 'vault-cached') showToast('저장된 목록을 표시했습니다. 폴더 동기화는 백그라운드에서 계속됩니다.', 2500);
-	if (snapshot.updateReason === 'remote-sync') showToast('다른 Mac의 변경 사항을 반영했습니다.', 2000);
+  setLibrary(snapshot);
+  if (snapshot.updateReason === 'folder-change') showToast('폴더 변경 사항을 자동으로 반영했습니다.', 1800);
+  if (snapshot.updateReason === 'startup') showToast('사운드 라이브러리를 불러왔습니다.', 1800);
+  if (snapshot.updateReason === 'vault-cached') showToast('저장된 목록을 표시했습니다. 폴더 동기화는 백그라운드에서 계속됩니다.', 2500);
+  if (snapshot.updateReason === 'remote-sync') showToast('다른 Mac의 변경 사항을 반영했습니다.', 2000);
 });
 ```
 
