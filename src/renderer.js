@@ -190,11 +190,11 @@ function renderCategoryNodes(nodes, depth = 0) {
       }).length;
       const children = hasChildren && !collapsed ? renderCategoryNodes(node.children, depth + 1) : '';
       return `<div class="category-tree-node">
-        <div class="category-tree-row ${active}" style="--tree-indent:${depth * 24}px" data-category-row="${escapeHtml(node.path)}" draggable="${node.path !== '미분류'}">
+        <div class="category-tree-row ${active}" data-category-row="${escapeHtml(node.path)}" draggable="${node.path !== '미분류'}">
           <button class="tree-toggle ${hasChildren ? '' : 'empty'}" data-category-toggle="${escapeHtml(node.path)}" ${hasChildren ? `aria-expanded="${!collapsed}" title="하위 폴더 ${collapsed ? '펼치기' : '접기'}"` : 'disabled'}>${hasChildren ? (collapsed ? '▶' : '▼') : ''}</button>
           <button class="tree-label" data-category="${escapeHtml(node.path)}" title="${escapeHtml(node.path)}">${escapeHtml(node.name)}</button>
           <b>${count}</b>
-        </div>${children}
+        </div>${children ? `<div class="category-tree-children">${children}</div>` : ''}
       </div>`;
     }).join('');
 }
