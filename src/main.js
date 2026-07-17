@@ -20,7 +20,8 @@ const DEFAULT_SHORTCUTS = {
   reveal: 'Meta+Shift+R',
   favorite: 'Meta+Shift+F',
   settings: 'Meta+Comma',
-  playPause: 'Space'
+  playPause: 'Space',
+  insertResolve: 'Meta+F'
 };
 
 let mainWindow;
