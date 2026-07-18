@@ -846,7 +846,9 @@ function openInputDialog({
   placeholder = '',
   options = [],
   suggestions = [],
-  confirmWithShiftSpace = false
+  confirmWithShiftSpace = false,
+  navigateOptions = false,
+  confirmWithSpace = false
 }) {
   return new Promise((resolve) => {
     const backdrop = $('#inputDialog');
@@ -892,6 +894,30 @@ function openInputDialog({
     backdrop.classList.remove('hidden');
     requestAnimationFrame(() => { field.focus(); field.select(); renderSuggestions(); });
     let settled = false;
+    let lastWheelSelectionAt = -Infinity;
+    const optionIndex = () => options.findIndex((option) => option.normalize('NFKC') === field.value.trim().normalize('NFKC'));
+    const selectAdjacentOption = (direction) => {
+      if (!navigateOptions || !options.length || !direction) return;
+      const current = optionIndex();
+      const next = current < 0
+        ? (direction > 0 ? 0 : options.length - 1)
+        : Math.max(0, Math.min(options.length - 1, current + direction));
+      field.value = options[next];
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+      field.focus();
+      field.setSelectionRange(field.value.length, field.value.length);
+    };
+    const handleOptionWheel = (event) => {
+      if (!navigateOptions || !options.length) return;
+      const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
+      if (!delta) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const now = performance.now();
+      if (now - lastWheelSelectionAt < 90) return;
+      lastWheelSelectionAt = now;
+      selectAdjacentOption(delta > 0 ? 1 : -1);
+    };
     const finish = (result) => {
       if (settled) return;
       settled = true;
@@ -903,6 +929,7 @@ function openInputDialog({
       form.removeEventListener('submit', submit);
       $('#inputDialogCancel').removeEventListener('click', cancel);
       backdrop.removeEventListener('click', outside);
+      form.removeEventListener('wheel', handleOptionWheel);
       document.removeEventListener('keydown', handleDialogKeydown, true);
       resolve(result);
     };
@@ -916,6 +943,19 @@ function openInputDialog({
         finish(null);
         return;
       }
+      if (navigateOptions && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+        event.preventDefault();
+        event.stopPropagation();
+        selectAdjacentOption(event.key === 'ArrowDown' ? 1 : -1);
+        return;
+      }
+      const noCommandModifier = !event.metaKey && !event.ctrlKey && !event.altKey;
+      if (confirmWithSpace && event.key === ' ' && !event.shiftKey && noCommandModifier) {
+        event.preventDefault();
+        event.stopPropagation();
+        finish(field.value.trim());
+        return;
+      }
       if (!confirmWithShiftSpace || event.key !== ' ' || !event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) return;
       event.preventDefault();
       event.stopPropagation();
@@ -925,6 +965,7 @@ function openInputDialog({
     form.addEventListener('submit', submit);
     $('#inputDialogCancel').addEventListener('click', cancel);
     backdrop.addEventListener('click', outside);
+    form.addEventListener('wheel', handleOptionWheel, { passive: false });
     document.addEventListener('keydown', handleDialogKeydown, true);
   });
 }
@@ -1096,8 +1137,10 @@ async function moveSelectedToCategory() {
   if (!sound) return showToast('먼저 이동할 사운드를 선택해 주세요.');
   const category = await openInputDialog({
     title: '카테고리 폴더로 이동',
-    description: `“${sound.title}” 파일을 이동할 기존 카테고리를 선택하세요. 새 폴더는 만들지 않습니다.`,
-    value: sound.categoryPath || sound.category || '', placeholder: '예: Trains/Horn', options: state.categoryPaths
+    description: `“${sound.title}” 파일을 이동할 기존 카테고리를 선택하세요. 마우스 휠·↑↓로 고르고 Space 또는 Enter를 누르세요.`,
+    value: sound.categoryPath || sound.category || '', placeholder: '예: Trains/Horn', options: state.categoryPaths,
+    navigateOptions: true,
+    confirmWithSpace: true
   });
   if (!category) return;
   const existingCategory = state.categoryPaths.find((item) => item.normalize('NFC') === category.normalize('NFC'));
@@ -1225,7 +1268,14 @@ async function addTagsToSelection() {
 async function moveSelectionToCategory() {
   const ids = selectedIdList();
   if (!ids.length) return showToast('먼저 사운드를 선택해 주세요.');
-  const category = await openInputDialog({ title: '선택 항목 카테고리 이동', description: `${ids.length}개 원본 파일을 이미 존재하는 카테고리 폴더로 이동합니다. 새 폴더는 만들지 않습니다.`, placeholder: '목록에서 기존 폴더 선택', options: state.categoryPaths });
+  const category = await openInputDialog({
+    title: '선택 항목 카테고리 이동',
+    description: `${ids.length}개 원본 파일을 이동할 기존 카테고리를 마우스 휠·↑↓로 고르고 Space 또는 Enter를 누르세요.`,
+    placeholder: '목록에서 기존 폴더 선택',
+    options: state.categoryPaths,
+    navigateOptions: true,
+    confirmWithSpace: true
+  });
   if (!category) return;
   const existingCategory = state.categoryPaths.find((item) => item.normalize('NFC') === category.normalize('NFC'));
   if (!existingCategory) return showToast('목록에 있는 기존 카테고리 폴더만 선택할 수 있습니다.', 5000);
