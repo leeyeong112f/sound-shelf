@@ -1146,16 +1146,6 @@ function tagRecordsForUndo(ids) {
 
 function renderTagManager() {
   const entries = tagUsageEntries();
-  const labelsByKey = new Map(entries.map((entry) => [entry.key, entry.label]));
-  const related = new Map(entries.map((entry) => [entry.key, new Map()]));
-  state.sounds.forEach((sound) => {
-    const keys = [...new Set((sound.tags || []).map(normalizedTagKey).filter((key) => labelsByKey.has(key)))];
-    keys.forEach((key) => keys.forEach((other) => {
-      if (key === other) return;
-      const counts = related.get(key);
-      counts.set(other, (counts.get(other) || 0) + 1);
-    }));
-  });
   const query = normalizedTagKey(state.tagManagerQuery);
   const visible = entries.filter((entry) => !query || entry.key.includes(query));
   visible.sort((left, right) => state.tagManagerSort === 'name'
@@ -1166,17 +1156,10 @@ function renderTagManager() {
   $('#tagManagerSummary').textContent = `전체 ${entries.length}개 · 표시 ${visible.length}개 · 총 ${entries.reduce((sum, entry) => sum + entry.count, 0).toLocaleString()}회 사용`;
   $('#tagManagerUndo').disabled = !tagUndoSnapshot;
   $('#tagManagerUndo').textContent = tagUndoSnapshot ? `변경 취소 · ${tagUndoSnapshot.description}` : '마지막 변경 취소';
-  $('#tagManagerList').innerHTML = visible.map((entry) => {
-    const relatedLabels = [...(related.get(entry.key) || new Map()).entries()]
-      .sort((left, right) => right[1] - left[1])
-      .slice(0, 3)
-      .map(([key, count]) => `#${labelsByKey.get(key)} ${count}`)
-      .join(' · ') || '—';
-    return `<div class="tag-manager-row" data-tag-manager-tag="${escapeHtml(entry.label)}">
-      <strong>#${escapeHtml(entry.label)}</strong><span class="tag-manager-count">${entry.count}개</span><span class="tag-manager-related" title="${escapeHtml(relatedLabels)}">${escapeHtml(relatedLabels)}</span>
-      <div class="tag-manager-actions"><button data-tag-manager-action="filter">보기</button><button data-tag-manager-action="rename">변경</button><button data-tag-manager-action="merge">병합</button><button class="danger" data-tag-manager-action="delete">삭제</button></div>
-    </div>`;
-  }).join('') || '<div class="tag-choice-empty">일치하는 태그가 없습니다.</div>';
+  $('#tagManagerList').innerHTML = visible.map((entry) => `<div class="tag-manager-row" data-tag-manager-tag="${escapeHtml(entry.label)}">
+    <strong>#${escapeHtml(entry.label)}</strong><span class="tag-manager-count">${entry.count}개</span>
+    <div class="tag-manager-actions"><button data-tag-manager-action="rename">변경</button></div>
+  </div>`).join('') || '<div class="tag-choice-empty">일치하는 태그가 없습니다.</div>';
 }
 
 function openTagManager() {
@@ -1207,7 +1190,7 @@ async function commitTagChange(ids, changes, description) {
 async function renameManagedTag(tag) {
   const next = await openInputDialog({
     title: '태그 이름 변경',
-    description: `#${tag} 태그가 붙은 모든 사운드에서 이름을 변경합니다. 같은 태그가 있으면 자동으로 병합됩니다.`,
+    description: `#${tag} 태그가 붙은 모든 사운드에서 이름을 변경합니다. 이미 사용 중인 태그 이름은 선택할 수 없습니다.`,
     value: tag,
     placeholder: '새 태그 이름',
     options: tagUsageEntries().map((entry) => entry.label)
@@ -1215,59 +1198,10 @@ async function renameManagedTag(tag) {
   const cleaned = cleanTagLabel(next);
   if (!cleaned || cleaned === tag) return;
   const existing = tagUsageEntries().find((entry) => entry.key === normalizedTagKey(cleaned));
-  if (existing && existing.key !== normalizedTagKey(tag)
-    && !confirm(`#${tag}을 기존 #${existing.label} 태그와 병합할까요?`)) return;
-  await commitTagChange(soundIdsWithTag(tag), { addTags: [existing?.label || cleaned], removeTags: [tag] }, `#${tag} → #${existing?.label || cleaned}`);
-}
-
-async function mergeManagedTag(tag) {
-  const candidates = tagUsageEntries().filter((entry) => entry.key !== normalizedTagKey(tag));
-  if (!candidates.length) return showToast('병합할 다른 태그가 없습니다.');
-  const destination = await openInputDialog({
-    title: '태그 병합',
-    description: `#${tag}을 선택한 기존 태그로 합칩니다. 원래 태그는 사라집니다.`,
-    placeholder: '병합할 기존 태그 선택',
-    options: candidates.map((entry) => entry.label)
-  });
-  const target = candidates.find((entry) => entry.key === normalizedTagKey(destination));
-  if (!destination) return;
-  if (!target) return showToast('목록에 있는 기존 태그만 선택할 수 있습니다.', 5000);
-  const ids = soundIdsWithTag(tag);
-  if (!confirm(`#${tag} ${ids.length}개를 #${target.label} 태그로 병합할까요?`)) return;
-  await commitTagChange(ids, { addTags: [target.label], removeTags: [tag] }, `#${tag} 병합`);
-}
-
-async function deleteManagedTag(tag) {
-  const ids = soundIdsWithTag(tag);
-  if (!confirm(`#${tag} 태그를 ${ids.length}개 사운드에서 제거할까요?\n\n오디오 파일은 삭제되지 않습니다.`)) return;
-  await commitTagChange(ids, { removeTags: [tag] }, `#${tag} 삭제`);
-}
-
-async function addNewTagToSelection() {
-  const ids = selectedIdList();
-  if (!ids.length) return showToast('태그를 추가할 사운드를 먼저 선택해 주세요.');
-  const value = await openInputDialog({
-    title: '선택 사운드에 태그 추가',
-    description: `${ids.length}개 사운드에 기존 태그를 선택하거나 새 태그를 추가합니다.`,
-    placeholder: '태그 이름',
-    options: tagUsageEntries().map((entry) => entry.label)
-  });
-  const label = cleanTagLabel(value);
-  if (!label) return;
-  await commitTagChange(ids, { addTags: [label] }, `#${label} 추가`);
-}
-
-async function addManagedTagToSelection(tag) {
-  const ids = selectedIdList();
-  if (!ids.length) return showToast('태그를 추가할 사운드를 먼저 선택해 주세요.');
-  await commitTagChange(ids, { addTags: [tag] }, `#${tag} 추가`);
-}
-
-async function removeManagedTagFromSelection(tag) {
-  const ids = soundIdsWithTag(tag, selectedIdList());
-  if (!selectedIdList().length) return showToast('태그를 제거할 사운드를 먼저 선택해 주세요.');
-  if (!ids.length) return showToast('선택 사운드에는 이 태그가 없습니다.');
-  await commitTagChange(ids, { removeTags: [tag] }, `선택 항목에서 #${tag} 제거`);
+  if (existing && existing.key !== normalizedTagKey(tag)) {
+    return showToast(`#${existing.label} 태그가 이미 있습니다. 다른 이름을 입력해 주세요.`, 5000);
+  }
+  await commitTagChange(soundIdsWithTag(tag), { addTags: [cleaned], removeTags: [tag] }, `#${tag} → #${cleaned}`);
 }
 
 async function undoLastTagChange() {
@@ -1493,17 +1427,10 @@ function showContextMenu(event, target) {
         : ''}`;
   } else if (target.type === 'tag') {
     const count = soundIdsWithTag(target.tag).length;
-    const selectedCount = selectedIdList().length;
     menu.innerHTML = `
       <div class="context-menu-label">#${escapeHtml(target.tag)} · ${count}개 사운드</div>
-      <button data-context-action="filter-tag">이 태그만 보기</button>
-      <button data-context-action="add-tag-selection">${selectedCount ? `선택 사운드 ${selectedCount}개에 추가` : '선택 사운드에 추가'}</button>
-      <button data-context-action="remove-tag-selection">선택 사운드에서 제거</button>
-      <div class="separator"></div>
       <button data-context-action="rename-tag">태그 이름 전체 변경…</button>
-      <button data-context-action="merge-tag">다른 태그와 병합…</button>
-      <button data-context-action="manage-tags">전체 태그 관리…</button>
-      <div class="separator"></div><button class="danger" data-context-action="delete-tag">전체 사운드에서 태그 삭제…</button>`;
+      <button data-context-action="manage-tags">태그 이름 관리…</button>`;
   } else {
     const targetSound = state.sounds.find((sound) => sound.id === target.id);
     const keyAnalysis = currentKeyAnalysis(targetSound);
@@ -1958,15 +1885,10 @@ $('#tagPanelToggle').addEventListener('click', () => {
   renderTagPanel();
 });
 
-$('#addTagBtn').addEventListener('click', (event) => {
-  event.stopPropagation();
-  addNewTagToSelection();
-});
 $('#manageTagsBtn').addEventListener('click', (event) => {
   event.stopPropagation();
   openTagManager();
 });
-$('#tagManagerAdd').addEventListener('click', addNewTagToSelection);
 $('#tagManagerUndo').addEventListener('click', undoLastTagChange);
 $('#tagManagerSearch').addEventListener('input', (event) => {
   state.tagManagerQuery = event.target.value;
@@ -1983,15 +1905,7 @@ $('#tagManagerList').addEventListener('click', (event) => {
   if (!button || !row) return;
   const tag = row.dataset.tagManagerTag;
   const action = button.dataset.tagManagerAction;
-  if (action === 'filter') {
-    state.tagFilters = new Set([tag]);
-    state.filter = 'all';
-    closeTagManager();
-    return render();
-  }
   if (action === 'rename') renameManagedTag(tag);
-  else if (action === 'merge') mergeManagedTag(tag);
-  else if (action === 'delete') deleteManagedTag(tag);
 });
 $('#tagManagerClose').addEventListener('click', closeTagManager);
 $('#tagManagerDialog').addEventListener('click', (event) => {
@@ -2069,18 +1983,7 @@ $('#contextMenu').addEventListener('click', async (event) => {
     return;
   }
   if (target.type === 'tag') {
-    if (action === 'filter-tag') {
-      state.tagFilters = new Set([target.tag]);
-      state.filter = 'all';
-      state.view = 'library';
-      list.scrollTop = 0;
-      return render();
-    }
-    if (action === 'add-tag-selection') return addManagedTagToSelection(target.tag);
-    if (action === 'remove-tag-selection') return removeManagedTagFromSelection(target.tag);
     if (action === 'rename-tag') return renameManagedTag(target.tag);
-    if (action === 'merge-tag') return mergeManagedTag(target.tag);
-    if (action === 'delete-tag') return deleteManagedTag(target.tag);
     if (action === 'manage-tags') return openTagManager();
     return;
   }

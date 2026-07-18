@@ -24,7 +24,7 @@
             <div id="tagPanelResizer" class="tag-panel-resizer" title="드래그하여 태그 영역 높이 조절"></div>
             <div class="tag-panel-header">
               <button id="tagPanelToggle" class="tag-panel-heading" type="button" aria-expanded="true"><span>태그 <b id="tagCount">0</b></span><span id="tagPanelArrow">▼</span></button>
-              <div class="tag-panel-actions"><button id="addTagBtn" type="button" title="선택 사운드에 새 태그 추가">＋</button><button id="manageTagsBtn" type="button" title="전체 태그 관리">관리</button></div>
+              <div class="tag-panel-actions"><button id="manageTagsBtn" type="button" title="태그 이름 관리">관리</button></div>
             </div>
             <div id="tagPanelBody" class="tag-panel-body">
               <input id="tagFilterInput" type="search" placeholder="태그 검색" autocomplete="off" />
@@ -176,10 +176,10 @@
     </div>
     <div id="tagManagerDialog" class="dialog-backdrop hidden">
       <section class="tag-manager">
-        <div class="tag-manager-heading"><div><h2>태그 관리</h2><p>태그 이름을 전체 변경하거나 병합·삭제할 수 있습니다. 사운드 파일은 삭제되지 않습니다.</p></div><button id="tagManagerClose" type="button" aria-label="닫기">×</button></div>
-        <div class="tag-manager-toolbar"><input id="tagManagerSearch" type="search" placeholder="태그 검색" autocomplete="off" /><select id="tagManagerSort" title="정렬"><option value="usage">많이 사용한 순</option><option value="name">이름순</option></select><button id="tagManagerAdd" class="primary-button" type="button">선택 사운드에 추가</button><button id="tagManagerUndo" class="subtle-button" type="button" disabled>마지막 변경 취소</button></div>
+        <div class="tag-manager-heading"><div><h2>태그 이름 관리</h2><p>태그 사용 현황을 확인하고 이름만 간단히 정리합니다.</p></div><button id="tagManagerClose" type="button" aria-label="닫기">×</button></div>
+        <div class="tag-manager-toolbar"><input id="tagManagerSearch" type="search" placeholder="태그 검색" autocomplete="off" /><select id="tagManagerSort" title="정렬"><option value="usage">많이 사용한 순</option><option value="name">이름순</option></select><button id="tagManagerUndo" class="subtle-button" type="button" disabled>마지막 변경 취소</button></div>
         <p id="tagManagerSummary" class="tag-manager-summary"></p>
-        <div class="tag-manager-columns"><span>태그</span><span>사용</span><span>함께 쓰는 태그</span><span>관리</span></div>
+        <div class="tag-manager-columns"><span>태그</span><span>사용</span><span>이름 변경</span></div>
         <div id="tagManagerList" class="tag-manager-list"></div>
       </section>
     </div>
