@@ -10,6 +10,7 @@ const { promisify } = require('node:util');
 const os = require('node:os');
 const { VaultStorage, normalizedRelativePath, relativePathInside, writeJsonAtomic } = require('./vault-storage');
 const { mergeVaultState } = require('./vault-sync');
+const { matchesRenameFingerprint } = require('./file-identity');
 
 const execFileAsync = promisify(execFile);
 const AUDIO_EXTENSIONS = new Set([
@@ -249,6 +250,16 @@ function activeVaultRoot() {
 function soundRelativePath(filePath) {
   const root = activeVaultRoot();
   return root ? relativePathInside(root, filePath) : null;
+}
+
+function isRenamedSoundMatch(sound, filePath, stat) {
+  const relativePath = soundRelativePath(filePath);
+  if (!relativePath) return false;
+  return matchesRenameFingerprint(sound, {
+    relativePath,
+    size: stat?.size,
+    modifiedAt: stat?.mtimeMs
+  });
 }
 
 function portableSound(sound) {
@@ -813,12 +824,21 @@ async function indexFiles(filePaths, { reportProgress = true, categoryFolders = 
 
     let current = existingByPath.get(normalizedFsPath(filePath))
       || (relativePath ? existingByRelativePath.get(relativePath) : null);
+    let discoveredRename = false;
     if (!current) {
       const normalizedName = path.basename(filePath).normalize('NFC').toLocaleLowerCase('ko');
       const missingMatches = db.sounds.filter((sound) => !fs.existsSync(sound.path)
         && path.basename(sound.path).normalize('NFC').toLocaleLowerCase('ko') === normalizedName
         && Number(sound.size) === Number(stat.size));
       if (missingMatches.length === 1) current = missingMatches[0];
+    }
+    if (!current) {
+      const renamedMatches = db.sounds.filter((sound) => !fs.existsSync(sound.path)
+        && isRenamedSoundMatch(sound, filePath, stat));
+      if (renamedMatches.length === 1) {
+        current = renamedMatches[0];
+        discoveredRename = true;
+      }
     }
     const id = current?.id || crypto.randomUUID();
     const needsProbe = !current || !current.technicalCached || current.modifiedAt !== stat.mtimeMs || current.size !== stat.size;
@@ -829,7 +849,7 @@ async function indexFiles(filePaths, { reportProgress = true, categoryFolders = 
       relativePath: relativePath || current?.relativePath || '',
       path: filePath,
       fileName: path.basename(filePath),
-      title: current?.title || path.basename(filePath, path.extname(filePath)),
+      title: discoveredRename ? path.basename(filePath, path.extname(filePath)) : (current?.title || path.basename(filePath, path.extname(filePath))),
       categoryPath,
       category: categoryPath.split('/').filter(Boolean).pop() || current?.category || inferCategory(filePath),
       tags: current?.tags || [],
@@ -888,7 +908,7 @@ async function relinkMissingFromFiles(filePaths) {
   for (const filePath of filePaths) {
     const stat = await fsp.stat(filePath).catch(() => null);
     if (!stat) continue;
-    candidateStats.push({ filePath, size: stat.size });
+    candidateStats.push({ filePath, size: stat.size, modifiedAt: stat.mtimeMs });
     const key = `${path.basename(filePath).normalize('NFC').toLocaleLowerCase('ko')}:${stat.size}`;
     if (!candidates.has(key)) candidates.set(key, []);
     candidates.get(key).push(filePath);
@@ -900,6 +920,19 @@ async function relinkMissingFromFiles(filePaths) {
   for (const sound of missing) {
     const key = `${path.basename(sound.path).normalize('NFC').toLocaleLowerCase('ko')}:${sound.size}`;
     let matches = candidates.get(key) || [];
+    let discoveredRename = false;
+    if (matches.length !== 1) {
+      const renamedMatches = candidateStats
+        .filter((candidate) => isRenamedSoundMatch(sound, candidate.filePath, {
+          size: candidate.size,
+          mtimeMs: candidate.modifiedAt
+        }))
+        .map((candidate) => candidate.filePath);
+      if (renamedMatches.length === 1) {
+        matches = renamedMatches;
+        discoveredRename = true;
+      }
+    }
     if (matches.length !== 1 && sound.contentHash) {
       const contentMatches = [];
       for (const candidate of candidateStats.filter((item) => Number(item.size) === Number(sound.size))) {
@@ -929,6 +962,7 @@ async function relinkMissingFromFiles(filePaths) {
     } else {
       sound.path = matchPath;
       sound.fileName = path.basename(matchPath);
+      if (discoveredRename) sound.title = path.basename(matchPath, path.extname(matchPath));
       sound.relativePath = soundRelativePath(matchPath) || sound.relativePath || '';
       sound.categoryPath = inferCategoryPath(matchPath);
       sound.category = sound.categoryPath.split('/').pop();
