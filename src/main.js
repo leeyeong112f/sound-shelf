@@ -1499,7 +1499,7 @@ ipcMain.handle('library:update', async (_event, payload) => {
   return librarySnapshot();
 });
 
-ipcMain.handle('library:rename', async (_event, { id, name }) => {
+ipcMain.handle('library:rename', (_event, { id, name }) => withLocalMutation(async () => {
   const sound = db.sounds.find((item) => item.id === id);
   if (!sound || !fs.existsSync(sound.path)) throw new Error('이름을 바꿀 원본 파일을 찾을 수 없습니다.');
   const safeName = String(name || '').trim().replace(/[\\/:*?"<>|]/g, '-').replace(/^\.+/, '').trim();
@@ -1529,9 +1529,9 @@ ipcMain.handle('library:rename', async (_event, { id, name }) => {
   waveformCache.clear();
   await saveDb();
   return { ...librarySnapshot(), idChanges: { [oldId]: sound.id }, moved: { oldId, id: sound.id, path: destination } };
-});
+}));
 
-ipcMain.handle('library:update-batch', async (_event, { ids, updates, addTags }) => {
+ipcMain.handle('library:update-batch', (_event, { ids, updates, addTags }) => withLocalMutation(async () => {
   const selected = new Set(ids || []);
   const allowed = ['favorite', 'rating'];
   for (const sound of db.sounds) {
@@ -1541,7 +1541,7 @@ ipcMain.handle('library:update-batch', async (_event, { ids, updates, addTags })
   }
   await saveDb();
   return librarySnapshot();
-});
+}));
 
 ipcMain.handle('library:move-category-batch', (_event, { ids, category }) => withLocalMutation(async () => {
   const normalizedCategory = normalizeCategoryPath(category);
@@ -1575,7 +1575,7 @@ ipcMain.handle('library:move-category-batch', (_event, { ids, category }) => wit
   };
 }));
 
-ipcMain.handle('library:remove-batch', async (_event, { ids, trashFiles }) => {
+ipcMain.handle('library:remove-batch', (_event, { ids, trashFiles }) => withLocalMutation(async () => {
   const selected = new Set(ids || []);
   const removing = db.sounds.filter((sound) => selected.has(sound.id));
   if (trashFiles) {
@@ -1585,7 +1585,7 @@ ipcMain.handle('library:remove-batch', async (_event, { ids, trashFiles }) => {
   waveformCache.clear();
   await saveDb();
   return librarySnapshot();
-});
+}));
 
 ipcMain.handle('library:backup-export', async () => {
   const result = await dialog.showSaveDialog(mainWindow, {
@@ -1634,7 +1634,10 @@ ipcMain.handle('library:backup-import', async () => {
   const imported = validateImportedDb(candidate);
   const root = activeVaultRoot() || imported.settings.watchedFolders[0];
   if (!root) throw new Error('백업을 복원할 볼트 폴더를 찾을 수 없습니다.');
-  db.settings = { ...db.settings, ...imported.settings };
+  // machineId는 이 Mac의 신원이다. 다른 Mac에서 내보낸 백업을 복원해도 절대
+  // 넘겨받지 않는다 — 두 Mac이 같은 ID로 같은 편집 파일을 쓰면 Drive 충돌
+  // 사본이 다시 생긴다. 비어 있으면 activateVaultNow가 새로 발급한다.
+  db.settings = { ...db.settings, ...imported.settings, machineId: db.settings.machineId };
   return activateVault(root, { legacySounds: imported.sounds });
 });
 
@@ -1685,7 +1688,7 @@ ipcMain.handle('library:find-duplicates', () => withLocalMutation(async () => {
   return { groups, checked: candidates.length };
 }));
 
-ipcMain.handle('library:relink-missing', async () => {
+ipcMain.handle('library:relink-missing', () => withLocalMutation(async () => {
   const allFiles = (await Promise.all(db.settings.watchedFolders.map(walkAudioFiles))).flat();
   const result = await relinkMissingFromFiles(allFiles);
   const categoryGroups = await Promise.all(db.settings.watchedFolders.map(walkCategoryFolders));
@@ -1693,7 +1696,7 @@ ipcMain.handle('library:relink-missing', async () => {
     .sort((a, b) => a.localeCompare(b, 'ko'));
   await saveDb();
   return { ...librarySnapshot(), idChanges: result.idChanges, relinkResult: result };
-});
+}));
 
 ipcMain.handle('library:relink-one', async (_event, id) => {
   const sound = db.sounds.find((item) => item.id === id);
