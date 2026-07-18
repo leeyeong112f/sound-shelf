@@ -860,15 +860,45 @@ function openInputDialog({
     field.value = value;
     field.placeholder = placeholder;
     $('#inputDialogOptions').innerHTML = options.map((option) => `<option value="${escapeHtml(option)}"></option>`).join('');
-    field.setAttribute('list', options.length ? 'inputDialogOptions' : '');
-    form.classList.toggle('has-suggestions', suggestions.length > 0);
+    if (options.length && !navigateOptions) field.setAttribute('list', 'inputDialogOptions');
+    else field.removeAttribute('list');
+    form.classList.toggle('has-suggestions', suggestions.length > 0 || navigateOptions);
     const normalizeSuggestion = (text) => String(text || '').normalize('NFKC')
       .replace(/\s+/g, ' ').trim().toLocaleLowerCase('ko');
+    const searchableOptions = options.map((option) => ({
+      value: option,
+      normalizedValue: normalizeSuggestion(option)
+    }));
     const searchableSuggestions = suggestions.map((item) => ({
       ...item,
       normalizedName: normalizeSuggestion(item.name)
     }));
-    const renderSuggestions = () => {
+    let optionSearchActive = false;
+    let visibleOptions = searchableOptions;
+    let highlightedOption = searchableOptions.find((item) => item.normalizedValue === normalizeSuggestion(value))?.value
+      || searchableOptions[0]?.value || '';
+    let settled = false;
+    let lastWheelSelectionAt = -Infinity;
+
+    const renderOptionSuggestions = () => {
+      const query = optionSearchActive ? normalizeSuggestion(field.value) : '';
+      visibleOptions = searchableOptions.filter((item) => !query || item.normalizedValue.includes(query));
+      if (!visibleOptions.some((item) => item.value === highlightedOption)) {
+        highlightedOption = visibleOptions.find((item) => item.normalizedValue === query)?.value
+          || visibleOptions[0]?.value || '';
+      }
+      suggestionsPanel.classList.remove('hidden');
+      if (!visibleOptions.length) {
+        suggestionsPanel.innerHTML = '<div class="input-dialog-suggestion-empty">일치하는 기존 카테고리가 없습니다.</div>';
+        return;
+      }
+      suggestionsPanel.innerHTML = `
+        <div class="input-dialog-suggestion-summary">카테고리 ${visibleOptions.length}개 · 휠/↑↓ 선택 · Space/Enter 이동</div>
+        ${visibleOptions.map((item, index) => `<button type="button" class="input-dialog-option${item.value === highlightedOption ? ' active' : ''}" data-input-option-index="${index}" aria-selected="${item.value === highlightedOption}"><strong>${escapeHtml(item.value)}</strong></button>`).join('')}`;
+      requestAnimationFrame(() => suggestionsPanel.querySelector('.input-dialog-option.active')?.scrollIntoView({ block: 'nearest' }));
+    };
+
+    const renderNameSuggestions = () => {
       const query = normalizeSuggestion(field.value);
       if (!suggestions.length || !query) {
         suggestionsPanel.innerHTML = '';
@@ -891,24 +921,40 @@ function openInputDialog({
         <div class="input-dialog-suggestion-summary">기존 이름 ${matches.length}개${matches.length > visible.length ? ` · 상위 ${visible.length}개 표시` : ''}</div>
         ${visible.map((item) => `<div class="input-dialog-suggestion${item.missing ? ' missing' : ''}"><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.category || '미분류')}</span></div>`).join('')}`;
     };
-    backdrop.classList.remove('hidden');
-    requestAnimationFrame(() => { field.focus(); field.select(); renderSuggestions(); });
-    let settled = false;
-    let lastWheelSelectionAt = -Infinity;
-    const optionIndex = () => options.findIndex((option) => option.normalize('NFKC') === field.value.trim().normalize('NFKC'));
+    const renderSuggestions = () => {
+      if (navigateOptions) renderOptionSuggestions();
+      else renderNameSuggestions();
+    };
+    const handleFieldInput = () => {
+      if (navigateOptions) {
+        optionSearchActive = true;
+        highlightedOption = '';
+      }
+      renderSuggestions();
+    };
+    const selectedDialogValue = () => navigateOptions
+      ? (highlightedOption || field.value.trim())
+      : field.value.trim();
     const selectAdjacentOption = (direction) => {
-      if (!navigateOptions || !options.length || !direction) return;
-      const current = optionIndex();
+      if (!navigateOptions || !visibleOptions.length || !direction) return;
+      const current = visibleOptions.findIndex((item) => item.value === highlightedOption);
       const next = current < 0
-        ? (direction > 0 ? 0 : options.length - 1)
-        : Math.max(0, Math.min(options.length - 1, current + direction));
-      field.value = options[next];
-      field.dispatchEvent(new Event('input', { bubbles: true }));
-      field.focus();
-      field.setSelectionRange(field.value.length, field.value.length);
+        ? (direction > 0 ? 0 : visibleOptions.length - 1)
+        : Math.max(0, Math.min(visibleOptions.length - 1, current + direction));
+      highlightedOption = visibleOptions[next].value;
+      renderOptionSuggestions();
+    };
+    const handleOptionClick = (event) => {
+      if (!navigateOptions) return;
+      const button = event.target.closest('[data-input-option-index]');
+      if (!button) return;
+      const selected = visibleOptions[Number(button.dataset.inputOptionIndex)];
+      if (!selected) return;
+      highlightedOption = selected.value;
+      finish(highlightedOption);
     };
     const handleOptionWheel = (event) => {
-      if (!navigateOptions || !options.length) return;
+      if (!navigateOptions || !visibleOptions.length) return;
       const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
       if (!delta) return;
       event.preventDefault();
@@ -918,6 +964,7 @@ function openInputDialog({
       lastWheelSelectionAt = now;
       selectAdjacentOption(delta > 0 ? 1 : -1);
     };
+    backdrop.classList.remove('hidden');
     const finish = (result) => {
       if (settled) return;
       settled = true;
@@ -925,7 +972,8 @@ function openInputDialog({
       suggestionsPanel.classList.add('hidden');
       suggestionsPanel.innerHTML = '';
       form.classList.remove('has-suggestions');
-      field.removeEventListener('input', renderSuggestions);
+      field.removeEventListener('input', handleFieldInput);
+      suggestionsPanel.removeEventListener('click', handleOptionClick);
       form.removeEventListener('submit', submit);
       $('#inputDialogCancel').removeEventListener('click', cancel);
       backdrop.removeEventListener('click', outside);
@@ -933,7 +981,7 @@ function openInputDialog({
       document.removeEventListener('keydown', handleDialogKeydown, true);
       resolve(result);
     };
-    const submit = (event) => { event.preventDefault(); finish(field.value.trim()); };
+    const submit = (event) => { event.preventDefault(); finish(selectedDialogValue()); };
     const cancel = () => finish(null);
     const outside = (event) => { if (event.target === backdrop) finish(null); };
     const handleDialogKeydown = (event) => {
@@ -953,20 +1001,22 @@ function openInputDialog({
       if (confirmWithSpace && event.key === ' ' && !event.shiftKey && noCommandModifier) {
         event.preventDefault();
         event.stopPropagation();
-        finish(field.value.trim());
+        finish(selectedDialogValue());
         return;
       }
       if (!confirmWithShiftSpace || event.key !== ' ' || !event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) return;
       event.preventDefault();
       event.stopPropagation();
-      finish(field.value.trim());
+      finish(selectedDialogValue());
     };
-    field.addEventListener('input', renderSuggestions);
+    field.addEventListener('input', handleFieldInput);
+    suggestionsPanel.addEventListener('click', handleOptionClick);
     form.addEventListener('submit', submit);
     $('#inputDialogCancel').addEventListener('click', cancel);
     backdrop.addEventListener('click', outside);
     form.addEventListener('wheel', handleOptionWheel, { passive: false });
     document.addEventListener('keydown', handleDialogKeydown, true);
+    requestAnimationFrame(() => { field.focus(); field.select(); renderSuggestions(); });
   });
 }
 
