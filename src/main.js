@@ -173,6 +173,20 @@ function normalizedAudioBaseName(value) {
   return baseName.replace(/\s+/g, ' ').trim().toLocaleLowerCase('ko');
 }
 
+function normalizedTagKey(value) {
+  return String(value || '').normalize('NFKC').replace(/^#+/, '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('ko');
+}
+
+function cleanTagList(values) {
+  const unique = new Map();
+  for (const value of Array.isArray(values) ? values : []) {
+    const label = String(value || '').normalize('NFKC').replace(/^#+/, '').replace(/\s+/g, ' ').trim();
+    const key = normalizedTagKey(label);
+    if (key && !unique.has(key)) unique.set(key, label);
+  }
+  return [...unique.values()];
+}
+
 function canonicalizeWatchedFolders(folders) {
   const unique = [...new Map((folders || []).map((folder) => [normalizedFsPath(folder), path.resolve(folder)])).values()];
   return unique.sort((a, b) => normalizedFsPath(a).length - normalizedFsPath(b).length).filter((folder, index, sorted) => {
@@ -1487,7 +1501,7 @@ ipcMain.handle('library:update', async (_event, payload) => {
   if (!sound) throw new Error('Sound not found');
   const allowed = ['title', 'category', 'tags', 'notes', 'favorite', 'rating'];
   for (const key of allowed) {
-    if (Object.hasOwn(payload, key)) sound[key] = payload[key];
+    if (Object.hasOwn(payload, key)) sound[key] = key === 'tags' ? cleanTagList(payload[key]) : payload[key];
   }
   if (Object.hasOwn(payload, 'category')) {
     sound.categoryPath = String(payload.category || '미분류').split(/[\\/>]+/).map((part) => part.trim()).filter(Boolean).join('/') || '미분류';
@@ -1531,13 +1545,24 @@ ipcMain.handle('library:rename', (_event, { id, name }) => withLocalMutation(asy
   return { ...librarySnapshot(), idChanges: { [oldId]: sound.id }, moved: { oldId, id: sound.id, path: destination } };
 }));
 
-ipcMain.handle('library:update-batch', (_event, { ids, updates, addTags }) => withLocalMutation(async () => {
+ipcMain.handle('library:update-batch', (_event, { ids, updates, addTags, removeTags }) => withLocalMutation(async () => {
   const selected = new Set(ids || []);
   const allowed = ['favorite', 'rating'];
+  const additions = cleanTagList(addTags);
+  const removals = new Set(cleanTagList(removeTags).map(normalizedTagKey));
   for (const sound of db.sounds) {
     if (!selected.has(sound.id)) continue;
     for (const key of allowed) if (Object.hasOwn(updates || {}, key)) sound[key] = updates[key];
-    if (Array.isArray(addTags)) sound.tags = [...new Set([...(sound.tags || []), ...addTags])];
+    const nextTags = cleanTagList(sound.tags).filter((tag) => !removals.has(normalizedTagKey(tag)));
+    const existingKeys = new Set(nextTags.map(normalizedTagKey));
+    for (const tag of additions) {
+      const key = normalizedTagKey(tag);
+      if (key && !existingKeys.has(key)) {
+        nextTags.push(tag);
+        existingKeys.add(key);
+      }
+    }
+    sound.tags = nextTags;
   }
   await saveDb();
   return librarySnapshot();

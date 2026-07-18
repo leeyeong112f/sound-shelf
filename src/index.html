@@ -16,10 +16,18 @@
           <button class="nav-item" data-filter="favorites"><span>★</span> 즐겨찾기 <b id="favoriteCount">0</b></button>
         </nav>
         <div class="sidebar-groups">
-          <div class="section-label category-root-heading" data-root-drop title="폴더를 여기에 드롭하면 최상위로 이동"><span>카테고리 폴더</span><button id="newRootCategoryBtn" title="새 최상위 폴더 만들기" aria-label="새 최상위 폴더 만들기">＋</button></div>
-          <div id="categoryList" class="category-list"></div>
-          <div class="section-label">태그</div>
-          <div id="tagList" class="category-list tag-list"></div>
+          <div class="category-pane">
+            <div class="section-label category-root-heading" data-root-drop title="폴더를 여기에 드롭하면 최상위로 이동"><span>카테고리 폴더</span><button id="newRootCategoryBtn" title="새 최상위 폴더 만들기" aria-label="새 최상위 폴더 만들기">＋</button></div>
+            <div id="categoryList" class="category-list"></div>
+          </div>
+          <section id="tagDock" class="tag-dock">
+            <div id="tagPanelResizer" class="tag-panel-resizer" title="드래그하여 태그 영역 높이 조절"></div>
+            <button id="tagPanelToggle" class="tag-panel-heading" type="button" aria-expanded="true"><span>태그 <b id="tagCount">0</b></span><span id="tagPanelArrow">▼</span></button>
+            <div id="tagPanelBody" class="tag-panel-body">
+              <input id="tagFilterInput" type="search" placeholder="태그 검색" autocomplete="off" />
+              <div id="tagList" class="category-list tag-list"></div>
+            </div>
+          </section>
         </div>
         <div class="sidebar-bottom">
           <button id="addFolderBtn" class="primary-button">볼트 열기</button>
@@ -53,7 +61,7 @@
         </section>
 
         <section class="sound-table-wrap library-only">
-          <div id="batchToolbar" class="batch-toolbar hidden"><strong id="selectionCount">0개 선택</strong><button id="batchTagsBtn">태그 추가</button><button id="batchMoveBtn">카테고리 이동</button><button id="batchFavoriteBtn">즐겨찾기</button><button id="batchTrashBtn" class="danger">휴지통</button><button id="clearSelectionBtn">선택 해제</button></div>
+          <div id="batchToolbar" class="batch-toolbar hidden"><strong id="selectionCount">0개 선택</strong><button id="batchTagsBtn">태그 편집</button><button id="batchMoveBtn">카테고리 이동</button><button id="batchFavoriteBtn">즐겨찾기</button><button id="batchTrashBtn" class="danger">휴지통</button><button id="clearSelectionBtn">선택 해제</button></div>
           <div class="sound-table-head">
             <span></span><span>이름</span><span>파형</span><span>카테고리</span><span>길이</span><span>포맷</span><span>채널</span><span>별점</span><span>태그</span><span></span>
           </div>
@@ -143,6 +151,16 @@
         <datalist id="inputDialogOptions"></datalist>
         <div id="inputDialogSuggestions" class="input-dialog-suggestions hidden"></div>
         <div class="dialog-actions"><button type="button" id="inputDialogCancel" class="subtle-button">취소</button><button type="submit" class="primary-button">확인</button></div>
+      </form>
+    </div>
+    <div id="tagDialog" class="dialog-backdrop hidden">
+      <form id="tagDialogForm" class="tag-dialog">
+        <div class="tag-dialog-heading"><div><h2>태그 편집</h2><p id="tagDialogDescription"></p></div><button id="tagDialogClose" type="button" aria-label="닫기">×</button></div>
+        <div class="tag-search-row"><input id="tagDialogSearch" type="search" placeholder="기존 태그 검색 또는 새 태그 입력" autocomplete="off" /><button id="tagDialogAdd" type="button">새 태그 추가</button></div>
+        <section class="tag-selection-section"><strong>선택 상태</strong><div id="tagDialogSelected" class="tag-chip-grid"></div></section>
+        <div class="tag-state-legend"><span><i class="all">✓</i> 모든 파일</span><span><i class="some">−</i> 일부 파일</span><span><i>＋</i> 없음</span></div>
+        <section class="tag-library-section"><div class="tag-library-heading"><strong>기존 태그</strong><small id="tagDialogResultCount"></small></div><div id="tagDialogChoices" class="tag-choice-grid"></div></section>
+        <div class="dialog-actions"><button type="button" id="tagDialogCancel" class="subtle-button">취소</button><button type="submit" class="primary-button">적용</button></div>
       </form>
     </div>
     <div id="contextMenu" class="context-menu hidden" role="menu"></div>

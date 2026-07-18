@@ -8,7 +8,7 @@ const DEFAULT_SHORTCUTS = {
 const SHORTCUT_LABELS = {
   search: ['사운드 검색', '검색창으로 이동'],
   moveCategory: ['카테고리 폴더로 이동', '선택 파일을 실제 카테고리 폴더로 이동'],
-  editTags: ['태그 편집', '선택 사운드의 태그 입력'],
+  editTags: ['태그 편집', '선택 사운드의 기존 태그 선택·추가·제거'],
   addFiles: ['파일 추가', '오디오 파일 선택'],
   addFolder: ['볼트 열기', '다른 Sound Shelf 볼트 선택'],
   trash: ['원본 파일 삭제', '선택 파일을 macOS 휴지통으로 이동'],
@@ -48,6 +48,10 @@ const state = {
   sortDirection: 1,
   minimumRating: 0,
   fileFilter: 'all',
+  tagFilters: new Set(),
+  tagPanelQuery: '',
+  tagPanelCollapsed: localStorage.getItem('sound-shelf-tag-panel-collapsed') === 'true',
+  tagPanelHeight: Math.max(140, Number(localStorage.getItem('sound-shelf-tag-panel-height')) || 220),
   performance: null,
   vault: null,
   visibleSounds: []
@@ -69,6 +73,7 @@ const VIRTUAL_BUFFER = 8;
 let virtualRenderFrame;
 let searchDebounce;
 let duplicateGroups = [];
+let tagPanelResizeGesture = null;
 const miniWaveObserver = new IntersectionObserver((entries) => {
   entries.forEach((entry) => {
     if (!entry.isIntersecting) return;
@@ -156,7 +161,10 @@ function filteredSounds() {
       const soundPath = sound.categoryPath || sound.category || '미분류';
       if (soundPath !== selectedPath) return false;
     }
-    if (state.filter.startsWith('tag:') && !(sound.tags || []).includes(state.filter.slice(4))) return false;
+    if (state.tagFilters.size) {
+      const soundTagKeys = new Set((sound.tags || []).map(normalizedTagKey));
+      if (![...state.tagFilters].every((tag) => soundTagKeys.has(normalizedTagKey(tag)))) return false;
+    }
     if (Number(sound.rating || 0) < state.minimumRating) return false;
     if (state.fileFilter === 'missing' && !sound.missing) return false;
     if (state.fileFilter === 'available' && sound.missing) return false;
@@ -181,6 +189,10 @@ function filteredSounds() {
 function setLibrary(snapshot, { revealSelected = false } = {}) {
   if (!snapshot) return;
   state.sounds = snapshot.sounds || [];
+  const availableTags = new Map(tagUsageEntries().map((entry) => [entry.key, entry.label]));
+  state.tagFilters = new Set([...state.tagFilters]
+    .map((tag) => availableTags.get(normalizedTagKey(tag)))
+    .filter(Boolean));
   state.categories = snapshot.categories || [];
   state.categoryPaths = snapshot.categoryPaths || snapshot.categories || [];
   state.categoryOrder = snapshot.categoryOrder || [];
@@ -242,9 +254,29 @@ function updateVolumeControl() {
   $('#muteButton').setAttribute('aria-label', percent === 0 ? '음소거 해제' : '음소거');
 }
 
-function allTags() {
-  return [...new Set(state.sounds.flatMap((sound) => sound.tags || []).filter(Boolean))]
-    .sort((a, b) => a.localeCompare(b, 'ko'));
+function normalizedTagKey(value) {
+  return String(value || '').normalize('NFKC').replace(/^#+/, '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('ko');
+}
+
+function cleanTagLabel(value) {
+  return String(value || '').normalize('NFKC').replace(/^#+/, '').replace(/\s+/g, ' ').trim();
+}
+
+function tagUsageEntries() {
+  const entries = new Map();
+  state.sounds.forEach((sound) => {
+    const soundKeys = new Set();
+    (sound.tags || []).forEach((rawTag) => {
+      const label = cleanTagLabel(rawTag);
+      const key = normalizedTagKey(label);
+      if (!key || soundKeys.has(key)) return;
+      soundKeys.add(key);
+      const current = entries.get(key) || { key, label, count: 0 };
+      current.count += 1;
+      entries.set(key, current);
+    });
+  });
+  return [...entries.values()].sort((a, b) => a.label.localeCompare(b.label, 'ko'));
 }
 
 function displayShortcut(value) {
@@ -294,16 +326,28 @@ function renderCategoryNodes(nodes, depth = 0) {
     }).join('');
 }
 
+function renderTagPanel() {
+  const tagEntries = tagUsageEntries();
+  const tagQuery = normalizedTagKey(state.tagPanelQuery);
+  const visibleTagEntries = tagEntries.filter((entry) => !tagQuery || normalizedTagKey(entry.label).includes(tagQuery));
+  $('#tagCount').textContent = String(tagEntries.length);
+  $('#tagDock').classList.toggle('collapsed', state.tagPanelCollapsed);
+  $('#tagDock').style.setProperty('--tag-panel-height', `${state.tagPanelHeight}px`);
+  $('#tagPanelToggle').setAttribute('aria-expanded', String(!state.tagPanelCollapsed));
+  $('#tagPanelArrow').textContent = state.tagPanelCollapsed ? '▲' : '▼';
+  $('#tagFilterInput').value = state.tagPanelQuery;
+  $('#tagList').innerHTML = visibleTagEntries.map(({ label, count }) => {
+    const active = [...state.tagFilters].some((tag) => normalizedTagKey(tag) === normalizedTagKey(label)) ? 'active' : '';
+    return `<button class="nav-item ${active}" data-tag="${escapeHtml(label)}" title="#${escapeHtml(label)}"><span>#</span>${escapeHtml(label)}<b>${count}</b></button>`;
+  }).join('') || '<div class="dim category-list-empty">태그 없음</div>';
+}
+
 function renderSidebar() {
   $('#allCount').textContent = state.sounds.length;
   $('#favoriteCount').textContent = state.sounds.filter((sound) => sound.favorite).length;
   $('#categoryList').innerHTML = renderCategoryNodes(buildCategoryTree(state.categoryPaths).children)
     || '<div class="dim category-list-empty">카테고리 없음</div>';
-  $('#tagList').innerHTML = allTags().map((tag) => {
-    const count = state.sounds.filter((sound) => (sound.tags || []).includes(tag)).length;
-    const active = state.filter === `tag:${tag}` ? 'active' : '';
-    return `<button class="nav-item ${active}" data-tag="${escapeHtml(tag)}"><span>#</span>${escapeHtml(tag)}<b>${count}</b></button>`;
-  }).join('') || '<div class="dim category-list-empty">태그 없음</div>';
+  renderTagPanel();
   document.querySelectorAll('.nav-item[data-filter]').forEach((button) => {
     button.classList.toggle('active', button.dataset.filter === state.filter);
   });
@@ -364,9 +408,10 @@ function renderVirtualRows() {
 function renderList() {
   const sounds = filteredSounds();
   state.visibleSounds = sounds;
-  const filterName = state.filter === 'all' ? '모든 사운드'
+  const filterName = state.tagFilters.size ? [...state.tagFilters].map((tag) => `#${tag}`).join(' + ')
+    : state.filter === 'all' ? '모든 사운드'
     : state.filter === 'favorites' ? '즐겨찾기'
-      : state.filter.startsWith('tag:') ? `#${state.filter.slice(4)}` : state.filter.slice(9);
+      : state.filter.slice(9);
   $('#viewTitle').textContent = filterName;
   $('#resultSummary').textContent = `${sounds.length.toLocaleString()}개의 사운드`;
   $('#emptyState').classList.toggle('hidden', state.sounds.length > 0);
@@ -839,6 +884,168 @@ function openInputDialog({
   });
 }
 
+function openTagEditor(ids) {
+  return new Promise((resolve) => {
+    const selectedSounds = state.sounds.filter((sound) => ids.includes(sound.id));
+    if (!selectedSounds.length) return resolve(null);
+    const backdrop = $('#tagDialog');
+    const form = $('#tagDialogForm');
+    const searchField = $('#tagDialogSearch');
+    const addButton = $('#tagDialogAdd');
+    const choices = $('#tagDialogChoices');
+    const selectedPanel = $('#tagDialogSelected');
+    const usageByKey = new Map(tagUsageEntries().map((entry) => [entry.key, entry]));
+    const labels = new Map([...usageByKey].map(([key, entry]) => [key, entry.label]));
+    const selectedCounts = new Map();
+    selectedSounds.forEach((sound) => {
+      const soundKeys = new Set();
+      (sound.tags || []).forEach((rawTag) => {
+        const label = cleanTagLabel(rawTag);
+        const key = normalizedTagKey(label);
+        if (!key || soundKeys.has(key)) return;
+        soundKeys.add(key);
+        labels.set(key, labels.get(key) || label);
+        selectedCounts.set(key, (selectedCounts.get(key) || 0) + 1);
+      });
+    });
+    const initialStates = new Map();
+    labels.forEach((_label, key) => {
+      const count = selectedCounts.get(key) || 0;
+      initialStates.set(key, count === selectedSounds.length ? 'all' : (count > 0 ? 'some' : 'none'));
+    });
+    const currentStates = new Map(initialStates);
+    let settled = false;
+
+    const stateIcon = (tagState) => tagState === 'all' ? '✓' : (tagState === 'some' ? '−' : '＋');
+    const tagButtonMarkup = (key) => {
+      const label = labels.get(key) || key;
+      const tagState = currentStates.get(key) || 'none';
+      const usage = usageByKey.get(key)?.count || 0;
+      return `<button type="button" class="tag-choice state-${tagState}" data-tag-choice="${escapeHtml(key)}"><i>${stateIcon(tagState)}</i><span>${escapeHtml(label)}</span><b>${usage}</b></button>`;
+    };
+    const orderedKeys = () => [...labels.keys()].sort((left, right) => {
+      const stateOrder = { all: 0, some: 1, none: 2 };
+      const stateDifference = stateOrder[currentStates.get(left) || 'none'] - stateOrder[currentStates.get(right) || 'none'];
+      const usageDifference = (usageByKey.get(right)?.count || 0) - (usageByKey.get(left)?.count || 0);
+      return stateDifference || usageDifference || (labels.get(left) || '').localeCompare(labels.get(right) || '', 'ko');
+    });
+    const renderTagEditor = () => {
+      const query = normalizedTagKey(searchField.value);
+      const keys = orderedKeys();
+      const selectedKeys = keys.filter((key) => currentStates.get(key) === 'all' || currentStates.get(key) === 'some');
+      selectedPanel.innerHTML = selectedKeys.map(tagButtonMarkup).join('');
+      const visibleKeys = keys.filter((key) => !query || key.includes(query));
+      choices.innerHTML = visibleKeys.map(tagButtonMarkup).join('')
+        || '<div class="tag-choice-empty">일치하는 기존 태그가 없습니다. 위의 새 태그 추가를 사용하세요.</div>';
+      $('#tagDialogResultCount').textContent = `${visibleKeys.length} / ${keys.length}개`;
+      const inputLabel = cleanTagLabel(searchField.value.split(',')[0]);
+      const exactKey = normalizedTagKey(inputLabel);
+      addButton.disabled = !inputLabel;
+      addButton.textContent = exactKey && labels.has(exactKey) ? '이 태그 모두 적용' : '새 태그 추가';
+    };
+    const toggleTag = (key) => {
+      const initial = initialStates.get(key) || 'none';
+      const current = currentStates.get(key) || 'none';
+      let next;
+      if (initial === 'some') next = current === 'some' ? 'all' : (current === 'all' ? 'none' : 'some');
+      else next = current === 'all' ? 'none' : 'all';
+      currentStates.set(key, next);
+      renderTagEditor();
+    };
+    const addInputTags = () => {
+      const rawTags = searchField.value.split(',').map(cleanTagLabel).filter(Boolean);
+      if (!rawTags.length) return;
+      rawTags.forEach((label) => {
+        const key = normalizedTagKey(label);
+        if (!key) return;
+        labels.set(key, labels.get(key) || label);
+        if (!initialStates.has(key)) initialStates.set(key, 'none');
+        currentStates.set(key, 'all');
+      });
+      searchField.value = '';
+      renderTagEditor();
+      searchField.focus();
+    };
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      backdrop.classList.add('hidden');
+      form.removeEventListener('submit', submit);
+      searchField.removeEventListener('input', renderTagEditor);
+      searchField.removeEventListener('keydown', searchKeydown);
+      addButton.removeEventListener('click', addInputTags);
+      choices.removeEventListener('click', choiceClick);
+      selectedPanel.removeEventListener('click', choiceClick);
+      $('#tagDialogCancel').removeEventListener('click', cancel);
+      $('#tagDialogClose').removeEventListener('click', cancel);
+      backdrop.removeEventListener('click', outside);
+      document.removeEventListener('keydown', dialogKeydown, true);
+      resolve(result);
+    };
+    const submit = (event) => {
+      event.preventDefault();
+      const addTags = [];
+      const removeTags = [];
+      labels.forEach((label, key) => {
+        const initial = initialStates.get(key) || 'none';
+        const current = currentStates.get(key) || 'none';
+        if (current === 'all' && initial !== 'all') addTags.push(label);
+        if (current === 'none' && initial !== 'none') removeTags.push(label);
+      });
+      finish({ addTags, removeTags });
+    };
+    const cancel = () => finish(null);
+    const outside = (event) => { if (event.target === backdrop) finish(null); };
+    const choiceClick = (event) => {
+      const button = event.target.closest('[data-tag-choice]');
+      if (button) toggleTag(button.dataset.tagChoice);
+    };
+    const searchKeydown = (event) => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      event.stopPropagation();
+      addInputTags();
+    };
+    const dialogKeydown = (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        finish(null);
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase('ko') === 't') {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      const button = event.target.closest?.('[data-tag-choice]');
+      if (button && (event.key === ' ' || event.key === 'Enter')) {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleTag(button.dataset.tagChoice);
+      }
+    };
+
+    $('#tagDialogDescription').textContent = selectedSounds.length === 1
+      ? `“${selectedSounds[0].title}”의 태그를 선택하세요.`
+      : `${selectedSounds.length}개 사운드의 태그를 함께 편집합니다. − 표시는 일부 파일에만 있는 태그입니다.`;
+    searchField.value = '';
+    backdrop.classList.remove('hidden');
+    form.addEventListener('submit', submit);
+    searchField.addEventListener('input', renderTagEditor);
+    searchField.addEventListener('keydown', searchKeydown);
+    addButton.addEventListener('click', addInputTags);
+    choices.addEventListener('click', choiceClick);
+    selectedPanel.addEventListener('click', choiceClick);
+    $('#tagDialogCancel').addEventListener('click', cancel);
+    $('#tagDialogClose').addEventListener('click', cancel);
+    backdrop.addEventListener('click', outside);
+    document.addEventListener('keydown', dialogKeydown, true);
+    renderTagEditor();
+    requestAnimationFrame(() => searchField.focus());
+  });
+}
+
 async function moveSelectedToCategory() {
   const sound = selectedSound();
   if (!sound) return showToast('먼저 이동할 사운드를 선택해 주세요.');
@@ -862,16 +1069,13 @@ async function moveSelectedToCategory() {
 }
 
 async function editSelectedTags() {
-  const sound = selectedSound();
-  if (!sound) return showToast('먼저 태그를 편집할 사운드를 선택해 주세요.');
-  const value = await openInputDialog({
-    title: '태그 편집', description: '쉼표로 여러 태그를 구분하세요.',
-    value: (sound.tags || []).join(', '), placeholder: '예: 알림, 트위치, 밝음', options: allTags()
-  });
-  if (value === null) return;
-  const tags = [...new Set(value.split(',').map((tag) => tag.trim()).filter(Boolean))];
-  setLibrary(await window.soundLibrary.updateSound({ id: sound.id, tags }));
-  showToast('태그를 저장했습니다.');
+  const ids = selectedIdList();
+  if (!ids.length) return showToast('먼저 태그를 편집할 사운드를 선택해 주세요.');
+  const changes = await openTagEditor(ids);
+  if (!changes) return;
+  if (!changes.addTags.length && !changes.removeTags.length) return showToast('변경된 태그가 없습니다.');
+  setLibrary(await window.soundLibrary.updateSoundsBatch({ ids, ...changes }));
+  showToast(`${ids.length}개 사운드의 태그를 저장했습니다.`);
 }
 
 function selectedIdList() {
@@ -880,13 +1084,7 @@ function selectedIdList() {
 }
 
 async function addTagsToSelection() {
-  const ids = selectedIdList();
-  if (!ids.length) return showToast('먼저 사운드를 선택해 주세요.');
-  const value = await openInputDialog({ title: '선택 항목에 태그 추가', description: `${ids.length}개 사운드에 추가할 태그를 입력하세요.`, placeholder: '예: 긴장, 전환', options: allTags() });
-  if (value === null) return;
-  const addTags = [...new Set(value.split(',').map((tag) => tag.trim()).filter(Boolean))];
-  setLibrary(await window.soundLibrary.updateSoundsBatch({ ids, addTags }));
-  showToast(`${ids.length}개 사운드에 태그를 추가했습니다.`);
+  return editSelectedTags();
 }
 
 async function moveSelectionToCategory() {
@@ -1503,20 +1701,77 @@ document.addEventListener('click', (event) => {
   if (state.selectedCategories.size && !event.target.closest('#categoryList') && !event.target.closest('#contextMenu')) {
     clearCategorySelection();
   }
-  if (filterButton) { state.view = 'library'; state.filter = filterButton.dataset.filter; render(); }
+  if (filterButton) {
+    state.view = 'library';
+    state.filter = filterButton.dataset.filter;
+    state.tagFilters.clear();
+    list.scrollTop = 0;
+    render();
+  }
   if (categoryToggle) {
     toggleCategoryCollapse(categoryToggle.dataset.categoryToggle);
   }
   if (categoryButton) {
     state.view = 'library';
     state.filter = `category:${categoryButton.dataset.category}`;
+    state.tagFilters.clear();
     state.selectedCategories.clear();
     state.categoryAnchor = categoryButton.dataset.category;
+    list.scrollTop = 0;
     render();
   }
-  if (tagButton) { state.view = 'library'; state.filter = `tag:${tagButton.dataset.tag}`; render(); }
+  if (tagButton) {
+    const tag = tagButton.dataset.tag;
+    const existing = [...state.tagFilters].find((item) => normalizedTagKey(item) === normalizedTagKey(tag));
+    if (event.metaKey || event.ctrlKey) {
+      if (existing) state.tagFilters.delete(existing);
+      else state.tagFilters.add(tag);
+    } else if (existing && state.tagFilters.size === 1) state.tagFilters.clear();
+    else state.tagFilters = new Set([tag]);
+    state.view = 'library';
+    state.filter = 'all';
+    list.scrollTop = 0;
+    render();
+  }
   if (!event.target.closest('#contextMenu')) hideContextMenu();
 });
+
+$('#tagPanelToggle').addEventListener('click', () => {
+  state.tagPanelCollapsed = !state.tagPanelCollapsed;
+  localStorage.setItem('sound-shelf-tag-panel-collapsed', String(state.tagPanelCollapsed));
+  renderTagPanel();
+});
+
+$('#tagFilterInput').addEventListener('input', (event) => {
+  state.tagPanelQuery = event.target.value;
+  renderTagPanel();
+  $('#tagFilterInput').focus();
+});
+
+$('#tagPanelResizer').addEventListener('pointerdown', (event) => {
+  if (state.tagPanelCollapsed) return;
+  event.preventDefault();
+  tagPanelResizeGesture = { pointerId: event.pointerId, startY: event.clientY, startHeight: state.tagPanelHeight };
+  event.currentTarget.classList.add('resizing');
+  event.currentTarget.setPointerCapture(event.pointerId);
+});
+
+$('#tagPanelResizer').addEventListener('pointermove', (event) => {
+  if (!tagPanelResizeGesture || event.pointerId !== tagPanelResizeGesture.pointerId) return;
+  const maximum = Math.max(180, Math.floor($('.sidebar').clientHeight * 0.55));
+  state.tagPanelHeight = Math.max(140, Math.min(maximum, tagPanelResizeGesture.startHeight + tagPanelResizeGesture.startY - event.clientY));
+  $('#tagDock').style.setProperty('--tag-panel-height', `${state.tagPanelHeight}px`);
+});
+
+const finishTagPanelResize = (event) => {
+  if (!tagPanelResizeGesture || event.pointerId !== tagPanelResizeGesture.pointerId) return;
+  if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  event.currentTarget.classList.remove('resizing');
+  tagPanelResizeGesture = null;
+  localStorage.setItem('sound-shelf-tag-panel-height', String(Math.round(state.tagPanelHeight)));
+};
+$('#tagPanelResizer').addEventListener('pointerup', finishTagPanelResize);
+$('#tagPanelResizer').addEventListener('pointercancel', finishTagPanelResize);
 
 $('#categoryList').addEventListener('dblclick', (event) => {
   const label = event.target.closest('[data-category]');
