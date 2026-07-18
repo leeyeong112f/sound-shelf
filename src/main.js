@@ -523,6 +523,18 @@ function queueSave() {
   saveTimer = setTimeout(() => saveDb().catch(console.error).finally(() => { savePending = false; }), 150);
 }
 
+// 장시간 로컬 배치(파일 이동·ffprobe·해시)가 db.sounds 를 여러 await 에 걸쳐
+// 바꾸는 동안 폴링이 끼어들어 applyMergedState 로 통째 교체하면 그 작업이 유실된다.
+// 이 래퍼로 감싸면 작업 내내 savePending 이 켜져 폴링이 병합을 건너뛴다.
+async function withLocalMutation(work) {
+  savePending = true;
+  try {
+    return await work();
+  } finally {
+    savePending = false;
+  }
+}
+
 function publicSound(sound) {
   return { ...sound, missing: !fs.existsSync(sound.path) };
 }
@@ -1517,7 +1529,7 @@ ipcMain.handle('library:update-batch', async (_event, { ids, updates, addTags })
   return librarySnapshot();
 });
 
-ipcMain.handle('library:move-category-batch', async (_event, { ids, category }) => {
+ipcMain.handle('library:move-category-batch', (_event, { ids, category }) => withLocalMutation(async () => {
   const normalizedCategory = normalizeCategoryPath(category);
   const rootCategory = normalizedCategory === '미분류';
   const categoryParts = rootCategory ? [] : normalizedCategory.split('/').filter(Boolean);
@@ -1547,7 +1559,7 @@ ipcMain.handle('library:move-category-batch', async (_event, { ids, category }) 
     idChanges,
     moveResult: { requested: (ids || []).length, matched: selected.length, moved, skippedMissing }
   };
-});
+}));
 
 ipcMain.handle('library:remove-batch', async (_event, { ids, trashFiles }) => {
   const selected = new Set(ids || []);
@@ -1612,7 +1624,7 @@ ipcMain.handle('library:backup-import', async () => {
   return activateVault(root, { legacySounds: imported.sounds });
 });
 
-ipcMain.handle('library:collect-metadata', async () => {
+ipcMain.handle('library:collect-metadata', () => withLocalMutation(async () => {
   let updated = 0;
   const existing = db.sounds.filter((sound) => fs.existsSync(sound.path) && sound.metadataVersion !== 1);
   for (let index = 0; index < existing.length; index += 1) {
@@ -1627,9 +1639,9 @@ ipcMain.handle('library:collect-metadata', async () => {
   }
   await saveDb();
   return { ...librarySnapshot(), metadataResult: { updated } };
-});
+}));
 
-ipcMain.handle('library:find-duplicates', async () => {
+ipcMain.handle('library:find-duplicates', () => withLocalMutation(async () => {
   const sizeGroups = new Map();
   for (const sound of db.sounds) {
     if (sound.missing || !fs.existsSync(sound.path) || !sound.size) continue;
@@ -1657,7 +1669,7 @@ ipcMain.handle('library:find-duplicates', async () => {
   await saveDb();
   const groups = [...hashes.values()].filter((group) => group.length > 1);
   return { groups, checked: candidates.length };
-});
+}));
 
 ipcMain.handle('library:relink-missing', async () => {
   const allFiles = (await Promise.all(db.settings.watchedFolders.map(walkAudioFiles))).flat();
