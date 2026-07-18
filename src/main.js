@@ -154,8 +154,17 @@ async function createAutomaticBackup(reason = 'automatic') {
   return destination;
 }
 
+function temporaryClipDirectory() {
+  return path.join(app.getPath('temp'), 'sound-shelf-clips');
+}
+
+function isTemporaryClipPath(filePath) {
+  if (!filePath) return false;
+  return relativePathInside(temporaryClipDirectory(), filePath) !== null;
+}
+
 async function pruneTemporaryClips(maxAgeMs = 24 * 60 * 60 * 1000) {
-  const clipDirectory = path.join(app.getPath('temp'), 'sound-shelf-clips');
+  const clipDirectory = temporaryClipDirectory();
   const entries = await fsp.readdir(clipDirectory, { withFileTypes: true }).catch(() => []);
   const cutoff = Date.now() - maxAgeMs;
   await Promise.all(entries.filter((entry) => entry.isFile()).map(async (entry) => {
@@ -795,6 +804,9 @@ async function indexFiles(filePaths, { reportProgress = true, categoryFolders = 
 
   for (let index = 0; index < total; index += 1) {
     const filePath = path.resolve(filePaths[index]);
+    // Resolve range drags need a real filesystem path, but the generated file
+    // is a disposable transport artifact and must never become library data.
+    if (isTemporaryClipPath(filePath)) continue;
     const relativePath = soundRelativePath(filePath);
     const stat = await fsp.stat(filePath).catch(() => null);
     if (!stat?.isFile()) continue;
@@ -1212,6 +1224,9 @@ async function moveCategoryDirectory(sourceCategory, targetCategory) {
 }
 
 async function moveFileIntoCategory(filePath, categoryPath) {
+  if (isTemporaryClipPath(filePath)) {
+    throw new Error('Resolve 전송용 임시 구간은 라이브러리로 이동할 수 없습니다. “선택 구간 파일 만들기”를 이용해 주세요.');
+  }
   const folder = categoryFolderPath(categoryPath);
   if (!folder) throw new Error('대상 카테고리 폴더를 찾을 수 없습니다.');
   await fsp.mkdir(folder, { recursive: true });
@@ -1531,6 +1546,9 @@ ipcMain.handle('library:add-files', async () => {
     filters: [{ name: 'Audio', extensions: [...AUDIO_EXTENSIONS].map((ext) => ext.slice(1)) }]
   });
   if (result.canceled) return null;
+  if (result.filePaths.some(isTemporaryClipPath)) {
+    throw new Error('Resolve 전송용 임시 구간은 라이브러리에 추가되지 않습니다. “선택 구간 파일 만들기” 버튼을 이용해 주세요.');
+  }
   const moved = [];
   const root = activeVaultRoot();
   if (!root) throw new Error('먼저 사운드 볼트를 열어 주세요.');
@@ -1549,7 +1567,11 @@ ipcMain.handle('library:add-paths', async (_event, paths) => {
   const files = [];
   const root = activeVaultRoot();
   if (!root) throw new Error('먼저 사운드 볼트를 열어 주세요.');
-  for (const itemPath of [...new Set(paths || [])]) {
+  const uniquePaths = [...new Set(paths || [])];
+  if (uniquePaths.some(isTemporaryClipPath)) {
+    throw new Error('Resolve 전송용 임시 구간은 라이브러리에 추가되지 않습니다. “선택 구간 파일 만들기” 버튼을 이용해 주세요.');
+  }
+  for (const itemPath of uniquePaths) {
     const stat = await fsp.stat(itemPath).catch(() => null);
     if (stat && isTrashPath(itemPath)) {
       throw new Error('휴지통 파일은 왼쪽의 원하는 카테고리 또는 선택한 카테고리 화면에 놓아주세요.');
@@ -2123,7 +2145,11 @@ ipcMain.handle('category:drop-paths', async (_event, { category, paths }) => {
   let snapshot = null;
   const movedFiles = [];
   let needsRescan = false;
-  for (const itemPath of [...new Set(paths || [])]) {
+  const uniquePaths = [...new Set(paths || [])];
+  if (uniquePaths.some(isTemporaryClipPath)) {
+    throw new Error('Resolve 전송용 임시 구간은 카테고리로 이동할 수 없습니다. “선택 구간 파일 만들기” 버튼을 이용해 주세요.');
+  }
+  for (const itemPath of uniquePaths) {
     const stat = await fsp.stat(itemPath).catch(() => null);
     if (!stat) continue;
     if (stat.isDirectory()) {
@@ -2268,7 +2294,7 @@ ipcMain.handle('library:prepare-clip', async (_event, payload) => {
     return { ok: false, message: '0.05초 이상의 구간을 선택해 주세요.' };
   }
   try {
-    const clipDirectory = path.join(app.getPath('temp'), 'sound-shelf-clips');
+    const clipDirectory = temporaryClipDirectory();
     await fsp.mkdir(clipDirectory, { recursive: true });
     const safeTitle = (sound.title || 'sound')
       .normalize('NFC')

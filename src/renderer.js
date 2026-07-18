@@ -1667,7 +1667,7 @@ detailSelection.addEventListener('dragstart', (event) => {
   if (!sound || !selection || selection.end - selection.start < 0.05) return;
   const clipPath = selection.path || selection.dragPath;
   if (!clipPath) return showToast('선택 구간을 준비하는 중입니다. 잠시 후 다시 드래그해 주세요.', 2600);
-  markInternalNativeDrag();
+  markInternalNativeDrag('range');
   window.soundLibrary.startDrag(clipPath);
   showToast('선택 구간을 DaVinci Resolve에 놓으세요.', 3000);
 });
@@ -2180,6 +2180,10 @@ document.addEventListener('dragover', (event) => {
   if (!internalCategory && !event.dataTransfer?.types.includes('Files')) return;
   event.preventDefault();
   clearCategoryDropIndicators();
+  if (internalNativeDrag === 'range') {
+    event.dataTransfer.dropEffect = 'none';
+    return;
+  }
   const intent = categoryDropIntent(event);
   if (intent?.row) {
     if (intent.mode === 'child') {
@@ -2206,6 +2210,9 @@ document.addEventListener('drop', async (event) => {
   const categoryMove = internalNativeDrag === 'category' && intent;
   clearInternalNativeDrag();
   clearCategoryDropIndicators();
+  // Native range drag needs a disposable WAV path. If the drag returns to
+  // Sound Shelf, never route that transport file through normal file import.
+  if (dragKind === 'range') return;
   if (categoryMove) {
     showToast('폴더 순서를 변경하는 중…', 10000);
     try {
