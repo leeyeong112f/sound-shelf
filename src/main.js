@@ -435,7 +435,11 @@ async function loadDb() {
     db.settings.watchedFolders = canonicalizeWatchedFolders(db.settings.watchedFolders);
     const preferredRoot = db.settings.currentVaultRoot || db.settings.watchedFolders.find((folder) => fs.existsSync(folder));
     if (preferredRoot && fs.existsSync(preferredRoot)) {
-      await activateVault(preferredRoot, { legacySounds: db.sounds });
+      // 이미 아는 볼트(currentVaultId 존재)의 로컬 JSON은 캐시 스냅샷일 뿐 원본이
+      // 아니다. 원격에서 삭제·수정된 사운드가 오래된 스냅샷에 남아 legacy 마이그레이션
+      // 루프로 부활하지 않도록, 진짜 legacy(볼트 이전 버전) 라이브러리일 때만 넘긴다.
+      const legacySounds = db.settings.currentVaultId ? [] : db.sounds;
+      await activateVault(preferredRoot, { legacySounds });
     } else {
       db.sounds = deduplicateSoundsByPath(db.sounds);
       await saveDb();
