@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('soundLibrary', {
   updateSound: (payload) => ipcRenderer.invoke('library:update', payload),
   renameSound: (payload) => ipcRenderer.invoke('library:rename', payload),
   updateSoundsBatch: (payload) => ipcRenderer.invoke('library:update-batch', payload),
+  setTagsBatch: (payload) => ipcRenderer.invoke('library:set-tags-batch', payload),
   moveSoundsToCategory: (payload) => ipcRenderer.invoke('library:move-category-batch', payload),
   removeSoundsBatch: (payload) => ipcRenderer.invoke('library:remove-batch', payload),
   removeSound: (payload) => ipcRenderer.invoke('library:remove', payload),

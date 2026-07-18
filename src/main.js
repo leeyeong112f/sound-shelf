@@ -1768,6 +1768,15 @@ ipcMain.handle('library:update-batch', (_event, { ids, updates, addTags, removeT
   return librarySnapshot();
 }));
 
+ipcMain.handle('library:set-tags-batch', (_event, { items }) => withLocalMutation(async () => {
+  const tagsById = new Map((items || []).map((item) => [item.id, cleanTagList(item.tags)]));
+  for (const sound of db.sounds) {
+    if (tagsById.has(sound.id)) sound.tags = tagsById.get(sound.id);
+  }
+  await saveDb();
+  return librarySnapshot();
+}));
+
 ipcMain.handle('library:move-category-batch', (_event, { ids, category }) => withLocalMutation(async () => {
   const normalizedCategory = normalizeCategoryPath(category);
   const rootCategory = normalizedCategory === '미분류';
