@@ -37,7 +37,9 @@ let db = { version: 1, sounds: [], categories: [], categoryOrder: [], settings: 
 let vaultStorage = null;
 let activeVault = null;
 let saveTimer;
-let savePending = false;
+// 진행 중인 로컬 변경 보유 수. boolean이면 겹친 보유자(디바운스 저장 + 배치 작업)
+// 중 먼저 끝난 쪽이 플래그를 꺼서 나머지가 무방비가 된다. 카운터는 각자 자기 몫만 해제한다.
+let localMutations = 0;
 let shortcutCapture = false;
 let updateStartupTimer;
 let updateCheckTimer;
@@ -433,7 +435,11 @@ async function loadDb() {
     db.settings.watchedFolders = canonicalizeWatchedFolders(db.settings.watchedFolders);
     const preferredRoot = db.settings.currentVaultRoot || db.settings.watchedFolders.find((folder) => fs.existsSync(folder));
     if (preferredRoot && fs.existsSync(preferredRoot)) {
-      await activateVault(preferredRoot, { legacySounds: db.sounds });
+      // 이미 아는 볼트(currentVaultId 존재)의 로컬 JSON은 캐시 스냅샷일 뿐 원본이
+      // 아니다. 원격에서 삭제·수정된 사운드가 오래된 스냅샷에 남아 legacy 마이그레이션
+      // 루프로 부활하지 않도록, 진짜 legacy(볼트 이전 버전) 라이브러리일 때만 넘긴다.
+      const legacySounds = db.settings.currentVaultId ? [] : db.sounds;
+      await activateVault(preferredRoot, { legacySounds });
     } else {
       db.sounds = deduplicateSoundsByPath(db.sounds);
       await saveDb();
@@ -518,9 +524,29 @@ async function saveDb() {
 }
 
 function queueSave() {
-  savePending = true;
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => saveDb().catch(console.error).finally(() => { savePending = false; }), 150);
+  // 대기 중인 타이머(아직 안 발화)가 있으면 그 보유분을 해제하고 새로 잡는다.
+  // 발화한 타이머는 콜백 첫 줄에서 saveTimer를 비우므로 이중 해제가 없다.
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    localMutations -= 1;
+  }
+  localMutations += 1;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveDb().catch(console.error).finally(() => { localMutations -= 1; });
+  }, 150);
+}
+
+// 장시간 로컬 배치(파일 이동·ffprobe·해시)가 db.sounds 를 여러 await 에 걸쳐
+// 바꾸는 동안 폴링이 끼어들어 applyMergedState 로 통째 교체하면 그 작업이 유실된다.
+// 이 래퍼로 감싸면 작업 내내 보유 수가 올라가 폴링이 병합을 건너뛴다.
+async function withLocalMutation(work) {
+  localMutations += 1;
+  try {
+    return await work();
+  } finally {
+    localMutations -= 1;
+  }
 }
 
 function publicSound(sound) {
@@ -955,7 +981,7 @@ async function pollRemoteEdits() {
   // 로컬 편집이 자기 편집 파일에 안착하기 전에 병합하면, applyMergedState의 전체
   // 교체가 방금 편집을 되돌리고 다음 saveDb가 그것을 baseline과 같다고 보아 영구
   // 유실시킨다. 저장 대기 중이거나 스캔 중이면 이번 회차를 건너뛴다.
-  if (savePending || autoScanRunning) return;
+  if (localMutations > 0 || autoScanRunning) return;
   const stamps = await vaultStorage.editFileStamps(db.settings.machineId).catch(() => null);
   if (!stamps) return;
   const fingerprint = JSON.stringify(stamps);
@@ -968,7 +994,7 @@ async function pollRemoteEdits() {
   ]);
   // await 사이에 로컬 편집이 들어왔으면 이번 회차를 포기한다. fingerprint를 저장하지
   // 않으므로 다음 tick에서 다시 시도한다. 이 지점 이후는 동기 실행이라 안전하다.
-  if (savePending || autoScanRunning) return;
+  if (localMutations > 0 || autoScanRunning) return;
   lastEditStamps = fingerprint;
   const merged = mergeVaultState(
     { sounds: portableMetadata.sounds, folderOrder: savedFolderOrder },
@@ -1473,7 +1499,7 @@ ipcMain.handle('library:update', async (_event, payload) => {
   return librarySnapshot();
 });
 
-ipcMain.handle('library:rename', async (_event, { id, name }) => {
+ipcMain.handle('library:rename', (_event, { id, name }) => withLocalMutation(async () => {
   const sound = db.sounds.find((item) => item.id === id);
   if (!sound || !fs.existsSync(sound.path)) throw new Error('이름을 바꿀 원본 파일을 찾을 수 없습니다.');
   const safeName = String(name || '').trim().replace(/[\\/:*?"<>|]/g, '-').replace(/^\.+/, '').trim();
@@ -1503,9 +1529,9 @@ ipcMain.handle('library:rename', async (_event, { id, name }) => {
   waveformCache.clear();
   await saveDb();
   return { ...librarySnapshot(), idChanges: { [oldId]: sound.id }, moved: { oldId, id: sound.id, path: destination } };
-});
+}));
 
-ipcMain.handle('library:update-batch', async (_event, { ids, updates, addTags }) => {
+ipcMain.handle('library:update-batch', (_event, { ids, updates, addTags }) => withLocalMutation(async () => {
   const selected = new Set(ids || []);
   const allowed = ['favorite', 'rating'];
   for (const sound of db.sounds) {
@@ -1515,9 +1541,9 @@ ipcMain.handle('library:update-batch', async (_event, { ids, updates, addTags })
   }
   await saveDb();
   return librarySnapshot();
-});
+}));
 
-ipcMain.handle('library:move-category-batch', async (_event, { ids, category }) => {
+ipcMain.handle('library:move-category-batch', (_event, { ids, category }) => withLocalMutation(async () => {
   const normalizedCategory = normalizeCategoryPath(category);
   const rootCategory = normalizedCategory === '미분류';
   const categoryParts = rootCategory ? [] : normalizedCategory.split('/').filter(Boolean);
@@ -1547,9 +1573,9 @@ ipcMain.handle('library:move-category-batch', async (_event, { ids, category }) 
     idChanges,
     moveResult: { requested: (ids || []).length, matched: selected.length, moved, skippedMissing }
   };
-});
+}));
 
-ipcMain.handle('library:remove-batch', async (_event, { ids, trashFiles }) => {
+ipcMain.handle('library:remove-batch', (_event, { ids, trashFiles }) => withLocalMutation(async () => {
   const selected = new Set(ids || []);
   const removing = db.sounds.filter((sound) => selected.has(sound.id));
   if (trashFiles) {
@@ -1559,7 +1585,7 @@ ipcMain.handle('library:remove-batch', async (_event, { ids, trashFiles }) => {
   waveformCache.clear();
   await saveDb();
   return librarySnapshot();
-});
+}));
 
 ipcMain.handle('library:backup-export', async () => {
   const result = await dialog.showSaveDialog(mainWindow, {
@@ -1608,11 +1634,14 @@ ipcMain.handle('library:backup-import', async () => {
   const imported = validateImportedDb(candidate);
   const root = activeVaultRoot() || imported.settings.watchedFolders[0];
   if (!root) throw new Error('백업을 복원할 볼트 폴더를 찾을 수 없습니다.');
-  db.settings = { ...db.settings, ...imported.settings };
+  // machineId는 이 Mac의 신원이다. 다른 Mac에서 내보낸 백업을 복원해도 절대
+  // 넘겨받지 않는다 — 두 Mac이 같은 ID로 같은 편집 파일을 쓰면 Drive 충돌
+  // 사본이 다시 생긴다. 비어 있으면 activateVaultNow가 새로 발급한다.
+  db.settings = { ...db.settings, ...imported.settings, machineId: db.settings.machineId };
   return activateVault(root, { legacySounds: imported.sounds });
 });
 
-ipcMain.handle('library:collect-metadata', async () => {
+ipcMain.handle('library:collect-metadata', () => withLocalMutation(async () => {
   let updated = 0;
   const existing = db.sounds.filter((sound) => fs.existsSync(sound.path) && sound.metadataVersion !== 1);
   for (let index = 0; index < existing.length; index += 1) {
@@ -1627,9 +1656,9 @@ ipcMain.handle('library:collect-metadata', async () => {
   }
   await saveDb();
   return { ...librarySnapshot(), metadataResult: { updated } };
-});
+}));
 
-ipcMain.handle('library:find-duplicates', async () => {
+ipcMain.handle('library:find-duplicates', () => withLocalMutation(async () => {
   const sizeGroups = new Map();
   for (const sound of db.sounds) {
     if (sound.missing || !fs.existsSync(sound.path) || !sound.size) continue;
@@ -1657,9 +1686,9 @@ ipcMain.handle('library:find-duplicates', async () => {
   await saveDb();
   const groups = [...hashes.values()].filter((group) => group.length > 1);
   return { groups, checked: candidates.length };
-});
+}));
 
-ipcMain.handle('library:relink-missing', async () => {
+ipcMain.handle('library:relink-missing', () => withLocalMutation(async () => {
   const allFiles = (await Promise.all(db.settings.watchedFolders.map(walkAudioFiles))).flat();
   const result = await relinkMissingFromFiles(allFiles);
   const categoryGroups = await Promise.all(db.settings.watchedFolders.map(walkCategoryFolders));
@@ -1667,7 +1696,7 @@ ipcMain.handle('library:relink-missing', async () => {
     .sort((a, b) => a.localeCompare(b, 'ko'));
   await saveDb();
   return { ...librarySnapshot(), idChanges: result.idChanges, relinkResult: result };
-});
+}));
 
 ipcMain.handle('library:relink-one', async (_event, id) => {
   const sound = db.sounds.find((item) => item.id === id);
