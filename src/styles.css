@@ -181,6 +181,14 @@ h1 { margin: 4px 0 2px; font-size: 28px; letter-spacing: -.03em; }
 .vault-settings-title h2 { margin: 5px 0 3px; font-size: 20px; }
 .vault-settings-title p { margin: 0; max-width: 720px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .vault-badge { color: var(--accent); font-size: 10px; font-weight: 900; letter-spacing: .12em; }
+.update-settings { margin-top: 14px; padding: 18px; border: 1px solid #2d3f43; border-radius: 14px; background: linear-gradient(145deg, #172021, #15171b 55%); }
+.update-settings-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.update-settings-title h2 { margin: 5px 0 3px; font-size: 20px; }
+.update-settings-title p { margin: 0; max-width: 720px; color: var(--muted); font-size: 12px; }
+.update-version-badge { flex: 0 0 auto; padding: 7px 10px; border: 1px solid #37434a; border-radius: 999px; background: #11161a; color: #9ba8ad; font-size: 11px; font-weight: 750; font-variant-numeric: tabular-nums; }
+.update-progress { height: 5px; margin: 15px 0 0; overflow: hidden; border-radius: 999px; background: #0e1215; }
+.update-progress span { height: 100%; display: block; width: 0; border-radius: inherit; background: linear-gradient(90deg, #3ca59c, #9cff32); transition: width .2s ease; }
+.update-actions { margin-top: 16px; }
 .settings-section-title { margin: 24px 0 0; font-size: 17px; }
 .shortcut-list { margin-top: 18px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
 .shortcut-row { min-height: 58px; padding: 9px 14px; display: grid; grid-template-columns: minmax(180px, 1fr) minmax(180px, 240px); align-items: center; gap: 20px; border-bottom: 1px solid var(--line); background: #15171b; }

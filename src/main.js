@@ -44,6 +44,18 @@ let shortcutCapture = false;
 let updateStartupTimer;
 let updateCheckTimer;
 let updateDialogShown = false;
+let automaticUpdaterAvailable = false;
+const GITHUB_RELEASES_URL = 'https://github.com/leeyeong112f/sound-shelf/releases/latest';
+const GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/leeyeong112f/sound-shelf/releases/latest';
+let updateStatus = {
+  phase: 'idle',
+  currentVersion: '',
+  latestVersion: '',
+  message: '업데이트 확인 버튼을 눌러 최신 버전을 확인하세요.',
+  progress: 0,
+  releaseUrl: GITHUB_RELEASES_URL,
+  automatic: false
+};
 const waveformCache = new Map();
 const waveformJobs = new Map();
 const waveformQueue = [];
@@ -1280,10 +1292,51 @@ async function createWindow() {
 function configureAutoUpdates() {
   const updateConfiguration = path.join(process.resourcesPath, 'app-update.yml');
   if (!app.isPackaged || !fs.existsSync(updateConfiguration)) return;
+  automaticUpdaterAvailable = true;
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
-  autoUpdater.on('error', (error) => console.error('Automatic update failed:', error.message));
+  autoUpdater.on('checking-for-update', () => publishUpdateStatus({
+    phase: 'checking',
+    message: 'GitHub에서 최신 버전을 확인하고 있습니다.',
+    progress: 0,
+    automatic: true
+  }));
+  autoUpdater.on('update-available', (info) => publishUpdateStatus({
+    phase: 'downloading',
+    latestVersion: info.version || updateStatus.latestVersion,
+    message: `새 버전 ${info.version || ''}을 다운로드하고 있습니다.`,
+    progress: 0,
+    automatic: true
+  }));
+  autoUpdater.on('update-not-available', (info) => publishUpdateStatus({
+    phase: 'current',
+    latestVersion: info.version || updateStatus.latestVersion || app.getVersion(),
+    message: '현재 최신 버전을 사용하고 있습니다.',
+    progress: 100,
+    automatic: true
+  }));
+  autoUpdater.on('download-progress', (progress) => publishUpdateStatus({
+    phase: 'downloading',
+    message: `새 버전을 다운로드하고 있습니다. ${Math.round(progress.percent || 0)}%`,
+    progress: Math.max(0, Math.min(100, Number(progress.percent) || 0)),
+    automatic: true
+  }));
+  autoUpdater.on('error', (error) => {
+    console.error('Automatic update failed:', error.message);
+    publishUpdateStatus({
+      phase: 'error',
+      message: `자동 업데이트를 완료하지 못했습니다. GitHub 배포 페이지에서 직접 받을 수 있습니다.`,
+      automatic: true
+    });
+  });
   autoUpdater.on('update-downloaded', async (info) => {
+    publishUpdateStatus({
+      phase: 'downloaded',
+      latestVersion: info.version || updateStatus.latestVersion,
+      message: '업데이트 준비가 끝났습니다. 재시작하면 새 버전이 적용됩니다.',
+      progress: 100,
+      automatic: true
+    });
     if (updateDialogShown) return;
     updateDialogShown = true;
     const options = {
@@ -1306,6 +1359,113 @@ function configureAutoUpdates() {
   });
   updateStartupTimer = setTimeout(checkForUpdates, 12000);
   updateCheckTimer = setInterval(checkForUpdates, 4 * 60 * 60 * 1000);
+}
+
+function compareVersions(first, second) {
+  const normalize = (value) => {
+    const cleaned = String(value || '').trim().replace(/^v/i, '');
+    const [core = '0', prerelease = ''] = cleaned.split('-', 2);
+    return {
+      numbers: core.split('.').slice(0, 4).map((part) => Number.parseInt(part, 10) || 0),
+      prerelease
+    };
+  };
+  const left = normalize(first);
+  const right = normalize(second);
+  const width = Math.max(left.numbers.length, right.numbers.length, 3);
+  for (let index = 0; index < width; index += 1) {
+    const difference = (left.numbers[index] || 0) - (right.numbers[index] || 0);
+    if (difference) return difference > 0 ? 1 : -1;
+  }
+  if (left.prerelease === right.prerelease) return 0;
+  if (!left.prerelease) return 1;
+  if (!right.prerelease) return -1;
+  return left.prerelease.localeCompare(right.prerelease, undefined, { numeric: true });
+}
+
+function currentUpdateStatus() {
+  return {
+    ...updateStatus,
+    currentVersion: app.getVersion(),
+    automatic: automaticUpdaterAvailable
+  };
+}
+
+function publishUpdateStatus(patch = {}) {
+  updateStatus = { ...updateStatus, ...patch, currentVersion: app.getVersion() };
+  const status = currentUpdateStatus();
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', status);
+  return status;
+}
+
+async function latestGitHubRelease() {
+  const response = await fetch(GITHUB_LATEST_RELEASE_API, {
+    headers: {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'Sound-Shelf-Updater',
+      'X-GitHub-Api-Version': '2022-11-28'
+    },
+    signal: AbortSignal.timeout(15000)
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`GitHub 응답 ${response.status}`);
+  const release = await response.json();
+  return {
+    version: String(release.tag_name || release.name || '').replace(/^v/i, ''),
+    url: release.html_url || GITHUB_RELEASES_URL
+  };
+}
+
+async function checkForApplicationUpdate() {
+  publishUpdateStatus({
+    phase: 'checking',
+    message: 'GitHub에서 최신 버전을 확인하고 있습니다.',
+    progress: 0
+  });
+  try {
+    const release = await latestGitHubRelease();
+    if (!release?.version) {
+      return publishUpdateStatus({
+        phase: 'no-release',
+        latestVersion: '',
+        message: 'GitHub에 아직 공개된 배포 버전이 없습니다.',
+        releaseUrl: GITHUB_RELEASES_URL,
+        progress: 0
+      });
+    }
+    const patch = { latestVersion: release.version, releaseUrl: release.url };
+    if (compareVersions(release.version, app.getVersion()) <= 0) {
+      return publishUpdateStatus({
+        ...patch,
+        phase: 'current',
+        message: `현재 최신 버전 ${app.getVersion()}을 사용하고 있습니다.`,
+        progress: 100
+      });
+    }
+    if (!automaticUpdaterAvailable) {
+      return publishUpdateStatus({
+        ...patch,
+        phase: 'manual-available',
+        message: `새 버전 ${release.version}이 있습니다. GitHub에서 내려받아 설치할 수 있습니다.`,
+        progress: 0
+      });
+    }
+    publishUpdateStatus({
+      ...patch,
+      phase: 'downloading',
+      message: `새 버전 ${release.version}을 다운로드할 준비를 하고 있습니다.`,
+      progress: 0
+    });
+    await autoUpdater.checkForUpdates();
+    return currentUpdateStatus();
+  } catch (error) {
+    console.error('Manual update check failed:', error.message);
+    return publishUpdateStatus({
+      phase: 'error',
+      message: `업데이트를 확인하지 못했습니다: ${error.message}`,
+      progress: 0
+    });
+  }
 }
 
 if (singleInstanceLock) app.whenReady().then(async () => {
@@ -1345,6 +1505,24 @@ app.on('before-quit', () => {
 });
 
 ipcMain.handle('library:get', () => librarySnapshot());
+
+ipcMain.handle('update:status', () => currentUpdateStatus());
+
+ipcMain.handle('update:check', () => checkForApplicationUpdate());
+
+ipcMain.handle('update:install', () => {
+  if (!automaticUpdaterAvailable || updateStatus.phase !== 'downloaded') {
+    throw new Error('아직 설치할 업데이트가 준비되지 않았습니다.');
+  }
+  publishUpdateStatus({ phase: 'installing', message: '앱을 재시작해 업데이트를 적용합니다.' });
+  setTimeout(() => autoUpdater.quitAndInstall(false, true), 120);
+  return currentUpdateStatus();
+});
+
+ipcMain.handle('update:open-release', async () => {
+  await shell.openExternal(updateStatus.releaseUrl || GITHUB_RELEASES_URL);
+  return true;
+});
 
 ipcMain.handle('library:add-files', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {

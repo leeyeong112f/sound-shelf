@@ -33,6 +33,10 @@ contextBridge.exposeInMainWorld('soundLibrary', {
   startCategoryDrag: (category) => ipcRenderer.send('category:start-drag', category),
   setShortcuts: (shortcuts) => ipcRenderer.invoke('shortcuts:set', shortcuts),
   setPreviewVolume: (volume) => ipcRenderer.invoke('preview-volume:set', volume),
+  getUpdateStatus: () => ipcRenderer.invoke('update:status'),
+  checkForUpdates: () => ipcRenderer.invoke('update:check'),
+  installUpdate: () => ipcRenderer.invoke('update:install'),
+  openUpdatePage: () => ipcRenderer.invoke('update:open-release'),
   exportBackup: () => ipcRenderer.invoke('library:backup-export'),
   importBackup: () => ipcRenderer.invoke('library:backup-import'),
   collectMetadata: () => ipcRenderer.invoke('library:collect-metadata'),
@@ -50,5 +54,6 @@ contextBridge.exposeInMainWorld('soundLibrary', {
   onDragError: (callback) => ipcRenderer.on('drag-error', (_event, message) => callback(message)),
   onScanProgress: (callback) => ipcRenderer.on('scan-progress', (_event, payload) => callback(payload)),
   onLibraryUpdated: (callback) => ipcRenderer.on('library-updated', (_event, snapshot) => callback(snapshot)),
+  onUpdateStatus: (callback) => ipcRenderer.on('update-status', (_event, status) => callback(status)),
   onShortcut: (callback) => ipcRenderer.on('shortcut-triggered', (_event, shortcut) => callback(shortcut))
 });

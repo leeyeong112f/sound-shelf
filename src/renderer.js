@@ -54,6 +54,7 @@ const state = {
   tagPanelHeight: Math.max(140, Number(localStorage.getItem('sound-shelf-tag-panel-height')) || 220),
   performance: null,
   vault: null,
+  updateStatus: null,
   visibleSounds: []
 };
 
@@ -474,6 +475,32 @@ function renderDetailPanel() {
   requestAnimationFrame(drawDetailWaveform);
 }
 
+function renderUpdateSettings() {
+  const status = state.updateStatus || {
+    phase: 'idle', currentVersion: '', latestVersion: '', message: '업데이트 정보를 불러오는 중입니다.', progress: 0
+  };
+  const currentLabel = status.currentVersion ? `v${status.currentVersion}` : '확인 중';
+  const latestLabel = status.latestVersion && status.latestVersion !== status.currentVersion
+    ? ` · 최신 v${status.latestVersion}`
+    : '';
+  $('#updateVersionBadge').textContent = `현재 ${currentLabel}${latestLabel}`;
+  $('#updateStatusText').textContent = status.message || '업데이트 확인 버튼을 눌러 최신 버전을 확인하세요.';
+
+  const busy = ['checking', 'downloading', 'installing'].includes(status.phase);
+  const checkButton = $('#checkUpdateBtn');
+  checkButton.disabled = busy || status.phase === 'downloaded';
+  checkButton.textContent = status.phase === 'checking'
+    ? '확인 중…'
+    : status.phase === 'downloading'
+      ? `다운로드 ${Math.round(status.progress || 0)}%`
+      : '업데이트 확인';
+  $('#installUpdateBtn').classList.toggle('hidden', status.phase !== 'downloaded');
+  $('#openReleaseBtn').classList.toggle('hidden', !['manual-available', 'error'].includes(status.phase));
+  const showProgress = ['downloading', 'downloaded', 'installing'].includes(status.phase);
+  $('#updateProgress').classList.toggle('hidden', !showProgress);
+  $('#updateProgressBar').style.width = `${Math.max(0, Math.min(100, Number(status.progress) || 0))}%`;
+}
+
 function renderSettings() {
   const open = state.view === 'settings';
   document.querySelectorAll('.library-only').forEach((element) => element.classList.toggle('hidden', open));
@@ -495,6 +522,7 @@ function renderSettings() {
   $('#moveVaultBtn').disabled = !state.vault?.connected;
   $('#locateVaultBtn').disabled = !state.vault;
   $('#checkVaultBtn').disabled = !state.vault?.connected;
+  renderUpdateSettings();
 }
 
 function render() {
@@ -1945,6 +1973,26 @@ $('#resultsDialog').addEventListener('click', async (event) => {
   button.closest('.duplicate-file').remove();
 });
 $('#closeSettingsBtn').addEventListener('click', () => { window.soundLibrary.setShortcutCapture(false); state.view = 'library'; render(); });
+$('#checkUpdateBtn').addEventListener('click', async () => {
+  try {
+    state.updateStatus = await window.soundLibrary.checkForUpdates();
+    renderUpdateSettings();
+  } catch (error) {
+    showToast(`업데이트 확인 실패: ${error.message}`, 5000);
+  }
+});
+$('#installUpdateBtn').addEventListener('click', async () => {
+  try {
+    state.updateStatus = await window.soundLibrary.installUpdate();
+    renderUpdateSettings();
+  } catch (error) {
+    showToast(`업데이트 설치 실패: ${error.message}`, 5000);
+  }
+});
+$('#openReleaseBtn').addEventListener('click', async () => {
+  try { await window.soundLibrary.openUpdatePage(); }
+  catch (error) { showToast(`GitHub를 열지 못했습니다: ${error.message}`, 5000); }
+});
 $('#resetShortcutsBtn').addEventListener('click', async () => {
   window.soundLibrary.setShortcutCapture(false);
   setLibrary(await window.soundLibrary.setShortcuts(DEFAULT_SHORTCUTS));
@@ -2242,6 +2290,10 @@ window.soundLibrary.onLibraryUpdated((snapshot) => {
   if (snapshot.updateReason === 'vault-cached') showToast('저장된 목록을 표시했습니다. 폴더 동기화는 백그라운드에서 계속됩니다.', 2500);
   if (snapshot.updateReason === 'remote-sync') showToast('다른 Mac의 변경 사항을 반영했습니다.', 2000);
 });
+window.soundLibrary.onUpdateStatus((status) => {
+  state.updateStatus = status;
+  renderUpdateSettings();
+});
 window.soundLibrary.onDragError((message) => showToast(`드래그를 시작하지 못했습니다: ${message}`, 4000));
 window.soundLibrary.onShortcut((shortcut) => {
   const action = actionForShortcut(shortcut);
@@ -2252,4 +2304,8 @@ new ResizeObserver(drawDetailWaveform).observe(detailWrap);
 window.soundLibrary.getLibrary().then((snapshot) => {
   setLibrary(snapshot);
   if (snapshot.loading) showToast('사운드 라이브러리를 불러오는 중입니다…', 4000);
+});
+window.soundLibrary.getUpdateStatus().then((status) => {
+  state.updateStatus = status;
+  renderUpdateSettings();
 });

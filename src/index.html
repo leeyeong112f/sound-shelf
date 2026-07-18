@@ -110,6 +110,14 @@
             <div class="tool-grid"><button id="openVaultBtn" class="primary-button">기존 볼트 열기</button><button id="createVaultBtn" class="subtle-button">새 볼트 만들기</button><button id="moveVaultBtn" class="subtle-button">현재 볼트 위치 변경</button><button id="locateVaultBtn" class="subtle-button">이동된 볼트 다시 연결</button><button id="checkVaultBtn" class="subtle-button">연결 상태 검사</button></div>
             <p id="vaultHealth" class="performance-info">태그·별점·메모·Key 결과는 볼트 안에, 파형과 검색 캐시는 이 Mac에 저장됩니다.</p>
           </div>
+          <div class="update-settings">
+            <div class="update-settings-title">
+              <div><span class="vault-badge">APP UPDATE</span><h2>Sound Shelf 업데이트</h2><p id="updateStatusText">업데이트 정보를 불러오는 중입니다.</p></div>
+              <span id="updateVersionBadge" class="update-version-badge">현재 버전 확인 중</span>
+            </div>
+            <div id="updateProgress" class="update-progress hidden"><span id="updateProgressBar"></span></div>
+            <div class="tool-grid update-actions"><button id="checkUpdateBtn" class="primary-button">업데이트 확인</button><button id="installUpdateBtn" class="primary-button hidden">재시작하고 업데이트</button><button id="openReleaseBtn" class="subtle-button hidden">GitHub에서 다운로드</button></div>
+          </div>
           <h2 class="settings-section-title">단축키</h2>
           <div id="shortcutList" class="shortcut-list"></div>
           <div class="library-tools">
