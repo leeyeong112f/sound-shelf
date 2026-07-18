@@ -153,8 +153,22 @@ function showToast(message, duration = 3000) {
   toast.hideTimer = setTimeout(() => toast.classList.add('hidden'), duration);
 }
 
+function parseSearchQuery(value) {
+  const tagTerms = [];
+  const lowered = String(value || '').trim().toLocaleLowerCase('ko');
+  const textOnly = lowered.replace(/#([^#\s]+)/g, (_match, tag) => {
+    const cleaned = normalizedTagKey(tag.replace(/[,;]+$/g, ''));
+    if (cleaned) tagTerms.push(cleaned);
+    return ' ';
+  });
+  return {
+    textTerms: textOnly.split(/\s+/).map((term) => term.trim()).filter((term) => term && term !== '#'),
+    tagTerms: [...new Set(tagTerms)]
+  };
+}
+
 function filteredSounds() {
-  const query = state.query.trim().toLocaleLowerCase('ko');
+  const { textTerms, tagTerms } = parseSearchQuery(state.query);
   return state.sounds.filter((sound) => {
     if (state.filter === 'favorites' && !sound.favorite) return false;
     if (state.filter.startsWith('category:')) {
@@ -169,16 +183,15 @@ function filteredSounds() {
     if (Number(sound.rating || 0) < state.minimumRating) return false;
     if (state.fileFilter === 'missing' && !sound.missing) return false;
     if (state.fileFilter === 'available' && sound.missing) return false;
-    if (!query) return true;
+    if (!textTerms.length && !tagTerms.length) return true;
     const haystack = [sound.title, sound.fileName, sound.category, sound.categoryPath, sound.notes,
       ...(sound.embeddedTags || []), ...Object.values(sound.embeddedMetadata || {})]
       .join(' ').toLocaleLowerCase('ko');
-    const tags = (sound.tags || []).map((tag) => tag.toLocaleLowerCase('ko'));
-    return query.split(/\s+/).every((word) => {
-      if (!word.startsWith('#')) return haystack.includes(word);
-      const tagQuery = word.slice(1);
-      return tagQuery ? tags.some((tag) => tag.includes(tagQuery)) : tags.length > 0;
-    });
+    const tags = (sound.tags || []).map(normalizedTagKey);
+    const matchesText = textTerms.every((term) => haystack.includes(term));
+    const matchesAnyTag = !tagTerms.length
+      || tagTerms.some((term) => tags.some((tag) => tag.includes(term)));
+    return matchesText && matchesAnyTag;
   }).sort((a, b) => {
     let comparison = 0;
     if (state.sortBy === 'title') comparison = a.title.localeCompare(b.title, 'ko', { numeric: true });
