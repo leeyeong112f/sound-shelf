@@ -37,7 +37,9 @@ let db = { version: 1, sounds: [], categories: [], categoryOrder: [], settings: 
 let vaultStorage = null;
 let activeVault = null;
 let saveTimer;
-let savePending = false;
+// 진행 중인 로컬 변경 보유 수. boolean이면 겹친 보유자(디바운스 저장 + 배치 작업)
+// 중 먼저 끝난 쪽이 플래그를 꺼서 나머지가 무방비가 된다. 카운터는 각자 자기 몫만 해제한다.
+let localMutations = 0;
 let shortcutCapture = false;
 let updateStartupTimer;
 let updateCheckTimer;
@@ -518,20 +520,28 @@ async function saveDb() {
 }
 
 function queueSave() {
-  savePending = true;
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => saveDb().catch(console.error).finally(() => { savePending = false; }), 150);
+  // 대기 중인 타이머(아직 안 발화)가 있으면 그 보유분을 해제하고 새로 잡는다.
+  // 발화한 타이머는 콜백 첫 줄에서 saveTimer를 비우므로 이중 해제가 없다.
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    localMutations -= 1;
+  }
+  localMutations += 1;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveDb().catch(console.error).finally(() => { localMutations -= 1; });
+  }, 150);
 }
 
 // 장시간 로컬 배치(파일 이동·ffprobe·해시)가 db.sounds 를 여러 await 에 걸쳐
 // 바꾸는 동안 폴링이 끼어들어 applyMergedState 로 통째 교체하면 그 작업이 유실된다.
-// 이 래퍼로 감싸면 작업 내내 savePending 이 켜져 폴링이 병합을 건너뛴다.
+// 이 래퍼로 감싸면 작업 내내 보유 수가 올라가 폴링이 병합을 건너뛴다.
 async function withLocalMutation(work) {
-  savePending = true;
+  localMutations += 1;
   try {
     return await work();
   } finally {
-    savePending = false;
+    localMutations -= 1;
   }
 }
 
@@ -967,7 +977,7 @@ async function pollRemoteEdits() {
   // 로컬 편집이 자기 편집 파일에 안착하기 전에 병합하면, applyMergedState의 전체
   // 교체가 방금 편집을 되돌리고 다음 saveDb가 그것을 baseline과 같다고 보아 영구
   // 유실시킨다. 저장 대기 중이거나 스캔 중이면 이번 회차를 건너뛴다.
-  if (savePending || autoScanRunning) return;
+  if (localMutations > 0 || autoScanRunning) return;
   const stamps = await vaultStorage.editFileStamps(db.settings.machineId).catch(() => null);
   if (!stamps) return;
   const fingerprint = JSON.stringify(stamps);
@@ -980,7 +990,7 @@ async function pollRemoteEdits() {
   ]);
   // await 사이에 로컬 편집이 들어왔으면 이번 회차를 포기한다. fingerprint를 저장하지
   // 않으므로 다음 tick에서 다시 시도한다. 이 지점 이후는 동기 실행이라 안전하다.
-  if (savePending || autoScanRunning) return;
+  if (localMutations > 0 || autoScanRunning) return;
   lastEditStamps = fingerprint;
   const merged = mergeVaultState(
     { sounds: portableMetadata.sounds, folderOrder: savedFolderOrder },
