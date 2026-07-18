@@ -589,16 +589,46 @@ function updateDetailSelection() {
   detailSelection.classList.toggle('hidden', !selection);
   $('#clearRangeButton').classList.toggle('hidden', !selection);
   $('#createRangeFileButton').classList.toggle('hidden', !selection);
-  $('#createRangeFileButton').disabled = Boolean(selection?.path);
-  $('#createRangeFileButton').textContent = selection?.path ? '구간 파일 생성 완료' : '선택 구간 파일 만들기';
+  $('#createRangeFileButton').disabled = Boolean(selection?.path || selection?.preparing);
+  $('#createRangeFileButton').textContent = selection?.path
+    ? '구간 파일 생성 완료'
+    : (selection?.preparing ? 'Resolve용 구간 준비 중…' : '선택 구간 파일 만들기');
   if (!sound || !selection) return;
   detailSelection.style.left = `${(selection.start / sound.duration) * 100}%`;
   detailSelection.style.width = `${((selection.end - selection.start) / sound.duration) * 100}%`;
   detailSelection.classList.toggle('preparing', Boolean(selection.preparing));
-  detailSelection.classList.toggle('ready', Boolean(selection.path));
-  detailSelection.draggable = Boolean(selection.path);
-  detailSelection.dataset.clipPath = selection.path || '';
-  detailSelection.querySelector('span').textContent = `${formatDetailedDuration(selection.start)} – ${formatDetailedDuration(selection.end)}${selection.preparing ? ' · 준비 중' : ''}`;
+  detailSelection.classList.toggle('ready', Boolean(selection.path || selection.dragPath));
+  detailSelection.draggable = Boolean(selection.path || selection.dragPath);
+  detailSelection.dataset.clipPath = selection.path || selection.dragPath || '';
+  const dragStatus = selection.preparing
+    ? ' · Resolve용 준비 중'
+    : (selection.path || selection.dragPath ? ' · Resolve로 드래그' : ' · 선택됨');
+  detailSelection.querySelector('span').textContent = `${formatDetailedDuration(selection.start)} – ${formatDetailedDuration(selection.end)}${dragStatus}`;
+}
+
+async function prepareSelectionForDrag(sound, selection) {
+  const token = `${selection.start.toFixed(6)}:${selection.end.toFixed(6)}`;
+  if (selection.dragPath && selection.dragToken === token) {
+    return { ok: true, path: selection.dragPath, duration: selection.end - selection.start };
+  }
+  if (selection.dragPromise && selection.dragToken === token) return selection.dragPromise;
+
+  selection.dragToken = token;
+  selection.dragPath = '';
+  selection.preparing = true;
+  updateDetailSelection();
+  const promise = window.soundLibrary.prepareClip({ id: sound.id, start: selection.start, end: selection.end });
+  selection.dragPromise = promise;
+  const result = await promise;
+  const current = state.selections.get(sound.id);
+  if (!current || current.dragToken !== token) {
+    return { ok: false, message: '선택 구간이 변경되었습니다. 다시 드래그해 주세요.' };
+  }
+  current.dragPromise = null;
+  current.preparing = false;
+  if (result.ok) current.dragPath = result.path;
+  updateDetailSelection();
+  return result;
 }
 
 function waveformRatio(event) {
@@ -1364,7 +1394,7 @@ detailWrap.addEventListener('pointermove', (event) => {
   selectionGesture.mode = 'selection';
   const start = Math.min(selectionGesture.startRatio, ratio) * sound.duration;
   const end = Math.max(selectionGesture.startRatio, ratio) * sound.duration;
-  state.selections.set(sound.id, { start, end, path: '', preparing: false });
+  state.selections.set(sound.id, { start, end, path: '', dragPath: '', preparing: false });
   updateDetailSelection();
 });
 
@@ -1390,6 +1420,9 @@ detailWrap.addEventListener('pointerup', async (event) => {
     return;
   }
   await playSelection(sound, selection);
+  const result = await prepareSelectionForDrag(sound, selection);
+  if (result.ok) showToast('선택 구간 준비 완료 · 표시된 영역을 DaVinci Resolve로 드래그하세요.', 2600);
+  else showToast(result.message, 5000);
 });
 
 detailWrap.addEventListener('pointercancel', () => {
@@ -1403,11 +1436,14 @@ detailSelection.addEventListener('click', () => {
 });
 detailSelection.addEventListener('dragstart', (event) => {
   event.preventDefault();
-  const clipPath = detailSelection.dataset.clipPath;
-  if (clipPath) {
-    markInternalNativeDrag();
-    window.soundLibrary.startDrag(clipPath);
-  }
+  const sound = selectedSound();
+  const selection = sound ? state.selections.get(sound.id) : null;
+  if (!sound || !selection || selection.end - selection.start < 0.05) return;
+  const clipPath = selection.path || selection.dragPath;
+  if (!clipPath) return showToast('선택 구간을 준비하는 중입니다. 잠시 후 다시 드래그해 주세요.', 2600);
+  markInternalNativeDrag();
+  window.soundLibrary.startDrag(clipPath);
+  showToast('선택 구간을 DaVinci Resolve에 놓으세요.', 3000);
 });
 
 function visibleCategoryOrder() {
