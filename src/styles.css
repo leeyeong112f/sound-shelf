@@ -35,6 +35,8 @@ nav { display: grid; gap: 4px; }
 .category-tree-row { position: relative; min-height: 26px; display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; padding: 0 8px 0 3px; border-radius: 6px; color: #c7cad0; font-size: 12px; }
 .category-tree-children { margin-left: 12px; padding-left: 8px; border-left: 1px solid #2a2e36; }
 .category-tree-row:hover, .category-tree-row.active { background: #242830; color: white; }
+.category-tree-row.keyboard-focused { background: #2c3b3d; box-shadow: inset 0 0 0 1px #69d8ce; color: white; }
+.category-tree-row.keyboard-focused .tree-label { color: #9af3ea; }
 .category-tree-row.drag-over { background: #315f5b; box-shadow: inset 0 0 0 1px #57d5ca; }
 .category-tree-row.dragging { opacity: .48; }
 .category-tree-row.drag-between-before { box-shadow: 0 -3px 0 #57d5ca; }

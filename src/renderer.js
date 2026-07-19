@@ -44,6 +44,8 @@ const state = {
   view: 'library',
   previewVolume: 0.8,
   collapsedCategories: new Set(),
+  categoryKeyboardMode: false,
+  categoryKeyboardPath: null,
   selectedCategories: new Set(),
   categoryAnchor: null,
   sortBy: 'title',
@@ -393,7 +395,7 @@ function renderCategoryNodes(nodes, depth = 0) {
       }).length;
       const children = hasChildren && !collapsed ? renderCategoryNodes(node.children, depth + 1) : '';
       return `<div class="category-tree-node">
-        <div class="category-tree-row ${active} ${state.selectedCategories.has(node.path) ? 'multi-selected' : ''}" data-category-row="${escapeHtml(node.path)}" draggable="true">
+        <div class="category-tree-row ${active} ${state.selectedCategories.has(node.path) ? 'multi-selected' : ''} ${state.categoryKeyboardMode && state.categoryKeyboardPath === node.path ? 'keyboard-focused' : ''}" data-category-row="${escapeHtml(node.path)}" draggable="true">
           <button class="tree-toggle ${hasChildren ? '' : 'empty'}" data-category-toggle="${escapeHtml(node.path)}" ${hasChildren ? `aria-expanded="${!collapsed}" title="하위 폴더 ${collapsed ? '펼치기' : '접기'}"` : 'disabled'}>${hasChildren ? (collapsed ? '▶' : '▼') : ''}</button>
           <button class="tree-label" data-category="${escapeHtml(node.path)}" title="${escapeHtml(node.path)}">${escapeHtml(node.name)}</button>
           <b>${count}</b>
@@ -429,6 +431,11 @@ function renderSidebar() {
   });
   $('#categoryOptions').innerHTML = state.categoryPaths.map((category) => `<option value="${escapeHtml(category)}"></option>`).join('');
   $('#searchShortcutHint').textContent = displayShortcut(state.shortcuts.search);
+  if (state.categoryKeyboardMode) requestAnimationFrame(() => {
+    const row = [...document.querySelectorAll('#categoryList [data-category-row]')]
+      .find((item) => item.dataset.categoryRow === state.categoryKeyboardPath);
+    row?.scrollIntoView({ block: 'nearest' });
+  });
 }
 
 function ratingMarkup(sound, context = 'row') {
@@ -1915,6 +1922,8 @@ async function runShortcut(action) {
   if (action === 'search') {
     clearTimeout(searchDebounce);
     searchKeyboardNavigation = false;
+    state.categoryKeyboardMode = false;
+    state.categoryKeyboardPath = null;
     state.view = 'library';
     state.query = '';
     $('#searchInput').value = '';
@@ -2199,6 +2208,90 @@ function visibleCategoryOrder() {
   return [...document.querySelectorAll('#categoryList [data-category-row]')].map((row) => row.dataset.categoryRow);
 }
 
+function revealCategoryAncestors(categoryPath) {
+  const parts = String(categoryPath || '').split('/').filter(Boolean);
+  for (let index = 1; index < parts.length; index += 1) {
+    state.collapsedCategories.delete(parts.slice(0, index).join('/'));
+  }
+}
+
+function enterCategoryKeyboardNavigation() {
+  let categoryPath = state.filter.startsWith('category:') ? state.filter.slice(9) : '';
+  if (!state.categoryPaths.includes(categoryPath)) {
+    const sound = selectedSound();
+    categoryPath = sound?.categoryPath || sound?.category || '';
+  }
+  if (!state.categoryPaths.includes(categoryPath)) categoryPath = state.categoryPaths[0] || null;
+  if (!categoryPath) return false;
+  revealCategoryAncestors(categoryPath);
+  state.categoryKeyboardMode = true;
+  state.categoryKeyboardPath = categoryPath;
+  searchKeyboardNavigation = false;
+  renderSidebar();
+  return true;
+}
+
+function selectKeyboardCategory(categoryPath) {
+  if (!state.categoryPaths.includes(categoryPath)) return;
+  state.categoryKeyboardPath = categoryPath;
+  state.view = 'library';
+  state.filter = `category:${categoryPath}`;
+  state.tagFilters.clear();
+  state.selectedCategories.clear();
+  state.categoryAnchor = categoryPath;
+  list.scrollTop = 0;
+  render();
+}
+
+function leaveCategoryKeyboardNavigation() {
+  state.categoryKeyboardMode = false;
+  state.categoryKeyboardPath = null;
+  if (!state.visibleSounds.some((sound) => sound.id === state.selectedId)) {
+    const sound = state.visibleSounds[0] || null;
+    state.selectedId = sound?.id || null;
+    state.selectedIds = sound ? new Set([sound.id]) : new Set();
+    state.selectionAnchorId = sound?.id || null;
+  }
+  render();
+}
+
+function moveCategorySelectionWithArrow(direction) {
+  const order = visibleCategoryOrder();
+  if (!order.length) return;
+  const current = order.indexOf(state.categoryKeyboardPath);
+  const nextIndex = current < 0
+    ? (direction > 0 ? 0 : order.length - 1)
+    : Math.max(0, Math.min(order.length - 1, current + direction));
+  selectKeyboardCategory(order[nextIndex]);
+}
+
+function navigateCategoryHorizontally(direction) {
+  const categoryPath = state.categoryKeyboardPath;
+  if (!categoryPath) return;
+  const hasChildren = state.categoryPaths.some((category) => category.startsWith(`${categoryPath}/`));
+  if (direction < 0) {
+    if (hasChildren && !state.collapsedCategories.has(categoryPath)) {
+      state.collapsedCategories.add(categoryPath);
+      renderSidebar();
+      return;
+    }
+    const separator = categoryPath.lastIndexOf('/');
+    if (separator >= 0) selectKeyboardCategory(categoryPath.slice(0, separator));
+    return;
+  }
+  if (hasChildren) {
+    if (state.collapsedCategories.has(categoryPath)) {
+      state.collapsedCategories.delete(categoryPath);
+      renderSidebar();
+      return;
+    }
+    const next = visibleCategoryOrder().find((category) => category.startsWith(`${categoryPath}/`));
+    if (next) selectKeyboardCategory(next);
+    return;
+  }
+  leaveCategoryKeyboardNavigation();
+}
+
 function pruneNestedCategories(paths) {
   return paths.filter((candidate) => !paths.some((other) => other !== candidate && candidate.startsWith(`${other}/`)));
 }
@@ -2237,6 +2330,11 @@ function toggleCategoryCollapse(categoryPath) {
 }
 
 document.addEventListener('click', (event) => {
+  if (state.categoryKeyboardMode) {
+    state.categoryKeyboardMode = false;
+    state.categoryKeyboardPath = null;
+    requestAnimationFrame(renderSidebar);
+  }
   const filterButton = event.target.closest('[data-filter]');
   const categoryButton = event.target.closest('[data-category]');
   const categoryToggle = event.target.closest('[data-category-toggle]');
@@ -2425,6 +2523,8 @@ $('#contextMenu').addEventListener('click', async (event) => {
 $('#searchInput').addEventListener('input', (event) => {
   clearTimeout(searchDebounce);
   searchKeyboardNavigation = false;
+  state.categoryKeyboardMode = false;
+  state.categoryKeyboardPath = null;
   const value = event.target.value;
   searchDebounce = setTimeout(() => { state.query = value; list.scrollTop = 0; renderList(); }, 130);
 });
@@ -2741,6 +2841,22 @@ document.addEventListener('keydown', (event) => {
     || document.activeElement.isContentEditable;
   const isEditing = !isSearchField && isTextEntry;
   const noCommandModifier = !event.metaKey && !event.ctrlKey && !event.altKey;
+  if (state.categoryKeyboardMode && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)
+    && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    event.preventDefault();
+    if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+      moveCategorySelectionWithArrow(event.key === 'ArrowDown' ? 1 : -1);
+    } else {
+      navigateCategoryHorizontally(event.key === 'ArrowRight' ? 1 : -1);
+    }
+    return;
+  }
+  if (event.key === 'ArrowLeft' && !isEditing && !event.metaKey && !event.ctrlKey && !event.altKey
+    && (!isSearchField || searchKeyboardNavigation)) {
+    event.preventDefault();
+    enterCategoryKeyboardNavigation();
+    return;
+  }
   if (/^[1-5]$/.test(event.key) && !isTextEntry && noCommandModifier
     && !document.querySelector('.dialog-backdrop:not(.hidden)')) {
     event.preventDefault();
@@ -2757,6 +2873,11 @@ document.addEventListener('keydown', (event) => {
     && !event.metaKey && !event.ctrlKey && !event.altKey) {
     event.preventDefault();
     if (!event.repeat) toggleSelectedPlayback();
+    return;
+  }
+  if (event.key === 'Escape' && state.categoryKeyboardMode) {
+    event.preventDefault();
+    leaveCategoryKeyboardNavigation();
     return;
   }
   if (event.key === 'Escape' && state.selectedCategories.size) {
