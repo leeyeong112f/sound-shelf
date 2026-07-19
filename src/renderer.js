@@ -1381,7 +1381,7 @@ async function moveSelectionToCategory() {
 
 async function trashSelection() {
   const ids = selectedIdList();
-  if (!ids.length || !confirm(`선택한 ${ids.length}개 원본 파일을 휴지통으로 이동할까요?`)) return;
+  if (!ids.length) return;
   if (state.playingId && ids.includes(state.playingId)) player.pause();
   showToast(`${ids.length}개 파일을 휴지통으로 이동하는 중…`, 15000);
   try {
@@ -1448,7 +1448,6 @@ async function renameCategory(category) {
 async function trashSelectedCategories() {
   const categories = pruneNestedCategories([...state.selectedCategories]);
   if (!categories.length) return;
-  if (!confirm(`선택한 ${categories.length}개 폴더와 안의 모든 파일을 macOS 휴지통으로 이동할까요?`)) return;
   try {
     if (state.filter.startsWith('category:')) {
       const current = state.filter.slice(9);
@@ -1464,7 +1463,6 @@ async function trashSelectedCategories() {
 }
 
 async function trashCategory(category) {
-  if (!confirm(`“${category}” 폴더와 안의 모든 파일을 macOS 휴지통으로 이동할까요?`)) return;
   try {
     if (state.filter === `category:${category}` || state.filter.startsWith(`category:${category}/`)) state.filter = 'all';
     setLibrary(await window.soundLibrary.trashCategoryFolder(category));
@@ -2314,7 +2312,7 @@ $('#closeResultsBtn').addEventListener('click', () => $('#resultsDialog').classL
 $('#resultsDialog').addEventListener('click', async (event) => {
   if (event.target === $('#resultsDialog')) $('#resultsDialog').classList.add('hidden');
   const button = event.target.closest('[data-duplicate-trash]');
-  if (!button || !confirm('이 중복 원본 파일을 휴지통으로 이동할까요?')) return;
+  if (!button) return;
   const snapshot = await window.soundLibrary.removeSound({ id: button.dataset.duplicateTrash, trashFile: true });
   setLibrary(snapshot);
   button.closest('.duplicate-file').remove();
@@ -2442,10 +2440,6 @@ $('#removeBtn').addEventListener('click', async (event) => {
   const sound = selectedSound();
   if (!sound) return;
   const trashFile = event.altKey;
-  const message = trashFile
-    ? `“${sound.title}”의 원본 파일도 휴지통으로 이동할까요?`
-    : `“${sound.title}”을 라이브러리에서만 삭제할까요? 원본 파일은 유지됩니다.\n\n원본도 휴지통으로 보내려면 Option 키를 누른 채 삭제 버튼을 클릭하세요.`;
-  if (!confirm(message)) return;
   state.selectedId = null;
   state.selectedIds.delete(sound.id);
   state.inspectorOpen = false;
