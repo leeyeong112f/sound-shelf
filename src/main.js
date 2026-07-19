@@ -1616,13 +1616,27 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('before-quit', () => {
+let quitFlushDone = false;
+app.on('before-quit', (event) => {
   clearTimeout(updateStartupTimer);
   clearInterval(updateCheckTimer);
   stopSyncPolling();
   clearTimeout(watcherTimer);
   for (const watcher of folderWatchers.values()) watcher.close();
   folderWatchers.clear();
+  // 마지막 편집 후 150ms 안에 종료하면 디바운스 저장이 유실된다. 대기 중이면
+  // 종료를 한 번 미루고 flush한 뒤 다시 quit한다.
+  if (!quitFlushDone && saveTimer) {
+    event.preventDefault();
+    quitFlushDone = true;
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    saveDb().catch(console.error).finally(() => {
+      localMutations -= 1; // 죽인 타이머가 보유하던 카운터 몫을 대신 해제
+      app.quit();
+    });
+    return;
+  }
   vaultStorage?.close();
 });
 
