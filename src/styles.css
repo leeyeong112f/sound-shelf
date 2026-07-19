@@ -217,11 +217,17 @@ h1 { margin: 4px 0 2px; font-size: 28px; letter-spacing: -.03em; }
 .input-dialog.has-suggestions { width: min(560px, calc(100vw - 40px)); }
 .input-dialog-suggestions { max-height: 240px; margin-top: 10px; overflow: auto; border: 1px solid #30353d; border-radius: 9px; background: #111318; }
 .input-dialog-suggestion-summary { padding: 9px 11px; color: #949ba8; font-size: 12px; border-bottom: 1px solid #292d34; }
-.input-dialog-suggestion { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 9px 11px; border-bottom: 1px solid #242830; }
+.input-dialog-suggestion { width: 100%; display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 9px; align-items: center; padding: 9px 11px; border: 0; border-bottom: 1px solid #242830; background: transparent; color: #e7eaee; cursor: pointer; text-align: left; }
 .input-dialog-suggestion:last-child { border-bottom: 0; }
+.input-dialog-suggestion:hover { background: #1d2527; }
+.input-dialog-suggestion.playing { background: #203633; color: #9af1e8; box-shadow: inset 3px 0 #56d6ca; }
+.input-dialog-suggestion > i { color: #8b949f; font-size: 11px; font-style: normal; text-align: center; }
+.input-dialog-suggestion.playing > i { color: #73e6dc; }
+.input-dialog-suggestion-name { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; }
 .input-dialog-suggestion strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-.input-dialog-suggestion span { max-width: 210px; overflow: hidden; color: #7f8794; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.input-dialog-suggestion small { max-width: 210px; overflow: hidden; color: #7f8794; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .input-dialog-suggestion.missing strong::after { content: ' · 파일 없음'; color: #d88d76; font-size: 10px; font-weight: 500; }
+.input-dialog-suggestion.missing { cursor: not-allowed; opacity: .65; }
 .input-dialog-suggestion-empty { padding: 12px; color: #747b87; font-size: 12px; text-align: center; }
 .input-dialog-option { width: 100%; display: block; padding: 9px 11px; border: 0; border-bottom: 1px solid #242830; background: transparent; color: #aeb4bd; cursor: pointer; text-align: left; }
 .input-dialog-option:last-child { border-bottom: 0; }

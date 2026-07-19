@@ -984,6 +984,7 @@ function openInputDialog({
       || searchableOptions[0]?.value || '';
     let settled = false;
     let lastWheelSelectionAt = -Infinity;
+    let suggestionPlayingId = null;
 
     const renderOptionSuggestions = () => {
       const query = optionSearchActive ? normalizeSuggestion(field.value) : '';
@@ -1023,8 +1024,11 @@ function openInputDialog({
       }
       const visible = matches.slice(0, 8);
       suggestionsPanel.innerHTML = `
-        <div class="input-dialog-suggestion-summary">기존 이름 ${matches.length}개${matches.length > visible.length ? ` · 상위 ${visible.length}개 표시` : ''}</div>
-        ${visible.map((item) => `<div class="input-dialog-suggestion${item.missing ? ' missing' : ''}"><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.category || '미분류')}</span></div>`).join('')}`;
+        <div class="input-dialog-suggestion-summary">기존 이름 ${matches.length}개 · 클릭하여 중복 사운드 미리듣기${matches.length > visible.length ? ` · 상위 ${visible.length}개 표시` : ''}</div>
+        ${visible.map((item) => {
+          const playing = item.id && state.playingId === item.id && !player.paused;
+          return `<button type="button" class="input-dialog-suggestion${playing ? ' playing' : ''}${item.missing ? ' missing' : ''}" data-name-suggestion-id="${escapeHtml(item.id || '')}"><i>${playing ? '❚❚' : '▶'}</i><span class="input-dialog-suggestion-name"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.category || '미분류')}</small></span></button>`;
+        }).join('')}`;
     };
     const renderSuggestions = () => {
       if (navigateOptions) renderOptionSuggestions();
@@ -1049,8 +1053,22 @@ function openInputDialog({
       highlightedOption = visibleOptions[next].value;
       renderOptionSuggestions();
     };
-    const handleOptionClick = (event) => {
-      if (!navigateOptions) return;
+    const handleOptionClick = async (event) => {
+      if (!navigateOptions) {
+        const button = event.target.closest('[data-name-suggestion-id]');
+        if (!button) return;
+        const sound = state.sounds.find((item) => item.id === button.dataset.nameSuggestionId);
+        if (!sound) return;
+        if (sound.missing) {
+          showToast('원본 파일이 없어 이 후보를 재생할 수 없습니다.', 5000);
+          return;
+        }
+        suggestionPlayingId = sound.id;
+        await toggleFullPlayback(sound);
+        renderNameSuggestions();
+        field.focus();
+        return;
+      }
       const button = event.target.closest('[data-input-option-index]');
       if (!button) return;
       const selected = visibleOptions[Number(button.dataset.inputOptionIndex)];
@@ -1069,6 +1087,9 @@ function openInputDialog({
       lastWheelSelectionAt = now;
       selectAdjacentOption(delta > 0 ? 1 : -1);
     };
+    const refreshSuggestionPlayback = () => {
+      if (!settled && !navigateOptions) renderNameSuggestions();
+    };
     backdrop.classList.remove('hidden');
     const finish = (result) => {
       if (settled) return;
@@ -1084,6 +1105,11 @@ function openInputDialog({
       backdrop.removeEventListener('click', outside);
       form.removeEventListener('wheel', handleOptionWheel);
       document.removeEventListener('keydown', handleDialogKeydown, true);
+      player.removeEventListener('play', refreshSuggestionPlayback);
+      player.removeEventListener('pause', refreshSuggestionPlayback);
+      player.removeEventListener('ended', refreshSuggestionPlayback);
+      if (suggestionPlayingId && state.playingId === suggestionPlayingId) player.pause();
+      suggestionPlayingId = null;
       resolve(result);
     };
     const submit = (event) => { event.preventDefault(); finish(selectedDialogValue()); };
@@ -1121,6 +1147,9 @@ function openInputDialog({
     backdrop.addEventListener('click', outside);
     form.addEventListener('wheel', handleOptionWheel, { passive: false });
     document.addEventListener('keydown', handleDialogKeydown, true);
+    player.addEventListener('play', refreshSuggestionPlayback);
+    player.addEventListener('pause', refreshSuggestionPlayback);
+    player.addEventListener('ended', refreshSuggestionPlayback);
     requestAnimationFrame(() => { field.focus(); field.select(); renderSuggestions(); });
   });
 }
@@ -1760,10 +1789,11 @@ async function renameSelectedSound() {
   const currentName = fileNameWithoutExtension(sound.fileName);
   const name = await openInputDialog({
     title: '사운드 이름 변경',
-    description: '실제 오디오 파일명도 함께 변경됩니다. Enter 또는 Shift+Space로 확인할 수 있습니다.',
+    description: '기존 이름 후보를 클릭하면 중복 여부를 미리 들을 수 있습니다. 실제 파일명도 함께 변경됩니다.',
     value: currentName,
     placeholder: '새 사운드 이름',
     suggestions: state.sounds.filter((item) => item.id !== sound.id).map((item) => ({
+      id: item.id,
       name: fileNameWithoutExtension(item.fileName || item.title),
       category: item.categoryPath || item.category || '미분류',
       missing: Boolean(item.missing)
