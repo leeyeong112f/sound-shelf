@@ -1157,6 +1157,7 @@ function openTagEditor(ids) {
     const currentStates = new Map(initialStates);
     let settled = false;
     let tagInputComposing = false;
+    let addAfterCompositionSpace = false;
 
     const stateIcon = (tagState) => tagState === 'all' ? '✓' : (tagState === 'some' ? '−' : '＋');
     const tagButtonMarkup = (key) => {
@@ -1245,10 +1246,16 @@ function openTagEditor(ids) {
       if (button) toggleTag(button.dataset.tagChoice);
     };
     const searchKeydown = (event) => {
-      if (event.key !== 'Enter') return;
+      const spaceKey = event.key === ' ' || event.code === 'Space';
+      const addKey = event.key === 'Enter' || spaceKey;
+      if (!addKey || event.metaKey || event.ctrlKey || event.altKey) return;
       // 한글 IME 조합을 확정하는 Enter를 태그 추가 Enter로 처리하면
       // "청양" 입력 뒤 마지막 조합 글자인 "양"이 별도 태그로 한 번 더 생긴다.
-      if (tagInputComposing || event.isComposing || event.keyCode === 229) return;
+      if (tagInputComposing || event.isComposing || event.keyCode === 229) {
+        // 한글 조합 중 누른 Space는 조합이 끝난 뒤 완성된 단어 전체를 추가한다.
+        if (spaceKey) addAfterCompositionSpace = true;
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       addInputTags();
@@ -1257,6 +1264,11 @@ function openTagEditor(ids) {
     const compositionEnd = () => {
       tagInputComposing = false;
       renderTagEditor();
+      if (!addAfterCompositionSpace) return;
+      addAfterCompositionSpace = false;
+      setTimeout(() => {
+        if (!settled) addInputTags();
+      }, 0);
     };
     const dialogKeydown = (event) => {
       if (event.key === 'Escape') {
@@ -1279,8 +1291,8 @@ function openTagEditor(ids) {
     };
 
     $('#tagDialogDescription').textContent = selectedSounds.length === 1
-      ? `“${selectedSounds[0].title}”의 태그를 선택하세요.`
-      : `${selectedSounds.length}개 사운드의 태그를 함께 편집합니다. − 표시는 일부 파일에만 있는 태그입니다.`;
+      ? `“${selectedSounds[0].title}”의 태그를 선택하세요. Space 또는 Enter로 연속 추가할 수 있습니다.`
+      : `${selectedSounds.length}개 사운드의 태그를 함께 편집합니다. Space 또는 Enter로 연속 추가할 수 있습니다.`;
     searchField.value = '';
     backdrop.classList.remove('hidden');
     form.addEventListener('submit', submit);
