@@ -98,7 +98,10 @@
           </div>
           <div id="detailWaveformWrap" class="detail-waveform-wrap">
             <canvas id="detailWaveformCanvas"></canvas>
-            <div id="detailWaveformLoading" class="detail-waveform-loading">파형 생성 중…</div>
+            <div id="detailWaveformLoading" class="detail-waveform-loading">
+              <span id="detailWaveformStatus">파형 생성 중…</span>
+              <button id="detailWaveformRetryBtn" class="detail-waveform-retry hidden" type="button">다시 시도</button>
+            </div>
             <div id="detailSelection" class="detail-selection hidden" draggable="false" title="클릭: 구간 재생 · 드래그: 선택 구간을 Resolve로 가져오기"><span></span></div>
             <div id="detailPlayhead" class="detail-playhead" title="드래그하여 재생 위치 조절"></div>
           </div>

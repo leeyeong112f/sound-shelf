@@ -146,7 +146,8 @@ h1 { margin: 4px 0 2px; font-size: 28px; letter-spacing: -.03em; }
 .volume-control span { width: 34px; color: #879097; font-size: 10px; font-variant-numeric: tabular-nums; }
 .detail-waveform-wrap { height: calc(100% - 54px); position: relative; background: linear-gradient(#111415, #0d0f10); cursor: crosshair; touch-action: none; overflow: hidden; }
 #detailWaveformCanvas { display: block; width: 100%; height: 100%; pointer-events: none; }
-.detail-waveform-loading { position: absolute; inset: 0; display: grid; place-items: center; color: #4d555a; font-size: 11px; pointer-events: none; }
+.detail-waveform-loading { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; color: #697379; font-size: 11px; text-align: center; pointer-events: none; }
+.detail-waveform-retry { padding: 5px 9px; border: 1px solid #36504d; border-radius: 6px; background: #1b2c2b; color: #80c7c0; cursor: pointer; font-size: 10px; pointer-events: auto; }
 .detail-selection { position: absolute; top: 0; bottom: 0; min-width: 3px; z-index: 2; background: rgba(79, 183, 174, .2); border-left: 2px solid #57d5ca; border-right: 2px solid #57d5ca; box-shadow: inset 0 0 24px rgba(79, 183, 174, .1); cursor: grab; }
 .detail-selection:active { cursor: grabbing; }
 .detail-selection.preparing { cursor: wait; border-color: #ffd85a; background: rgba(255, 216, 90, .12); }

@@ -11,6 +11,7 @@ const os = require('node:os');
 const { VaultStorage, normalizedRelativePath, relativePathInside, writeJsonAtomic } = require('./vault-storage');
 const { mergeVaultState } = require('./vault-sync');
 const { matchesRenameFingerprint } = require('./file-identity');
+const { failedProbeMetadata, mediaErrorMessage, needsTechnicalProbe } = require('./media-health');
 
 const execFileAsync = promisify(execFile);
 const AUDIO_EXTENSIONS = new Set([
@@ -108,6 +109,10 @@ function findPython() {
     '/usr/bin/python3'
   ];
   return candidates.find((candidate) => fs.existsSync(candidate)) || 'python3';
+}
+
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function cleanDb(candidate) {
@@ -725,31 +730,44 @@ function inferCategoryPath(filePath) {
 }
 
 async function probeAudio(filePath) {
-  try {
-    const { stdout } = await execFileAsync(findMediaTool('ffprobe'), [
-      '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', filePath
-    ], { maxBuffer: 1024 * 1024 * 8 });
-    const info = JSON.parse(stdout);
-    const audio = info.streams?.find((stream) => stream.codec_type === 'audio') || {};
-    const rawMetadata = { ...(info.format?.tags || {}), ...(audio.tags || {}) };
-    const embeddedMetadata = Object.fromEntries(Object.entries(rawMetadata)
-      .filter(([, value]) => value !== null && value !== undefined && String(value).trim())
-      .map(([key, value]) => [String(key).toLowerCase(), String(value).trim()]));
-    const keywordSource = [embeddedMetadata.keywords, embeddedMetadata.keyword, embeddedMetadata.genre]
-      .filter(Boolean).join(',');
-    return {
-      duration: Number(info.format?.duration || audio.duration || 0),
-      sampleRate: Number(audio.sample_rate || 0),
-      channels: Number(audio.channels || 0),
-      codec: audio.codec_name || '',
-      bitRate: Number(info.format?.bit_rate || audio.bit_rate || 0),
-      embeddedMetadata,
-      embeddedTags: [...new Set(keywordSource.split(/[,;]+/).map((tag) => tag.trim()).filter(Boolean))],
-      metadataVersion: 1
-    };
-  } catch {
-    return { duration: 0, sampleRate: 0, channels: 0, codec: '', bitRate: 0, embeddedMetadata: {}, embeddedTags: [], metadataVersion: 1 };
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const { stdout } = await execFileAsync(findMediaTool('ffprobe'), [
+        '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', filePath
+      ], { maxBuffer: 1024 * 1024 * 8, timeout: 30000 });
+      const info = JSON.parse(stdout);
+      const audio = info.streams?.find((stream) => stream.codec_type === 'audio');
+      if (!audio) throw new Error('Input does not contain any audio stream');
+      const rawMetadata = { ...(info.format?.tags || {}), ...(audio.tags || {}) };
+      const embeddedMetadata = Object.fromEntries(Object.entries(rawMetadata)
+        .filter(([, value]) => value !== null && value !== undefined && String(value).trim())
+        .map(([key, value]) => [String(key).toLowerCase(), String(value).trim()]));
+      const keywordSource = [embeddedMetadata.keywords, embeddedMetadata.keyword, embeddedMetadata.genre]
+        .filter(Boolean).join(',');
+      const metadata = {
+        duration: Number(info.format?.duration || audio.duration || 0),
+        sampleRate: Number(audio.sample_rate || 0),
+        channels: Number(audio.channels || 0),
+        codec: audio.codec_name || '',
+        bitRate: Number(info.format?.bit_rate || audio.bit_rate || 0),
+        embeddedMetadata,
+        embeddedTags: [...new Set(keywordSource.split(/[,;]+/).map((tag) => tag.trim()).filter(Boolean))],
+        metadataVersion: 1,
+        technicalCached: true,
+        technicalError: ''
+      };
+      if (!metadata.duration || !metadata.sampleRate || !metadata.channels || !metadata.codec) {
+        throw new Error('Audio stream metadata is incomplete');
+      }
+      return metadata;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2 && fs.existsSync(filePath)) await wait(350 * (attempt + 1));
+    }
   }
+  console.error(`Audio metadata probe failed (${path.basename(filePath)}):`, lastError?.message || lastError);
+  return failedProbeMetadata(lastError, fs.existsSync(filePath));
 }
 
 async function walkAudioFiles(rootPath) {
@@ -850,7 +868,7 @@ async function indexFiles(filePaths, { reportProgress = true, categoryFolders = 
       }
     }
     const id = current?.id || crypto.randomUUID();
-    const needsProbe = !current || !current.technicalCached || current.modifiedAt !== stat.mtimeMs || current.size !== stat.size;
+    const needsProbe = needsTechnicalProbe(current, stat);
     const technical = needsProbe ? await probeAudio(filePath) : current;
     const categoryPath = current?.categoryPath || inferCategoryPath(filePath);
     const next = {
@@ -875,8 +893,11 @@ async function indexFiles(filePaths, { reportProgress = true, categoryFolders = 
       bitRate: technical.bitRate || 0,
       embeddedMetadata: technical.embeddedMetadata || current?.embeddedMetadata || {},
       embeddedTags: technical.embeddedTags || current?.embeddedTags || [],
-      metadataVersion: technical.metadataVersion || current?.metadataVersion || 0,
-      technicalCached: true,
+      metadataVersion: Number.isFinite(Number(technical.metadataVersion))
+        ? Number(technical.metadataVersion)
+        : Number(current?.metadataVersion || 0),
+      technicalCached: technical.technicalCached !== false,
+      technicalError: technical.technicalError || '',
       contentHash: needsProbe ? '' : (current?.contentHash || ''),
       contentHashKey: needsProbe ? '' : (current?.contentHashKey || '')
     };
@@ -1920,12 +1941,18 @@ ipcMain.handle('library:backup-import', async () => {
 
 ipcMain.handle('library:collect-metadata', () => withLocalMutation(async () => {
   let updated = 0;
-  const existing = db.sounds.filter((sound) => fs.existsSync(sound.path) && sound.metadataVersion !== 1);
+  const existing = db.sounds.filter((sound) => {
+    if (!fs.existsSync(sound.path)) return false;
+    try {
+      return needsTechnicalProbe(sound, fs.statSync(sound.path));
+    } catch {
+      return false;
+    }
+  });
   for (let index = 0; index < existing.length; index += 1) {
     const sound = existing[index];
     const metadata = await probeAudio(sound.path);
     Object.assign(sound, metadata);
-    sound.technicalCached = true;
     updated += 1;
     if (index % 5 === 0 || index === existing.length - 1) {
       mainWindow?.webContents.send('scan-progress', { current: index + 1, total: existing.length, fileName: sound.fileName });
@@ -2002,7 +2029,6 @@ ipcMain.handle('library:relink-one', async (_event, id) => {
   sound.categoryPath = inferCategoryPath(filePath);
   sound.category = sound.categoryPath.split('/').pop();
   Object.assign(sound, await probeAudio(filePath));
-  sound.technicalCached = true;
   db.sounds = deduplicateSoundsByPath(db.sounds);
   await saveDb();
   return { ...librarySnapshot(), idChanges: { [oldId]: sound.id } };
@@ -2262,7 +2288,9 @@ ipcMain.handle('library:reveal', async (_event, filePath) => {
 
 ipcMain.handle('library:waveform', async (_event, id) => {
   const sound = db.sounds.find((item) => item.id === id);
-  if (!sound || !fs.existsSync(sound.path)) return [];
+  if (!sound || !fs.existsSync(sound.path)) {
+    return { left: [], right: [], status: 'missing', error: '원본 파일을 찾을 수 없습니다.' };
+  }
   const cacheKey = waveformCacheKey(sound);
   if (waveformCache.has(cacheKey)) return waveformCache.get(cacheKey);
   const diskCached = await readWaveformDiskCache(cacheKey);
@@ -2272,33 +2300,46 @@ ipcMain.handle('library:waveform', async (_event, id) => {
   }
   if (waveformJobs.has(cacheKey)) return waveformJobs.get(cacheKey);
   const job = runWaveformJob(async () => {
+    let lastError = null;
     try {
-      const { stdout } = await execFileAsync(findMediaTool('ffmpeg'), [
-        '-v', 'error', '-i', sound.path, '-map', '0:a:0', '-ac', '2', '-ar', '8000', '-f', 's16le', 'pipe:1'
-      ], { encoding: null, maxBuffer: 1024 * 1024 * 64, timeout: 45000 });
-      const frameCount = Math.floor(stdout.length / 4);
-      const targetCount = 1200;
-      const bucketSize = Math.max(1, Math.ceil(frameCount / targetCount));
-      const left = [];
-      const right = [];
-      for (let offset = 0; offset < frameCount; offset += bucketSize) {
-        let leftPeak = 0;
-        let rightPeak = 0;
-        const limit = Math.min(frameCount, offset + bucketSize);
-        for (let index = offset; index < limit; index += 1) {
-          leftPeak = Math.max(leftPeak, Math.abs(stdout.readInt16LE(index * 4)) / 32768);
-          rightPeak = Math.max(rightPeak, Math.abs(stdout.readInt16LE(index * 4 + 2)) / 32768);
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const { stdout } = await execFileAsync(findMediaTool('ffmpeg'), [
+            '-v', 'error', '-i', sound.path, '-map', '0:a:0', '-ac', '2', '-ar', '8000', '-f', 's16le', 'pipe:1'
+          ], { encoding: null, maxBuffer: 1024 * 1024 * 64, timeout: 45000 });
+          const frameCount = Math.floor(stdout.length / 4);
+          if (!frameCount) throw new Error('Audio stream produced no samples');
+          const targetCount = 1200;
+          const bucketSize = Math.max(1, Math.ceil(frameCount / targetCount));
+          const left = [];
+          const right = [];
+          for (let offset = 0; offset < frameCount; offset += bucketSize) {
+            let leftPeak = 0;
+            let rightPeak = 0;
+            const limit = Math.min(frameCount, offset + bucketSize);
+            for (let index = offset; index < limit; index += 1) {
+              leftPeak = Math.max(leftPeak, Math.abs(stdout.readInt16LE(index * 4)) / 32768);
+              rightPeak = Math.max(rightPeak, Math.abs(stdout.readInt16LE(index * 4 + 2)) / 32768);
+            }
+            left.push(Math.min(1, leftPeak));
+            right.push(Math.min(1, rightPeak));
+          }
+          const waveform = { left, right, status: 'ready', error: '' };
+          waveformCache.set(cacheKey, waveform);
+          await writeWaveformDiskCache(cacheKey, waveform).catch((error) => console.error('Waveform cache write failed:', error.message));
+          return waveform;
+        } catch (error) {
+          lastError = error;
+          if (attempt === 0 && fs.existsSync(sound.path)) await wait(700);
         }
-        left.push(Math.min(1, leftPeak));
-        right.push(Math.min(1, rightPeak));
       }
-      const waveform = { left, right };
-      waveformCache.set(cacheKey, waveform);
-      await writeWaveformDiskCache(cacheKey, waveform).catch((error) => console.error('Waveform cache write failed:', error.message));
-      return waveform;
-    } catch (error) {
-      console.error('Waveform generation failed:', error.message);
-      return { left: [], right: [] };
+      console.error(`Waveform generation failed (${path.basename(sound.path)}):`, lastError?.message || lastError);
+      return {
+        left: [],
+        right: [],
+        status: fs.existsSync(sound.path) ? 'error' : 'missing',
+        error: mediaErrorMessage(lastError, { fileExists: fs.existsSync(sound.path), waveform: true })
+      };
     } finally {
       waveformJobs.delete(cacheKey);
     }

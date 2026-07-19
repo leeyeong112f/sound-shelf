@@ -489,6 +489,7 @@ function renderInspector() {
   $('#inspectorRating').innerHTML = ratingMarkup(sound, 'inspector');
   $('#largePlay').textContent = state.playingId === sound.id && !player.paused ? '❚❚' : '▶';
   $('#soundFacts').innerHTML = [
+    ['파일 상태', sound.missing ? '원본 파일 없음 · 재연결 필요' : (sound.technicalError || '정상')],
     ['길이', formatDuration(sound.duration)],
     ['샘플레이트', sound.sampleRate ? `${(sound.sampleRate / 1000).toFixed(1)} kHz` : '—'],
     ['채널', sound.channels || '—'],
@@ -512,7 +513,7 @@ function renderDetailPanel() {
     $('#detailCurrentTime').textContent = '0:00.00';
     $('#detailTotalTime').textContent = '0:00.00';
     $('#detailPlayButton').textContent = '▶';
-    $('#detailWaveformLoading').classList.add('hidden');
+    hideDetailWaveformStatus();
     $('#detailSelection').classList.add('hidden');
     $('#createRangeFileButton').classList.add('hidden');
     $('#clearRangeButton').classList.add('hidden');
@@ -587,17 +588,47 @@ function render() {
   renderSettings();
 }
 
+function showDetailWaveformStatus(message, { retry = false } = {}) {
+  $('#detailWaveformStatus').textContent = message;
+  $('#detailWaveformRetryBtn').classList.toggle('hidden', !retry);
+  $('#detailWaveformLoading').classList.remove('hidden');
+}
+
+function hideDetailWaveformStatus() {
+  $('#detailWaveformLoading').classList.add('hidden');
+  $('#detailWaveformRetryBtn').classList.add('hidden');
+}
+
 async function ensureWaveform(sound) {
-  if (!sound || sound.missing || state.waveforms.has(sound.id) || state.waveformLoading.has(sound.id)) return;
+  if (!sound) return;
+  if (sound.missing) {
+    if (state.selectedId === sound.id) showDetailWaveformStatus('원본 파일이 없어 파형을 만들 수 없습니다. 우클릭하여 재연결해 주세요.');
+    return;
+  }
+  if (state.waveforms.has(sound.id)) {
+    const cached = state.waveforms.get(sound.id);
+    if (state.selectedId === sound.id && cached?.error) showDetailWaveformStatus(cached.error, { retry: true });
+    return;
+  }
+  if (state.waveformLoading.has(sound.id)) return;
   state.waveformLoading.add(sound.id);
-  if (state.selectedId === sound.id) $('#detailWaveformLoading').classList.remove('hidden');
-  const waveform = await window.soundLibrary.getWaveform(sound.id);
-  state.waveformLoading.delete(sound.id);
-  state.waveforms.set(sound.id, waveform || { left: [], right: [] });
-  drawMiniWaveform(sound.id);
-  if (state.selectedId === sound.id) {
-    drawDetailWaveform();
-    $('#detailWaveformLoading').classList.toggle('hidden', !waveform?.left?.length);
+  if (state.selectedId === sound.id) showDetailWaveformStatus('파형 생성 중… Google Drive 파일은 잠시 걸릴 수 있습니다.');
+  try {
+    const waveform = await window.soundLibrary.getWaveform(sound.id);
+    const result = waveform || { left: [], right: [], status: 'error', error: '파형 데이터를 받지 못했습니다.' };
+    state.waveforms.set(sound.id, result);
+    drawMiniWaveform(sound.id);
+    if (state.selectedId === sound.id) {
+      drawDetailWaveform();
+      if (result?.left?.length) hideDetailWaveformStatus();
+      else showDetailWaveformStatus(result.error || '파형을 만들 수 없습니다.', { retry: result.status !== 'missing' });
+    }
+  } catch (error) {
+    const result = { left: [], right: [], status: 'error', error: `파형 생성 요청에 실패했습니다: ${error.message}` };
+    state.waveforms.set(sound.id, result);
+    if (state.selectedId === sound.id) showDetailWaveformStatus(result.error, { retry: true });
+  } finally {
+    state.waveformLoading.delete(sound.id);
   }
 }
 
@@ -701,8 +732,17 @@ function drawDetailWaveform() {
   context.stroke();
   const waveform = state.waveforms.get(sound.id);
   const hasWaveform = Boolean(waveform?.left?.length);
-  $('#detailWaveformLoading').classList.toggle('hidden', hasWaveform);
-  if (!hasWaveform) return;
+  if (!hasWaveform) {
+    if (sound.missing) {
+      showDetailWaveformStatus('원본 파일이 없어 파형을 만들 수 없습니다. 우클릭하여 재연결해 주세요.');
+    } else if (waveform?.error) {
+      showDetailWaveformStatus(waveform.error, { retry: waveform.status !== 'missing' });
+    } else if (state.waveformLoading.has(sound.id)) {
+      showDetailWaveformStatus('파형 생성 중… Google Drive 파일은 잠시 걸릴 수 있습니다.');
+    }
+    return;
+  }
+  hideDetailWaveformStatus();
   const normalized = normalizeWaveform(waveform);
   const targetCount = Math.max(80, Math.floor(rect.width / 2));
   const combined = normalized.left.map((left, index) => Math.max(left, normalized.right?.[index] || 0));
@@ -763,8 +803,22 @@ function waveformRatio(event) {
   return Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
 }
 
+async function startPreviewPlayback(sound) {
+  try {
+    await player.play();
+    return true;
+  } catch (error) {
+    const message = sound?.missing
+      ? '원본 파일이 없어 재생할 수 없습니다.'
+      : '사운드를 재생할 수 없습니다. Google Drive 다운로드 상태나 파일 형식을 확인해 주세요.';
+    showToast(message, 5000);
+    return false;
+  }
+}
+
 async function toggleFullPlayback(sound) {
-  if (!sound || sound.missing) return;
+  if (!sound) return;
+  if (sound.missing) return showToast('원본 파일이 없어 재생할 수 없습니다.', 5000);
   state.playRangeEnd = null;
   if (state.playingId === sound.id && !player.paused) {
     player.pause();
@@ -774,22 +828,25 @@ async function toggleFullPlayback(sound) {
     player.src = fileUrl(sound.path);
     state.playingId = sound.id;
   }
-  await player.play().catch(() => {});
+  await startPreviewPlayback(sound);
 }
 
 async function playSelection(sound, selection, resume = false) {
-  if (!sound || !selection || sound.missing) return;
+  if (!sound || !selection) return;
+  if (sound.missing) return showToast('원본 파일이 없어 재생할 수 없습니다.', 5000);
   if (state.playingId !== sound.id) {
     player.src = fileUrl(sound.path);
     state.playingId = sound.id;
   }
   if (!resume || player.currentTime < selection.start || player.currentTime >= selection.end) player.currentTime = selection.start;
   state.playRangeEnd = selection.end;
-  await player.play().catch(() => {});
+  await startPreviewPlayback(sound);
 }
 
 async function seekAndPlay(sound, requestedTime) {
-  if (!sound || sound.missing || !sound.duration) return;
+  if (!sound) return;
+  if (sound.missing) return showToast('원본 파일이 없어 재생할 수 없습니다.', 5000);
+  if (!sound.duration) return showToast('길이 정보를 읽지 못해 해당 위치에서 재생할 수 없습니다.', 5000);
   const targetTime = Math.max(0, Math.min(sound.duration - 0.001, Number(requestedTime) || 0));
   state.playRangeEnd = null;
   if (state.playingId !== sound.id) {
@@ -804,7 +861,7 @@ async function seekAndPlay(sound, requestedTime) {
   }
   try { player.currentTime = targetTime; } catch {}
   updateTransportDisplay();
-  await player.play().catch(() => {});
+  await startPreviewPlayback(sound);
 }
 
 async function toggleSelectedPlayback() {
@@ -2393,6 +2450,14 @@ $('#clearRangeButton').addEventListener('click', () => {
   state.selections.delete(sound.id);
   state.playRangeEnd = null;
   updateDetailSelection();
+});
+$('#detailWaveformRetryBtn').addEventListener('click', async () => {
+  const sound = selectedSound();
+  if (!sound || sound.missing) return;
+  state.waveforms.delete(sound.id);
+  state.waveformLoading.delete(sound.id);
+  showDetailWaveformStatus('파형을 다시 생성하는 중…');
+  await ensureWaveform(sound);
 });
 $('#createRangeFileButton').addEventListener('click', async () => {
   const sound = selectedSound();
