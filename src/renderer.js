@@ -124,6 +124,18 @@ function selectedSound() {
   return state.sounds.find((sound) => sound.id === state.selectedId);
 }
 
+function captureListPosition(movingIds = []) {
+  const moving = new Set(movingIds || []);
+  const selectedIndex = state.visibleSounds.findIndex((sound) => sound.id === state.selectedId);
+  const movingIndex = state.visibleSounds.findIndex((sound) => moving.has(sound.id));
+  return {
+    scrollTop: list.scrollTop,
+    focusIndex: selectedIndex >= 0
+      ? selectedIndex
+      : movingIndex >= 0 ? movingIndex : Math.floor(list.scrollTop / VIRTUAL_ROW_HEIGHT)
+  };
+}
+
 function moveSoundSelectionWithArrow(direction) {
   if (!state.visibleSounds.length) return;
   const currentIndex = state.visibleSounds.findIndex((sound) => sound.id === state.selectedId);
@@ -203,7 +215,7 @@ function filteredSounds() {
   });
 }
 
-function setLibrary(snapshot, { revealSelected = false } = {}) {
+function setLibrary(snapshot, { revealSelected = false, preserveListPosition = null } = {}) {
   if (!snapshot) return;
   state.sounds = snapshot.sounds || [];
   const availableTags = new Map(tagUsageEntries().map((entry) => [entry.key, entry.label]));
@@ -242,7 +254,23 @@ function setLibrary(snapshot, { revealSelected = false } = {}) {
   const validCategories = new Set(state.categoryPaths);
   state.selectedCategories = new Set([...state.selectedCategories].filter((category) => validCategories.has(category)));
   if (state.categoryAnchor && !validCategories.has(state.categoryAnchor)) state.categoryAnchor = null;
+  if (preserveListPosition) {
+    const nextVisibleSounds = filteredSounds();
+    const selectedStillVisible = nextVisibleSounds.some((sound) => sound.id === state.selectedId);
+    if (!selectedStillVisible) {
+      const nextIndex = Math.max(0, Math.min(nextVisibleSounds.length - 1, Number(preserveListPosition.focusIndex) || 0));
+      const nextSound = nextVisibleSounds[nextIndex] || null;
+      state.selectedId = nextSound?.id || null;
+      state.selectedIds = nextSound ? new Set([nextSound.id]) : new Set();
+      state.selectionAnchorId = nextSound?.id || null;
+    }
+  }
   render();
+  if (preserveListPosition) {
+    const maximum = Math.max(0, state.visibleSounds.length * VIRTUAL_ROW_HEIGHT - list.clientHeight);
+    list.scrollTop = Math.max(0, Math.min(maximum, Number(preserveListPosition.scrollTop) || 0));
+    renderVirtualRows();
+  }
   if (!$('#tagManagerDialog').classList.contains('hidden')) renderTagManager();
   if (revealSelected) requestAnimationFrame(revealSelectedSoundInList);
 }
@@ -1196,10 +1224,11 @@ async function moveSelectedToCategory() {
   const existingCategory = state.categoryPaths.find((item) => item.normalize('NFC') === category.normalize('NFC'));
   if (!existingCategory) return showToast('목록에 있는 기존 카테고리 폴더만 선택할 수 있습니다.', 5000);
   showToast(`${existingCategory} 폴더로 파일 이동 중…`, 10000);
+  const listPosition = captureListPosition([sound.id]);
   try {
     const snapshot = await window.soundLibrary.moveSoundToCategory({ id: sound.id, category: existingCategory });
     if (!snapshot) return;
-    setLibrary(snapshot);
+    setLibrary(snapshot, { preserveListPosition: listPosition });
     showToast(`파일을 “${existingCategory}” 카테고리 폴더로 이동했습니다.`);
   } catch (error) {
     showToast(`이동 실패: ${error.message}`, 5000);
@@ -1330,9 +1359,10 @@ async function moveSelectionToCategory() {
   const existingCategory = state.categoryPaths.find((item) => item.normalize('NFC') === category.normalize('NFC'));
   if (!existingCategory) return showToast('목록에 있는 기존 카테고리 폴더만 선택할 수 있습니다.', 5000);
   showToast(`${ids.length}개 파일 이동 중…`, 20000);
+  const listPosition = captureListPosition(ids);
   try {
     const snapshot = await window.soundLibrary.moveSoundsToCategory({ ids, category: existingCategory });
-    setLibrary(snapshot);
+    setLibrary(snapshot, { preserveListPosition: listPosition });
     const movedCount = Number(snapshot.moveResult?.moved ?? ids.length);
     showToast(`${movedCount}개 파일을 이동했습니다.`);
   } catch (error) {
