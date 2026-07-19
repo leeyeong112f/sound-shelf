@@ -1,12 +1,13 @@
 const DEFAULT_SHORTCUTS = {
-  search: 'Meta+S', moveCategory: 'Meta+M', editTags: 'Meta+T', addFiles: 'Meta+O',
+  search: 'Meta+S', categorySearch: 'Meta+Shift+S', moveCategory: 'Meta+M', editTags: 'Meta+T', addFiles: 'Meta+O',
   addFolder: 'Meta+Shift+O', trash: 'Meta+Backspace', reveal: 'Meta+Shift+R',
   favorite: 'Meta+Shift+F', settings: 'Meta+Comma', playPause: 'Space',
   renameSound: 'Enter',
   insertResolve: 'Meta+F', newSubfolder: 'Meta+Shift+N'
 };
 const SHORTCUT_LABELS = {
-  search: ['사운드 검색', '검색창으로 이동'],
+  search: ['전체 라이브러리 검색', '모든 카테고리에서 검색'],
+  categorySearch: ['현재 카테고리 검색', '현재 카테고리와 모든 하위 폴더에서 검색'],
   moveCategory: ['카테고리 폴더로 이동', '선택 파일을 실제 카테고리 폴더로 이동'],
   editTags: ['태그 편집', '선택 사운드의 기존 태그 선택·추가·제거'],
   addFiles: ['파일 추가', '오디오 파일 선택'],
@@ -30,6 +31,7 @@ const state = {
   watchedFolders: [],
   filter: 'all',
   query: '',
+  searchCategoryPath: null,
   selectedId: null,
   selectedIds: new Set(),
   selectionAnchorId: null,
@@ -220,7 +222,10 @@ function filteredSounds() {
   const { textTerms, tagTerms } = parseSearchQuery(state.query);
   const sounds = state.sounds.filter((sound) => {
     if (state.filter === 'favorites' && !sound.favorite) return false;
-    if (state.filter.startsWith('category:')) {
+    if (state.searchCategoryPath) {
+      const soundPath = sound.categoryPath || sound.category || '미분류';
+      if (soundPath !== state.searchCategoryPath && !soundPath.startsWith(`${state.searchCategoryPath}/`)) return false;
+    } else if (state.filter.startsWith('category:')) {
       const selectedPath = state.filter.slice(9);
       const soundPath = sound.categoryPath || sound.category || '미분류';
       if (soundPath !== selectedPath) return false;
@@ -288,6 +293,12 @@ function setLibrary(snapshot, { preserveListPosition = null } = {}) {
     const current = state.filter.slice(9);
     if (current === snapshot.categoryMove.from || current.startsWith(`${snapshot.categoryMove.from}/`)) {
       state.filter = `category:${snapshot.categoryMove.to}${current.slice(snapshot.categoryMove.from.length)}`;
+    }
+  }
+  if (snapshot.categoryMove && state.searchCategoryPath) {
+    const current = state.searchCategoryPath;
+    if (current === snapshot.categoryMove.from || current.startsWith(`${snapshot.categoryMove.from}/`)) {
+      state.searchCategoryPath = `${snapshot.categoryMove.to}${current.slice(snapshot.categoryMove.from.length)}`;
     }
   }
   if (snapshot.categoryMove) {
@@ -430,7 +441,21 @@ function renderSidebar() {
     button.classList.toggle('active', button.dataset.filter === state.filter);
   });
   $('#categoryOptions').innerHTML = state.categoryPaths.map((category) => `<option value="${escapeHtml(category)}"></option>`).join('');
-  $('#searchShortcutHint').textContent = displayShortcut(state.shortcuts.search);
+  const searchScopeBadge = $('#searchScopeBadge');
+  if (state.searchCategoryPath) {
+    const categoryName = state.searchCategoryPath.split('/').pop();
+    searchScopeBadge.textContent = `${categoryName} · 하위 포함`;
+    searchScopeBadge.title = `현재 검색 범위: ${state.searchCategoryPath}와 모든 하위 폴더`;
+    searchScopeBadge.classList.add('category');
+    $('#searchInput').placeholder = `${categoryName}와 하위 폴더에서 검색`;
+    $('#searchShortcutHint').textContent = displayShortcut(state.shortcuts.categorySearch);
+  } else {
+    searchScopeBadge.textContent = '전체';
+    searchScopeBadge.title = '현재 검색 범위: 전체 라이브러리';
+    searchScopeBadge.classList.remove('category');
+    $('#searchInput').placeholder = '이름·파일·카테고리 검색 · #당황#불행은 둘 중 하나';
+    $('#searchShortcutHint').textContent = displayShortcut(state.shortcuts.search);
+  }
   if (state.categoryKeyboardMode) requestAnimationFrame(() => {
     const row = [...document.querySelectorAll('#categoryList [data-category-row]')]
       .find((item) => item.dataset.categoryRow === state.categoryKeyboardPath);
@@ -491,7 +516,8 @@ function renderVirtualRows() {
 function renderList() {
   const sounds = filteredSounds();
   state.visibleSounds = sounds;
-  const filterName = state.tagFilters.size ? [...state.tagFilters].map((tag) => `#${tag}`).join(' + ')
+  const filterName = state.searchCategoryPath ? `${state.searchCategoryPath} · 하위 폴더 검색`
+    : state.tagFilters.size ? [...state.tagFilters].map((tag) => `#${tag}`).join(' + ')
     : state.filter === 'all' ? '모든 사운드'
     : state.filter === 'favorites' ? '즐겨찾기'
       : state.filter.slice(9);
@@ -1925,6 +1951,35 @@ async function runShortcut(action) {
     state.categoryKeyboardMode = false;
     state.categoryKeyboardPath = null;
     state.view = 'library';
+    state.filter = 'all';
+    state.tagFilters.clear();
+    state.searchCategoryPath = null;
+    state.query = '';
+    $('#searchInput').value = '';
+    list.scrollTop = 0;
+    render();
+    $('#searchInput').focus();
+  } else if (action === 'categorySearch') {
+    let categoryPath = state.categoryKeyboardPath;
+    if (!state.categoryPaths.includes(categoryPath) && state.filter.startsWith('category:')) {
+      categoryPath = state.filter.slice(9);
+    }
+    if (!state.categoryPaths.includes(categoryPath)) {
+      const sound = selectedSound();
+      categoryPath = sound?.categoryPath || sound?.category || null;
+    }
+    if (!state.categoryPaths.includes(categoryPath)) {
+      showToast('먼저 검색할 카테고리를 선택해 주세요.');
+      return;
+    }
+    clearTimeout(searchDebounce);
+    searchKeyboardNavigation = false;
+    state.categoryKeyboardMode = false;
+    state.categoryKeyboardPath = null;
+    state.view = 'library';
+    state.filter = `category:${categoryPath}`;
+    state.tagFilters.clear();
+    state.searchCategoryPath = categoryPath;
     state.query = '';
     $('#searchInput').value = '';
     list.scrollTop = 0;
@@ -2236,6 +2291,7 @@ function selectKeyboardCategory(categoryPath) {
   state.categoryKeyboardPath = categoryPath;
   state.view = 'library';
   state.filter = `category:${categoryPath}`;
+  state.searchCategoryPath = null;
   state.tagFilters.clear();
   state.selectedCategories.clear();
   state.categoryAnchor = categoryPath;
@@ -2353,6 +2409,7 @@ document.addEventListener('click', (event) => {
   if (filterButton) {
     state.view = 'library';
     state.filter = filterButton.dataset.filter;
+    state.searchCategoryPath = null;
     state.tagFilters.clear();
     list.scrollTop = 0;
     render();
@@ -2363,6 +2420,7 @@ document.addEventListener('click', (event) => {
   if (categoryButton) {
     state.view = 'library';
     state.filter = `category:${categoryButton.dataset.category}`;
+    state.searchCategoryPath = null;
     state.tagFilters.clear();
     state.selectedCategories.clear();
     state.categoryAnchor = categoryButton.dataset.category;
@@ -2379,6 +2437,7 @@ document.addEventListener('click', (event) => {
     else state.tagFilters = new Set([tag]);
     state.view = 'library';
     state.filter = 'all';
+    state.searchCategoryPath = null;
     list.scrollTop = 0;
     render();
   }

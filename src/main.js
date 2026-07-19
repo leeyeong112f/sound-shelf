@@ -19,6 +19,7 @@ const AUDIO_EXTENSIONS = new Set([
 ]);
 const DEFAULT_SHORTCUTS = {
   search: 'Meta+S',
+  categorySearch: 'Meta+Shift+S',
   moveCategory: 'Meta+M',
   editTags: 'Meta+T',
   addFiles: 'Meta+O',
