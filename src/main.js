@@ -370,7 +370,9 @@ function applyMergedState(merged) {
   db.sounds = deduplicateSoundsByPath(hydrated);
   if (merged.folderOrder.length) db.categoryOrder = merged.folderOrder;
   if (merged.previewVolume !== null) db.settings.previewVolume = merged.previewVolume;
-  db.categories = [...new Set(db.sounds.map((sound) => sound.categoryPath).filter(Boolean))]
+  // 원격 반영이 빈 카테고리 폴더를 사이드바에서 지우지 않도록 기존 목록과
+  // 합집합한다. 삭제된 폴더의 정리는 지금처럼 다음 폴더 재스캔이 담당한다.
+  db.categories = [...new Set([...db.categories, ...db.sounds.map((sound) => sound.categoryPath).filter(Boolean)])]
     .sort((a, b) => a.localeCompare(b, 'ko'));
   setSyncBaseline(merged);
   const soundsChanged = before !== editSignature(db.sounds.map(portableSound).filter(Boolean));
