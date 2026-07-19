@@ -2606,6 +2606,11 @@ document.addEventListener('keydown', (event) => {
     moveSoundSelectionWithArrow(event.key === 'ArrowDown' ? 1 : -1);
     return;
   }
+  if (isSearchField && event.key === ' ' && event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    event.preventDefault();
+    if (!event.repeat) toggleSelectedPlayback();
+    return;
+  }
   if (event.key === 'Escape' && state.selectedCategories.size) {
     state.categoryAnchor = null;
     clearCategorySelection();
