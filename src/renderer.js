@@ -1895,7 +1895,13 @@ async function renameSelectedSound() {
 
 async function runShortcut(action) {
   if (action === 'search') {
-    state.view = 'library'; render(); $('#searchInput').focus(); $('#searchInput').select();
+    clearTimeout(searchDebounce);
+    state.view = 'library';
+    state.query = '';
+    $('#searchInput').value = '';
+    list.scrollTop = 0;
+    render();
+    $('#searchInput').focus();
   } else if (action === 'moveCategory') await moveSelectionToCategory();
   else if (action === 'editTags') await editSelectedTags();
   else if (action === 'addFiles') setLibrary(await window.soundLibrary.addFiles());
