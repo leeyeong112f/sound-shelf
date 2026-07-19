@@ -23,6 +23,7 @@ const SHORTCUT_LABELS = {
 
 const state = {
   sounds: [],
+  loading: true,
   categories: [],
   categoryPaths: [],
   categoryOrder: [],
@@ -256,6 +257,7 @@ function filteredSounds() {
 function setLibrary(snapshot, { preserveListPosition = null } = {}) {
   if (!snapshot) return;
   state.sounds = snapshot.sounds || [];
+  state.loading = Boolean(snapshot.loading);
   const availableTags = new Map(tagUsageEntries().map((entry) => [entry.key, entry.label]));
   state.tagFilters = new Set([...state.tagFilters]
     .map((tag) => availableTags.get(normalizedTagKey(tag)))
@@ -484,7 +486,10 @@ function renderList() {
       : state.filter.slice(9);
   $('#viewTitle').textContent = filterName;
   $('#resultSummary').textContent = `${sounds.length.toLocaleString()}개의 사운드`;
-  $('#emptyState').classList.toggle('hidden', state.sounds.length > 0);
+  const showLoading = state.loading && state.sounds.length === 0;
+  const showOnboarding = !state.loading && state.sounds.length === 0;
+  $('#loadingState').classList.toggle('hidden', !showLoading);
+  $('#emptyState').classList.toggle('hidden', !showOnboarding);
   list.classList.toggle('hidden', state.sounds.length === 0);
 
   updateBatchToolbar();
