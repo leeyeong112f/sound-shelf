@@ -2377,13 +2377,29 @@ $('#batchMoveBtn').addEventListener('click', moveSelectionToCategory);
 $('#batchFavoriteBtn').addEventListener('click', toggleFavoriteSelected);
 $('#batchTrashBtn').addEventListener('click', trashSelection);
 $('#clearSelectionBtn').addEventListener('click', () => { state.selectedIds.clear(); state.selectedId = null; render(); });
-$('#addFolderBtn').addEventListener('click', async () => setLibrary(await window.soundLibrary.addFolder()));
+async function addFolderWithFeedback() {
+  try {
+    setLibrary(await window.soundLibrary.addFolder());
+  } catch (error) {
+    showToast(`폴더를 열지 못했습니다: ${error.message}`, 5000);
+  }
+}
+
+async function addFilesWithFeedback() {
+  try {
+    setLibrary(await window.soundLibrary.addFiles());
+  } catch (error) {
+    showToast(`파일을 추가하지 못했습니다: ${error.message}`, 5000);
+  }
+}
+
+$('#addFolderBtn').addEventListener('click', addFolderWithFeedback);
 $('#newRootCategoryBtn').addEventListener('click', (event) => {
   event.stopPropagation();
   createCategoryFolder('');
 });
-$('#emptyAddBtn').addEventListener('click', async () => setLibrary(await window.soundLibrary.addFolder()));
-$('#addFilesBtn').addEventListener('click', async () => setLibrary(await window.soundLibrary.addFiles()));
+$('#emptyAddBtn').addEventListener('click', addFolderWithFeedback);
+$('#addFilesBtn').addEventListener('click', addFilesWithFeedback);
 $('#rescanBtn').addEventListener('click', async (event) => {
   const button = event.currentTarget;
   button.disabled = true;
