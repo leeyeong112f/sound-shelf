@@ -2379,7 +2379,21 @@ $('#newRootCategoryBtn').addEventListener('click', (event) => {
 });
 $('#emptyAddBtn').addEventListener('click', async () => setLibrary(await window.soundLibrary.addFolder()));
 $('#addFilesBtn').addEventListener('click', async () => setLibrary(await window.soundLibrary.addFiles()));
-$('#rescanBtn').addEventListener('click', async () => setLibrary(await window.soundLibrary.rescan()));
+$('#rescanBtn').addEventListener('click', async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  showToast('사운드 폴더를 다시 스캔하는 중…', 60000);
+  try {
+    const snapshot = await window.soundLibrary.rescan();
+    setLibrary(snapshot);
+    const result = snapshot?.scanResult || {};
+    showToast(`스캔 완료 · 추가 ${result.added || 0}개 · 갱신 ${result.updated || 0}개`);
+  } catch (error) {
+    showToast(`재스캔 실패: ${error.message}`, 5000);
+  } finally {
+    button.disabled = false;
+  }
+});
 $('#settingsBtn').addEventListener('click', openSettings);
 $('#openVaultBtn').addEventListener('click', async () => {
   try {
