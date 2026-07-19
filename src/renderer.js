@@ -124,12 +124,13 @@ function selectedSound() {
   return state.sounds.find((sound) => sound.id === state.selectedId);
 }
 
-function captureListPosition(movingIds = []) {
+function captureListPosition(movingIds = [], { keepFocusOnReorder = false } = {}) {
   const moving = new Set(movingIds || []);
   const selectedIndex = state.visibleSounds.findIndex((sound) => sound.id === state.selectedId);
   const movingIndex = state.visibleSounds.findIndex((sound) => moving.has(sound.id));
   return {
     scrollTop: list.scrollTop,
+    keepFocusOnReorder,
     focusIndex: selectedIndex >= 0
       ? selectedIndex
       : movingIndex >= 0 ? movingIndex : Math.floor(list.scrollTop / VIRTUAL_ROW_HEIGHT)
@@ -215,7 +216,7 @@ function filteredSounds() {
   });
 }
 
-function setLibrary(snapshot, { revealSelected = false, preserveListPosition = null } = {}) {
+function setLibrary(snapshot, { preserveListPosition = null } = {}) {
   if (!snapshot) return;
   state.sounds = snapshot.sounds || [];
   const availableTags = new Map(tagUsageEntries().map((entry) => [entry.key, entry.label]));
@@ -256,9 +257,13 @@ function setLibrary(snapshot, { revealSelected = false, preserveListPosition = n
   if (state.categoryAnchor && !validCategories.has(state.categoryAnchor)) state.categoryAnchor = null;
   if (preserveListPosition) {
     const nextVisibleSounds = filteredSounds();
-    const selectedStillVisible = nextVisibleSounds.some((sound) => sound.id === state.selectedId);
-    if (!selectedStillVisible) {
-      const nextIndex = Math.max(0, Math.min(nextVisibleSounds.length - 1, Number(preserveListPosition.focusIndex) || 0));
+    const selectedIndex = nextVisibleSounds.findIndex((sound) => sound.id === state.selectedId);
+    const focusIndex = Math.max(0, Math.min(nextVisibleSounds.length - 1, Number(preserveListPosition.focusIndex) || 0));
+    const selectionLeftItsRow = preserveListPosition.keepFocusOnReorder
+      && selectedIndex >= 0
+      && selectedIndex !== focusIndex;
+    if (selectedIndex < 0 || selectionLeftItsRow) {
+      const nextIndex = focusIndex;
       const nextSound = nextVisibleSounds[nextIndex] || null;
       state.selectedId = nextSound?.id || null;
       state.selectedIds = nextSound ? new Set([nextSound.id]) : new Set();
@@ -272,24 +277,6 @@ function setLibrary(snapshot, { revealSelected = false, preserveListPosition = n
     renderVirtualRows();
   }
   if (!$('#tagManagerDialog').classList.contains('hidden')) renderTagManager();
-  if (revealSelected) requestAnimationFrame(revealSelectedSoundInList);
-}
-
-function revealSelectedSoundInList() {
-  if (!state.selectedId || !state.visibleSounds.length) return;
-  const index = state.visibleSounds.findIndex((sound) => sound.id === state.selectedId);
-  if (index < 0) return;
-  const rowTop = index * VIRTUAL_ROW_HEIGHT;
-  const centered = rowTop - Math.max(0, (list.clientHeight - VIRTUAL_ROW_HEIGHT) / 2);
-  const maximum = Math.max(0, state.visibleSounds.length * VIRTUAL_ROW_HEIGHT - list.clientHeight);
-  list.scrollTop = Math.max(0, Math.min(maximum, centered));
-  renderVirtualRows();
-  requestAnimationFrame(() => {
-    const row = list.querySelector(`.sound-row[data-id="${state.selectedId}"]`);
-    if (!row) return;
-    row.classList.add('selection-revealed');
-    setTimeout(() => row.classList.remove('selection-revealed'), 900);
-  });
 }
 
 function updateVolumeControl() {
@@ -1651,10 +1638,11 @@ async function renameSelectedSound() {
     confirmWithShiftSpace: true
   });
   if (!name || name === currentName) return;
+  const listPosition = captureListPosition([sound.id], { keepFocusOnReorder: true });
   try {
     const snapshot = await window.soundLibrary.renameSound({ id: sound.id, name });
-    setLibrary(snapshot, { revealSelected: true });
-    showToast('이름을 변경하고 새 정렬 위치에서 선택 상태를 유지했습니다.');
+    setLibrary(snapshot, { preserveListPosition: listPosition });
+    showToast('이름을 변경했습니다. 현재 탐색 위치를 유지합니다.');
   } catch (error) {
     showToast(`이름 변경 실패: ${error.message}`, 5000);
   }

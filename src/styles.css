@@ -103,8 +103,6 @@ h1 { margin: 4px 0 2px; font-size: 28px; letter-spacing: -.03em; }
 .sound-row:active { cursor: grabbing; }
 .sound-row:hover { background: #1c1f25; }
 .sound-row.selected { background: #2f6464; box-shadow: inset 2px 0 #64ddd2; }
-.sound-row.selection-revealed { animation: selection-reveal .9s ease-out; }
-@keyframes selection-reveal { 0%, 35% { box-shadow: inset 4px 0 #9aff2e, inset 0 0 0 1px rgba(154, 255, 46, .55); } 100% { box-shadow: inset 4px 0 transparent, inset 0 0 0 1px transparent; } }
 .sound-row.selected .dim, .sound-row.selected .sound-name small { color: #c3dddd; }
 .play-button { width: 30px; height: 30px; border: 0; border-radius: 50%; background: #282c34; cursor: pointer; color: var(--accent); }
 .sound-name { min-width: 0; }
