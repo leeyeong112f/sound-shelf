@@ -1590,6 +1590,22 @@ async function toggleFavoriteSelected() {
   setLibrary(await window.soundLibrary.updateSound({ id: sound.id, favorite: !sound.favorite }));
 }
 
+async function setSelectedRating(rating) {
+  const ids = selectedIdList();
+  if (!ids.length) return showToast('별점을 지정할 사운드를 먼저 선택해 주세요.');
+  const value = Math.max(1, Math.min(5, Number(rating) || 1));
+  const listPosition = captureListPosition(ids);
+  try {
+    const snapshot = await window.soundLibrary.updateSoundsBatch({ ids, updates: { rating: value } });
+    setLibrary(snapshot, { preserveListPosition: listPosition });
+    showToast(ids.length === 1
+      ? `별점 ${value}점을 지정했습니다.`
+      : `${ids.length}개 사운드에 별점 ${value}점을 지정했습니다.`);
+  } catch (error) {
+    showToast(`별점 지정 실패: ${error.message}`, 5000);
+  }
+}
+
 function openSettings() {
   state.view = 'settings';
   state.inspectorOpen = false;
@@ -2388,8 +2404,16 @@ $('#removeBtn').addEventListener('click', async (event) => {
 document.addEventListener('keydown', (event) => {
   if (event.target.closest('.shortcut-capture.recording')) return;
   const isSearchField = document.activeElement === $('#searchInput');
-  const isEditing = (!isSearchField && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName))
+  const isTextEntry = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)
     || document.activeElement.isContentEditable;
+  const isEditing = !isSearchField && isTextEntry;
+  const noCommandModifier = !event.metaKey && !event.ctrlKey && !event.altKey;
+  if (/^[1-5]$/.test(event.key) && !isTextEntry && noCommandModifier
+    && !document.querySelector('.dialog-backdrop:not(.hidden)')) {
+    event.preventDefault();
+    if (!event.repeat) setSelectedRating(Number(event.key));
+    return;
+  }
   if (['ArrowUp', 'ArrowDown'].includes(event.key) && !isEditing && !event.metaKey && !event.ctrlKey && !event.altKey) {
     event.preventDefault();
     moveSoundSelectionWithArrow(event.key === 'ArrowDown' ? 1 : -1);
