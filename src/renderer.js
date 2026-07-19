@@ -1296,10 +1296,9 @@ function openTagEditor(ids) {
     const searchKeydown = (event) => {
       if (event.key === 'Enter' && event.metaKey) return;
       const spaceKey = event.key === ' ' || event.code === 'Space';
-      const addKey = event.key === 'Enter' || spaceKey;
-      if (!addKey || event.metaKey || event.ctrlKey || event.altKey) return;
-      // 한글 IME 조합을 확정하는 Enter를 태그 추가 Enter로 처리하면
-      // "청양" 입력 뒤 마지막 조합 글자인 "양"이 별도 태그로 한 번 더 생긴다.
+      const enterKey = event.key === 'Enter';
+      if ((!enterKey && !spaceKey) || event.metaKey || event.ctrlKey || event.altKey) return;
+      // 한글 IME 조합을 확정하는 키 입력은 태그 추가나 다이얼로그 적용으로 처리하지 않는다.
       if (tagInputComposing || event.isComposing || event.keyCode === 229) {
         // 한글 조합 중 누른 Space는 조합이 끝난 뒤 완성된 단어 전체를 추가한다.
         if (spaceKey) addAfterCompositionSpace = true;
@@ -1307,6 +1306,10 @@ function openTagEditor(ids) {
       }
       event.preventDefault();
       event.stopPropagation();
+      if (enterKey) {
+        form.requestSubmit();
+        return;
+      }
       addInputTags();
     };
     const compositionStart = () => { tagInputComposing = true; };
