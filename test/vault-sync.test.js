@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { mergeVaultState } = require('../src/vault-sync');
+const { mergeVaultState, pruneRedundantEdits } = require('../src/vault-sync');
+
+const FIELDS = ['relativePath', 'fileName', 'title', 'tags', 'notes', 'favorite', 'rating', 'createdAt', 'keyAnalysis'];
 
 function sound(id, overrides = {}) {
   return {
@@ -148,4 +150,33 @@ test('updatedAt이 없는 편집 레코드는 베이스를 이기지 못한다',
   const base = { sounds: [sound('a', { title: '베이스' })], folderOrder: [] };
   const edits = [{ machineId: 'mac-1', sounds: { a: { ...sound('a', { title: '무효' }) } } }];
   assert.strictEqual(mergeVaultState(base, edits).sounds[0].title, '베이스');
+});
+
+test('베이스와 같은 레코드는 정리된다', () => {
+  const base = [sound('a')];
+  const own = { a: { ...sound('a'), updatedAt: 100 } };
+  assert.deepStrictEqual(pruneRedundantEdits(own, base, FIELDS), {});
+});
+
+test('사용자 필드가 다른 레코드는 유지된다', () => {
+  const base = [sound('a')];
+  const own = { a: { ...sound('a', { tags: ['액션'] }), updatedAt: 100 } };
+  assert.strictEqual(Object.keys(pruneRedundantEdits(own, base, FIELDS)).length, 1);
+});
+
+test('기술 필드만 다른 레코드는 정리된다', () => {
+  const base = [sound('a')];
+  const own = { a: { ...sound('a', { modifiedAt: 9999, size: 777, contentHash: 'x' }), updatedAt: 100 } };
+  assert.deepStrictEqual(pruneRedundantEdits(own, base, FIELDS), {});
+});
+
+test('삭제 표식은 절대 정리되지 않는다', () => {
+  const base = [sound('a')];
+  const own = { a: { updatedAt: 100, deleted: true } };
+  assert.strictEqual(pruneRedundantEdits(own, base, FIELDS).a.deleted, true);
+});
+
+test('베이스에 없는 신규 사운드는 유지된다', () => {
+  const own = { z: { ...sound('z'), updatedAt: 100 } };
+  assert.strictEqual(Object.keys(pruneRedundantEdits(own, [], FIELDS)).length, 1);
 });

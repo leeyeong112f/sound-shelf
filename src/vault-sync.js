@@ -82,4 +82,27 @@ function mergeVaultState(base, editSources) {
   };
 }
 
-module.exports = { mergeVaultState, EDITS_SCHEMA_VERSION };
+// 베이스와 사용자 필드가 완전히 같은 자기 편집 레코드는 병합 결과에 기여하지
+// 않으므로 제거해도 안전하다. 삭제 표식과 베이스에 없는 신규 사운드는 편집
+// 파일이 유일한 저장소이므로 반드시 유지한다.
+function pruneRedundantEdits(ownSounds, baseSounds, fields) {
+  const baseById = new Map((baseSounds || []).filter((sound) => sound?.id).map((sound) => [sound.id, sound]));
+  const kept = {};
+  for (const [id, record] of Object.entries(ownSounds || {})) {
+    if (!record || typeof record !== 'object') continue;
+    if (record.deleted) {
+      kept[id] = record;
+      continue;
+    }
+    const base = baseById.get(id);
+    if (!base) {
+      kept[id] = record;
+      continue;
+    }
+    const same = (fields || []).every((field) => JSON.stringify(record[field] ?? null) === JSON.stringify(base[field] ?? null));
+    if (!same) kept[id] = record;
+  }
+  return kept;
+}
+
+module.exports = { mergeVaultState, pruneRedundantEdits, EDITS_SCHEMA_VERSION };

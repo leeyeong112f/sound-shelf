@@ -9,7 +9,7 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const os = require('node:os');
 const { VaultStorage, normalizedRelativePath, relativePathInside, writeJsonAtomic } = require('./vault-storage');
-const { mergeVaultState } = require('./vault-sync');
+const { mergeVaultState, pruneRedundantEdits } = require('./vault-sync');
 const { matchesRenameFingerprint } = require('./file-identity');
 const { failedProbeMetadata, mediaErrorMessage, needsTechnicalProbe } = require('./media-health');
 
@@ -411,6 +411,10 @@ async function activateVaultNow(rootPath, { legacySounds = [], legacyCategoryOrd
     folderOrder: mine?.folderOrder || null,
     settings: mine?.settings || null
   };
+  // 베이스와 동일해 병합에 기여하지 않는 군더더기 레코드를 정리한다. 과거에
+  // 기술 필드 변화만으로 기록된 전 사운드 레코드가 여기서 줄어들고, 다음
+  // saveDb 때 슬림해진 자기 편집 파일만 저장된다.
+  ownEdits.sounds = pruneRedundantEdits(ownEdits.sounds, portableMetadata.sounds, EDITABLE_FIELDS);
   const cached = vaultStorage.cachedSounds();
   const cacheById = new Map(cached.map((sound) => [sound.id, sound]));
   const cacheByRelativePath = new Map(cached.map((sound) => [normalizedRelativePath(sound.relativePath), sound]));
@@ -527,7 +531,10 @@ async function loadDb() {
   };
 }
 
-const EDITABLE_FIELDS = ['relativePath', 'fileName', 'title', 'tags', 'notes', 'favorite', 'rating', 'createdAt', 'modifiedAt', 'size', 'contentHash', 'keyAnalysis'];
+// 사용자 편집으로 취급해 동기화할 필드. modifiedAt/size/contentHash 같은 기술
+// 필드는 각 Mac의 로컬 SQLite 캐시가 담당하므로 diff에서 제외한다. 포함하면
+// 전체 스캔 한 번에 전 사운드가 편집됨으로 기록되어 편집 파일이 비대해진다.
+const EDITABLE_FIELDS = ['relativePath', 'fileName', 'title', 'tags', 'notes', 'favorite', 'rating', 'createdAt', 'keyAnalysis'];
 
 function sameSound(left, right) {
   if (!left || !right) return false;
