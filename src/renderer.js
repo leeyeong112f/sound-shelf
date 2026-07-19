@@ -1648,6 +1648,45 @@ function keyConfidenceLabel(confidence) {
   return '낮음';
 }
 
+function signedPitchValue(value, digits = 0) {
+  const number = Number(value || 0);
+  const normalized = Math.abs(number) < (0.5 * (10 ** -digits)) ? 0 : number;
+  return `${normalized > 0 ? '+' : ''}${normalized.toFixed(digits)}`;
+}
+
+function renderPitchTargetGuide(analysis) {
+  const select = $('#pitchTargetKey');
+  const output = $('#pitchGuideOutput');
+  if (!select || !output || !window.PitchGuide) return;
+  const sourceIndex = window.PitchGuide.sourceIndexForKey(analysis.key);
+  if (sourceIndex < 0) {
+    output.textContent = '분석된 기준음을 피치 계산에 사용할 수 없습니다.';
+    return;
+  }
+  const update = () => {
+    const [targetIndex, targetMode] = select.value.split(':');
+    const guide = window.PitchGuide.calculatePitchGuide({
+      sourceIndex,
+      sourceMode: analysis.mode,
+      tuningCents: analysis.tuningCents,
+      targetIndex: Number(targetIndex),
+      targetMode
+    });
+    const direction = guide.totalCents > 0 ? '올리기' : guide.totalCents < 0 ? '내리기' : '조절 없음';
+    output.innerHTML = `
+      <div class="pitch-guide-summary"><strong>${direction}</strong><span>가장 가까운 음정으로 이동</span></div>
+      <div class="pitch-guide-values">
+        <div><span>Pitch</span><b>${signedPitchValue(guide.pitchSemitones)} semitone</b></div>
+        <div><span>Cents</span><b>${signedPitchValue(guide.fineCents, 1)} cent</b></div>
+        <div><span>총 이동량</span><b>${signedPitchValue(guide.totalSemitones, 3)} semitone</b></div>
+      </div>
+      ${guide.modeMismatch ? '<p class="pitch-guide-warning">목표의 장·단조가 다릅니다. 피치 조절은 기준음만 맞추며 Major와 Minor의 성격 자체는 바꾸지 못합니다.</p>' : ''}
+      ${Number(analysis.confidence || 0) < 0.52 ? '<p class="pitch-guide-warning">분석 신뢰도가 낮습니다. BGM과 함께 들어보고 ±1 semitone 주변도 비교해 보세요.</p>' : ''}`;
+  };
+  select.addEventListener('change', update);
+  update();
+}
+
 function showKeyAnalysisResult(sound, analysis) {
   const confidence = Math.round(Number(analysis?.confidence || 0) * 100);
   $('#resultsTitle').textContent = '사운드 조성(Key) 분석';
@@ -1663,7 +1702,14 @@ function showKeyAnalysisResult(sound, analysis) {
         </div>
         <p class="key-explanation">장·단조 프로파일, 코드 구성음, 시간대별 음정 안정성과 잡음 비율을 함께 분석한 결과입니다.</p>
         <div class="key-alternatives"><strong>가까운 후보</strong>${(analysis.alternatives || []).map((candidate) => `<span>${escapeHtml(candidate.display)} · ${escapeHtml(candidate.camelot)}</span>`).join('')}</div>
+        <section class="pitch-target-guide">
+          <div class="pitch-target-heading"><div><strong>BGM 목표 조성에 맞추기</strong><small>목표 Key를 선택하면 Pitch와 Cents 조절값을 계산합니다.</small></div>
+            <select id="pitchTargetKey">${window.PitchGuide.targetKeys().map((target) => `<option value="${target.index}:${target.mode}" ${target.index === window.PitchGuide.sourceIndexForKey(analysis.key) && target.mode === analysis.mode ? 'selected' : ''}>${escapeHtml(target.display)} · ${escapeHtml(target.korean)} · ${target.camelot}</option>`).join('')}</select>
+          </div>
+          <div id="pitchGuideOutput"></div>
+        </section>
       </div>`;
+    renderPitchTargetGuide(analysis);
   } else {
     $('#resultsContent').innerHTML = `
       <div class="key-result uncertain">
