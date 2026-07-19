@@ -1531,14 +1531,12 @@ async function trashSelection() {
   const ids = selectedIdList();
   if (!ids.length) return;
   if (state.playingId && ids.includes(state.playingId)) player.pause();
+  const listPosition = captureListPosition(ids);
   showToast(`${ids.length}개 파일을 휴지통으로 이동하는 중…`, 15000);
   try {
     const snapshot = await window.soundLibrary.removeSoundsBatch({ ids });
-    state.selectedIds.clear();
-    state.selectedId = null;
-    state.selectionAnchorId = null;
     state.inspectorOpen = false;
-    setLibrary(snapshot);
+    setLibrary(snapshot, { preserveListPosition: listPosition });
     showToast(`${ids.length}개 파일을 휴지통으로 이동했습니다.`);
   } catch (error) {
     showToast(`삭제 실패: ${error.message}`, 5000);
