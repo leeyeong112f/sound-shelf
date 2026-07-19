@@ -488,9 +488,11 @@ function renderList() {
   $('#resultSummary').textContent = `${sounds.length.toLocaleString()}개의 사운드`;
   const showLoading = state.loading && state.sounds.length === 0;
   const showOnboarding = !state.loading && state.sounds.length === 0;
+  const showNoResults = state.sounds.length > 0 && sounds.length === 0;
   $('#loadingState').classList.toggle('hidden', !showLoading);
   $('#emptyState').classList.toggle('hidden', !showOnboarding);
-  list.classList.toggle('hidden', state.sounds.length === 0);
+  $('#filterEmptyState').classList.toggle('hidden', !showNoResults);
+  list.classList.toggle('hidden', state.sounds.length === 0 || showNoResults);
 
   updateBatchToolbar();
   renderVirtualRows();
@@ -2372,6 +2374,18 @@ $('#sortDirectionBtn').addEventListener('click', (event) => {
 $('#sortApplyBtn').addEventListener('click', () => applyCurrentSort());
 $('#ratingFilter').addEventListener('change', (event) => { state.minimumRating = Number(event.target.value || 0); list.scrollTop = 0; renderList(); });
 $('#fileFilter').addEventListener('change', (event) => { state.fileFilter = event.target.value; list.scrollTop = 0; renderList(); });
+$('#resetFiltersBtn').addEventListener('click', () => {
+  clearTimeout(searchDebounce);
+  state.query = '';
+  state.tagFilters.clear();
+  state.fileFilter = 'all';
+  state.minimumRating = 0;
+  $('#searchInput').value = '';
+  $('#fileFilter').value = 'all';
+  $('#ratingFilter').value = '0';
+  list.scrollTop = 0;
+  render();
+});
 $('#batchTagsBtn').addEventListener('click', addTagsToSelection);
 $('#batchMoveBtn').addEventListener('click', moveSelectionToCategory);
 $('#batchFavoriteBtn').addEventListener('click', toggleFavoriteSelected);
