@@ -1626,17 +1626,23 @@ app.on('before-quit', (event) => {
   clearTimeout(watcherTimer);
   for (const watcher of folderWatchers.values()) watcher.close();
   folderWatchers.clear();
-  // 마지막 편집 후 150ms 안에 종료하면 디바운스 저장이 유실된다. 대기 중이면
-  // 종료를 한 번 미루고 flush한 뒤 다시 quit한다.
-  if (!quitFlushDone && saveTimer) {
+  // 대기 중인 디바운스 저장이 있거나 저장·배치가 진행 중이면 종료를 한 번 미루고
+  // 마무리를 기다린다(최대 3초). 마지막 편집이 파일에 닿기 전에 죽는 것을 막는다.
+  if (!quitFlushDone && (saveTimer || localMutations > 0)) {
     event.preventDefault();
     quitFlushDone = true;
-    clearTimeout(saveTimer);
-    saveTimer = null;
-    saveDb().catch(console.error).finally(() => {
-      localMutations -= 1; // 죽인 타이머가 보유하던 카운터 몫을 대신 해제
-      app.quit();
-    });
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+      saveDb().catch(console.error).finally(() => { localMutations -= 1; });
+    }
+    const deadline = Date.now() + 3000;
+    const wait = setInterval(() => {
+      if (localMutations <= 0 || Date.now() >= deadline) {
+        clearInterval(wait);
+        app.quit();
+      }
+    }, 50);
     return;
   }
   vaultStorage?.close();
