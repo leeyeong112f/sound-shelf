@@ -1156,6 +1156,7 @@ function openTagEditor(ids) {
     });
     const currentStates = new Map(initialStates);
     let settled = false;
+    let tagInputComposing = false;
 
     const stateIcon = (tagState) => tagState === 'all' ? '✓' : (tagState === 'some' ? '−' : '＋');
     const tagButtonMarkup = (key) => {
@@ -1214,6 +1215,8 @@ function openTagEditor(ids) {
       form.removeEventListener('submit', submit);
       searchField.removeEventListener('input', renderTagEditor);
       searchField.removeEventListener('keydown', searchKeydown);
+      searchField.removeEventListener('compositionstart', compositionStart);
+      searchField.removeEventListener('compositionend', compositionEnd);
       addButton.removeEventListener('click', addInputTags);
       choices.removeEventListener('click', choiceClick);
       selectedPanel.removeEventListener('click', choiceClick);
@@ -1243,9 +1246,17 @@ function openTagEditor(ids) {
     };
     const searchKeydown = (event) => {
       if (event.key !== 'Enter') return;
+      // 한글 IME 조합을 확정하는 Enter를 태그 추가 Enter로 처리하면
+      // "청양" 입력 뒤 마지막 조합 글자인 "양"이 별도 태그로 한 번 더 생긴다.
+      if (tagInputComposing || event.isComposing || event.keyCode === 229) return;
       event.preventDefault();
       event.stopPropagation();
       addInputTags();
+    };
+    const compositionStart = () => { tagInputComposing = true; };
+    const compositionEnd = () => {
+      tagInputComposing = false;
+      renderTagEditor();
     };
     const dialogKeydown = (event) => {
       if (event.key === 'Escape') {
@@ -1275,6 +1286,8 @@ function openTagEditor(ids) {
     form.addEventListener('submit', submit);
     searchField.addEventListener('input', renderTagEditor);
     searchField.addEventListener('keydown', searchKeydown);
+    searchField.addEventListener('compositionstart', compositionStart);
+    searchField.addEventListener('compositionend', compositionEnd);
     addButton.addEventListener('click', addInputTags);
     choices.addEventListener('click', choiceClick);
     selectedPanel.addEventListener('click', choiceClick);
