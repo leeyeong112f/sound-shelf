@@ -946,7 +946,14 @@ async function updateSelected(changes) {
   renderList();
   $('#detailSoundName').textContent = sound.title;
   clearTimeout(saveDebounce);
-  saveDebounce = setTimeout(async () => setLibrary(await window.soundLibrary.updateSound({ id: sound.id, ...changes })), 250);
+  saveDebounce = setTimeout(async () => {
+    try {
+      setLibrary(await window.soundLibrary.updateSound({ id: sound.id, ...changes }));
+    } catch (error) {
+      showToast(`저장하지 못했습니다: ${error.message}`, 4000);
+      try { setLibrary(await window.soundLibrary.getLibrary()); } catch {}
+    }
+  }, 250);
 }
 
 function openInputDialog({
