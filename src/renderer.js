@@ -79,6 +79,7 @@ const VIRTUAL_ROW_HEIGHT = 64;
 const VIRTUAL_BUFFER = 8;
 let virtualRenderFrame;
 let searchDebounce;
+let searchKeyboardNavigation = false;
 let duplicateGroups = [];
 let tagPanelResizeGesture = null;
 let tagUndoSnapshot = null;
@@ -1913,6 +1914,7 @@ async function renameSelectedSound() {
 async function runShortcut(action) {
   if (action === 'search') {
     clearTimeout(searchDebounce);
+    searchKeyboardNavigation = false;
     state.view = 'library';
     state.query = '';
     $('#searchInput').value = '';
@@ -2422,6 +2424,7 @@ $('#contextMenu').addEventListener('click', async (event) => {
 
 $('#searchInput').addEventListener('input', (event) => {
   clearTimeout(searchDebounce);
+  searchKeyboardNavigation = false;
   const value = event.target.value;
   searchDebounce = setTimeout(() => { state.query = value; list.scrollTop = 0; renderList(); }, 130);
 });
@@ -2746,10 +2749,12 @@ document.addEventListener('keydown', (event) => {
   }
   if (['ArrowUp', 'ArrowDown'].includes(event.key) && !isEditing && !event.metaKey && !event.ctrlKey && !event.altKey) {
     event.preventDefault();
+    if (isSearchField) searchKeyboardNavigation = true;
     moveSoundSelectionWithArrow(event.key === 'ArrowDown' ? 1 : -1);
     return;
   }
-  if (isSearchField && event.key === ' ' && event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {
+  if (isSearchField && event.key === ' ' && (event.shiftKey || searchKeyboardNavigation)
+    && !event.metaKey && !event.ctrlKey && !event.altKey) {
     event.preventDefault();
     if (!event.repeat) toggleSelectedPlayback();
     return;
