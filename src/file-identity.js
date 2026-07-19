@@ -9,6 +9,17 @@ function normalizedRelativeParent(value) {
   return normalized ? path.posix.dirname(normalized) : '';
 }
 
+function matchesStableFileFingerprint(sound, candidate, { mtimeToleranceMs = 2000 } = {}) {
+  const sourceSize = Number(sound?.size);
+  const candidateSize = Number(candidate?.size);
+  const sourceModifiedAt = Number(sound?.modifiedAt);
+  const candidateModifiedAt = Number(candidate?.modifiedAt);
+  if (!Number.isFinite(sourceSize) || !Number.isFinite(candidateSize) || sourceSize !== candidateSize) return false;
+  if (!Number.isFinite(sourceModifiedAt) || !Number.isFinite(candidateModifiedAt)) return false;
+  if (sourceModifiedAt <= 0 || candidateModifiedAt <= 0) return false;
+  return Math.abs(sourceModifiedAt - candidateModifiedAt) <= mtimeToleranceMs;
+}
+
 /**
  * Detect a rename without hashing the whole audio file.
  *
@@ -18,18 +29,11 @@ function normalizedRelativeParent(value) {
  * metadata edit arrives.
  */
 function matchesRenameFingerprint(sound, candidate, { mtimeToleranceMs = 2000 } = {}) {
-  const sourceSize = Number(sound?.size);
-  const candidateSize = Number(candidate?.size);
-  const sourceModifiedAt = Number(sound?.modifiedAt);
-  const candidateModifiedAt = Number(candidate?.modifiedAt);
-  if (!Number.isFinite(sourceSize) || !Number.isFinite(candidateSize) || sourceSize !== candidateSize) return false;
-  if (!Number.isFinite(sourceModifiedAt) || !Number.isFinite(candidateModifiedAt)) return false;
-  if (sourceModifiedAt <= 0 || candidateModifiedAt <= 0) return false;
-  if (Math.abs(sourceModifiedAt - candidateModifiedAt) > mtimeToleranceMs) return false;
+  if (!matchesStableFileFingerprint(sound, candidate, { mtimeToleranceMs })) return false;
 
   const sourceParent = normalizedRelativeParent(sound?.relativePath);
   const candidateParent = normalizedRelativeParent(candidate?.relativePath);
   return Boolean(sourceParent && candidateParent && sourceParent === candidateParent);
 }
 
-module.exports = { matchesRenameFingerprint, normalizedRelativeParent };
+module.exports = { matchesRenameFingerprint, matchesStableFileFingerprint, normalizedRelativeParent };

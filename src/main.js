@@ -10,7 +10,7 @@ const { promisify } = require('node:util');
 const os = require('node:os');
 const { VaultStorage, normalizedRelativePath, relativePathInside, writeJsonAtomic } = require('./vault-storage');
 const { mergeVaultState, pruneRedundantEdits } = require('./vault-sync');
-const { matchesRenameFingerprint } = require('./file-identity');
+const { matchesRenameFingerprint, matchesStableFileFingerprint } = require('./file-identity');
 const { failedProbeMetadata, mediaErrorMessage, needsTechnicalProbe } = require('./media-health');
 
 const execFileAsync = promisify(execFile);
@@ -1001,6 +1001,18 @@ async function relinkMissingFromFiles(filePaths) {
         .map((candidate) => candidate.filePath);
       if (renamedMatches.length === 1) {
         matches = renamedMatches;
+        discoveredRename = true;
+      }
+    }
+    if (matches.length !== 1) {
+      const movedAndRenamedMatches = candidateStats
+        .filter((candidate) => matchesStableFileFingerprint(sound, {
+          size: candidate.size,
+          modifiedAt: candidate.modifiedAt
+        }))
+        .map((candidate) => candidate.filePath);
+      if (movedAndRenamedMatches.length === 1) {
+        matches = movedAndRenamedMatches;
         discoveredRename = true;
       }
     }
