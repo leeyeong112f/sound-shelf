@@ -35,6 +35,7 @@ const state = {
   selectionAnchorId: null,
   inspectorOpen: false,
   playingId: null,
+  followSelectionPlayback: false,
   playRangeEnd: null,
   waveforms: new Map(),
   waveformLoading: new Set(),
@@ -143,7 +144,9 @@ function captureListPosition(movingIds = [], { keepFocusOnReorder = false } = {}
 function moveSoundSelectionWithArrow(direction) {
   if (!state.visibleSounds.length) return;
   const previousSelectedId = state.selectedId;
-  const continueAudition = Boolean(previousSelectedId && state.playingId === previousSelectedId && !player.paused);
+  const continueAudition = Boolean(previousSelectedId
+    && state.playingId === previousSelectedId
+    && state.followSelectionPlayback);
   const currentIndex = state.visibleSounds.findIndex((sound) => sound.id === state.selectedId);
   const fallbackIndex = direction > 0 ? 0 : state.visibleSounds.length - 1;
   const nextIndex = currentIndex < 0
@@ -826,11 +829,22 @@ function waveformRatio(event) {
   return Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
 }
 
+let previewPlaybackRequest = 0;
+
+function pausePreviewPlayback() {
+  previewPlaybackRequest += 1;
+  state.followSelectionPlayback = false;
+  player.pause();
+}
+
 async function startPreviewPlayback(sound) {
+  const request = ++previewPlaybackRequest;
   try {
     await player.play();
-    return true;
+    return request === previewPlaybackRequest;
   } catch (error) {
+    if (request !== previewPlaybackRequest || error?.name === 'AbortError') return false;
+    if (state.playingId === sound?.id) state.followSelectionPlayback = false;
     const message = sound?.missing
       ? '원본 파일이 없어 재생할 수 없습니다.'
       : '사운드를 재생할 수 없습니다. Google Drive 다운로드 상태나 파일 형식을 확인해 주세요.';
@@ -844,7 +858,7 @@ async function toggleFullPlayback(sound) {
   if (sound.missing) return showToast('원본 파일이 없어 재생할 수 없습니다.', 5000);
   state.playRangeEnd = null;
   if (state.playingId === sound.id && !player.paused) {
-    player.pause();
+    pausePreviewPlayback();
     return;
   }
   if (state.playingId !== sound.id) {
@@ -863,6 +877,7 @@ async function playSelection(sound, selection, resume = false) {
   }
   if (!resume || player.currentTime < selection.start || player.currentTime >= selection.end) player.currentTime = selection.start;
   state.playRangeEnd = selection.end;
+  state.followSelectionPlayback = true;
   await startPreviewPlayback(sound);
 }
 
@@ -884,6 +899,7 @@ async function seekAndPlay(sound, requestedTime) {
   }
   try { player.currentTime = targetTime; } catch {}
   updateTransportDisplay();
+  state.followSelectionPlayback = true;
   await startPreviewPlayback(sound);
 }
 
@@ -891,9 +907,10 @@ async function toggleSelectedPlayback() {
   const sound = selectedSound();
   if (!sound) return;
   if (state.playingId === sound.id && !player.paused) {
-    player.pause();
+    pausePreviewPlayback();
     return;
   }
+  state.followSelectionPlayback = true;
   const selection = state.selections.get(sound.id);
   if (selection) return playSelection(sound, selection, true);
   return toggleFullPlayback(sound);
@@ -939,7 +956,7 @@ function stopTransportAnimation() {
 function animateTransport() {
   updateTransportPosition();
   if (state.playRangeEnd !== null && player.currentTime >= state.playRangeEnd) {
-    player.pause();
+    pausePreviewPlayback();
     state.playRangeEnd = null;
     return;
   }
@@ -1127,7 +1144,7 @@ function openInputDialog({
       player.removeEventListener('play', refreshSuggestionPlayback);
       player.removeEventListener('pause', refreshSuggestionPlayback);
       player.removeEventListener('ended', refreshSuggestionPlayback);
-      if (suggestionPlayingId && state.playingId === suggestionPlayingId) player.pause();
+      if (suggestionPlayingId && state.playingId === suggestionPlayingId) pausePreviewPlayback();
       suggestionPlayingId = null;
       resolve(result);
     };
@@ -1533,7 +1550,7 @@ async function moveSelectionToCategory() {
 async function trashSelection() {
   const ids = selectedIdList();
   if (!ids.length) return;
-  if (state.playingId && ids.includes(state.playingId)) player.pause();
+  if (state.playingId && ids.includes(state.playingId)) pausePreviewPlayback();
   const listPosition = captureListPosition(ids);
   showToast(`${ids.length}개 파일을 휴지통으로 이동하는 중…`, 15000);
   try {
@@ -2103,7 +2120,7 @@ detailWrap.addEventListener('pointerdown', (event) => {
     ratio
   };
   if (scrubbing) {
-    player.pause();
+    pausePreviewPlayback();
     $('#detailPlayhead').classList.add('scrubbing');
   }
   detailWrap.setPointerCapture(event.pointerId);
@@ -2917,12 +2934,13 @@ player.addEventListener('pause', () => {
 player.addEventListener('ended', () => {
   stopTransportAnimation();
   state.playingId = null;
+  state.followSelectionPlayback = false;
   state.playRangeEnd = null;
   updateTransportDisplay();
 });
 player.addEventListener('timeupdate', () => {
   if (state.playRangeEnd !== null && player.currentTime >= state.playRangeEnd) {
-    player.pause();
+    pausePreviewPlayback();
     state.playRangeEnd = null;
   }
 });
