@@ -1732,9 +1732,15 @@ async function trashSelected() {
 }
 
 async function toggleFavoriteSelected() {
-  const sound = selectedSound();
-  if (!sound) return showToast('먼저 사운드를 선택해 주세요.');
-  setLibrary(await window.soundLibrary.updateSound({ id: sound.id, favorite: !sound.favorite }));
+  const ids = selectedIdList();
+  if (!ids.length) return showToast('먼저 사운드를 선택해 주세요.');
+  const selected = state.sounds.filter((sound) => ids.includes(sound.id));
+  const favorite = !selected.every((sound) => sound.favorite);
+  try {
+    setLibrary(await window.soundLibrary.updateSoundsBatch({ ids, updates: { favorite } }));
+  } catch (error) {
+    showToast(`즐겨찾기 변경 실패: ${error.message}`, 4000);
+  }
 }
 
 async function updateRatingsWithoutReordering(ids, rating) {
@@ -2356,7 +2362,7 @@ $('#ratingFilter').addEventListener('change', (event) => { state.minimumRating =
 $('#fileFilter').addEventListener('change', (event) => { state.fileFilter = event.target.value; list.scrollTop = 0; renderList(); });
 $('#batchTagsBtn').addEventListener('click', addTagsToSelection);
 $('#batchMoveBtn').addEventListener('click', moveSelectionToCategory);
-$('#batchFavoriteBtn').addEventListener('click', async () => setLibrary(await window.soundLibrary.updateSoundsBatch({ ids: selectedIdList(), updates: { favorite: true } })));
+$('#batchFavoriteBtn').addEventListener('click', toggleFavoriteSelected);
 $('#batchTrashBtn').addEventListener('click', trashSelection);
 $('#clearSelectionBtn').addEventListener('click', () => { state.selectedIds.clear(); state.selectedId = null; render(); });
 $('#addFolderBtn').addEventListener('click', async () => setLibrary(await window.soundLibrary.addFolder()));
