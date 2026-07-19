@@ -89,15 +89,25 @@ test('삭제 표식이 이기면 결과에서 빠진다', () => {
   assert.deepStrictEqual(result.sounds.map((item) => item.id), ['b']);
 });
 
-test('삭제 표식보다 새로운 편집이 있으면 되살아난다', () => {
+test('삭제 표식은 더 새로운 일반 편집보다 우선한다', () => {
   const base = { sounds: [sound('a')], folderOrder: [] };
   const edits = [
-    { machineId: 'mac-1', sounds: { a: { updatedAt: 500, deleted: true } } },
+    { machineId: 'mac-1', sounds: { a: { ...sound('a'), updatedAt: 500, deleted: true } } },
     { machineId: 'mac-2', sounds: { a: { ...sound('a', { title: '부활' }), updatedAt: 600 } } }
   ];
   const result = mergeVaultState(base, edits);
-  assert.strictEqual(result.sounds.length, 1);
-  assert.strictEqual(result.sounds[0].title, '부활');
+  assert.strictEqual(result.sounds.length, 0);
+  assert.strictEqual(result.deletedSounds.length, 1);
+  assert.strictEqual(result.deletedSounds[0].relativePath, '액션/a.wav');
+});
+
+test('삭제 우선 병합은 편집 파일 순서와 무관하다', () => {
+  const base = { sounds: [sound('a')], folderOrder: [] };
+  const edits = [
+    { machineId: 'mac-1', sounds: { a: { ...sound('a'), updatedAt: 700, deleted: true } } },
+    { machineId: 'mac-2', sounds: { a: { ...sound('a', { title: '더 최신 편집' }), updatedAt: 900 } } }
+  ];
+  assert.deepStrictEqual(mergeVaultState(base, edits), mergeVaultState(base, [...edits].reverse()));
 });
 
 test('베이스에 없는 사운드도 편집으로 추가된다', () => {

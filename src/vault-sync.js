@@ -41,7 +41,18 @@ function mergeVaultState(base, editSources) {
       // updatedAt 이 없거나 잘못된 레코드는 무효로 본다. 이게 없으면 동률(0 대 0)
       // 판정에서 machineId 비교가 걸려 잘못된 레코드가 베이스를 이겨버린다.
       if (stampOf(record) <= 0) continue;
-      if (!beats(record, machineId, winners.get(id), owners.get(id))) continue;
+      const current = winners.get(id);
+      if (record.deleted) {
+        // 삭제는 일반 편집보다 항상 우선한다. 다른 Mac의 오래된 스캔이나 이동 기록이
+        // 더 늦게 저장되더라도 사용자가 삭제한 항목을 되살리면 안 된다.
+        if (!current?.deleted || beats(record, machineId, current, owners.get(id))) {
+          winners.set(id, { ...(current || {}), ...record, id, deleted: true });
+          owners.set(id, machineId);
+        }
+        continue;
+      }
+      if (current?.deleted) continue;
+      if (!beats(record, machineId, current, owners.get(id))) continue;
       winners.set(id, { ...record, id });
       owners.set(id, machineId);
     }
@@ -62,8 +73,10 @@ function mergeVaultState(base, editSources) {
     }
   }
 
+  const records = [...winners.values()];
   return {
-    sounds: [...winners.values()].filter((record) => !record.deleted),
+    sounds: records.filter((record) => !record.deleted),
+    deletedSounds: records.filter((record) => record.deleted),
     folderOrder: [...new Set(folderOrder.order || [])],
     previewVolume: volume
   };

@@ -1442,7 +1442,7 @@ async function trashSelection() {
   if (state.playingId && ids.includes(state.playingId)) player.pause();
   showToast(`${ids.length}개 파일을 휴지통으로 이동하는 중…`, 15000);
   try {
-    const snapshot = await window.soundLibrary.removeSoundsBatch({ ids, trashFiles: true });
+    const snapshot = await window.soundLibrary.removeSoundsBatch({ ids });
     state.selectedIds.clear();
     state.selectedId = null;
     state.selectionAnchorId = null;
@@ -2501,15 +2501,6 @@ $('#inspectorRating').addEventListener('click', async (event) => {
 $('#revealBtn').addEventListener('click', () => { const sound = selectedSound(); if (sound) window.soundLibrary.reveal(sound.path); });
 $('#moveBtn').addEventListener('click', moveSelectedToFolder);
 $('#trashBtn').addEventListener('click', trashSelected);
-$('#removeBtn').addEventListener('click', async (event) => {
-  const sound = selectedSound();
-  if (!sound) return;
-  const trashFile = event.altKey;
-  state.selectedId = null;
-  state.selectedIds.delete(sound.id);
-  state.inspectorOpen = false;
-  setLibrary(await window.soundLibrary.removeSound({ id: sound.id, trashFile }));
-});
 
 document.addEventListener('keydown', (event) => {
   if (event.target.closest('.shortcut-capture.recording')) return;

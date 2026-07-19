@@ -72,6 +72,8 @@ let lastFullScanAt = 0;
 let startupLoading = true;
 let syncBaseline = new Map();
 let ownEdits = { sounds: {}, folderOrder: null, settings: null };
+let deletedSoundTombstones = new Map();
+let deletedRelativePaths = new Set();
 let lastEditStamps = '';
 let syncPollTimer;
 const SYNC_POLL_MS = 7000;
@@ -113,6 +115,22 @@ function findPython() {
 
 function wait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function setDeletedSoundTombstones(records = []) {
+  deletedSoundTombstones = new Map((records || []).filter((record) => record?.id)
+    .map((record) => [record.id, { ...record, deleted: true }]));
+  deletedRelativePaths = new Set([...deletedSoundTombstones.values()]
+    .map((record) => normalizedRelativePath(record.relativePath || ''))
+    .filter(Boolean));
+}
+
+function setSyncBaseline(merged) {
+  const live = merged?.sounds || [];
+  const deleted = merged?.deletedSounds || [];
+  syncBaseline = new Map([...live, ...deleted].filter((sound) => sound?.id)
+    .map((sound) => [sound.id, sound]));
+  setDeletedSoundTombstones(deleted);
 }
 
 function cleanDb(candidate) {
@@ -354,7 +372,7 @@ function applyMergedState(merged) {
   if (merged.previewVolume !== null) db.settings.previewVolume = merged.previewVolume;
   db.categories = [...new Set(db.sounds.map((sound) => sound.categoryPath).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, 'ko'));
-  syncBaseline = new Map(merged.sounds.map((sound) => [sound.id, sound]));
+  setSyncBaseline(merged);
   const soundsChanged = before !== editSignature(db.sounds.map(portableSound).filter(Boolean));
   const orderChanged = beforeOrder !== JSON.stringify(db.categoryOrder || []);
   const volumeChanged = beforeVolume !== db.settings.previewVolume;
@@ -437,7 +455,7 @@ async function activateVaultNow(rootPath, { legacySounds = [], legacyCategoryOrd
   db.sounds = deduplicateSoundsByPath(hydrated);
   db.categoryOrder = merged.folderOrder.length ? merged.folderOrder : legacyCategoryOrder;
   if (merged.previewVolume !== null) db.settings.previewVolume = merged.previewVolume;
-  syncBaseline = new Map(merged.sounds.map((sound) => [sound.id, sound]));
+  setSyncBaseline(merged);
   db.categories = [...new Set(db.sounds.map((sound) => sound.categoryPath).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, 'ko'));
   // Show the cached library right away — the folder repair and full rescan
@@ -526,13 +544,19 @@ function collectLocalEdits() {
 
   for (const [id, sound] of current) {
     const baseline = syncBaseline.get(id);
+    // 한 번 삭제한 ID는 명시적인 복원 기능 없이는 일반 스캔 결과로 되살리지 않는다.
+    if (ownEdits.sounds[id]?.deleted || deletedSoundTombstones.has(id)) continue;
     if (baseline && !baseline.deleted && sameSound(baseline, sound)) continue;
     ownEdits.sounds[id] = { ...sound, updatedAt: now };
   }
 
-  for (const [id, baseline] of syncBaseline) {
+  const known = new Map(syncBaseline);
+  for (const [id, record] of Object.entries(ownEdits.sounds)) {
+    if (!known.has(id)) known.set(id, { ...record, id });
+  }
+  for (const [id, baseline] of known) {
     if (current.has(id) || baseline.deleted) continue;
-    ownEdits.sounds[id] = { updatedAt: now, deleted: true };
+    ownEdits.sounds[id] = { ...baseline, id, updatedAt: now, deleted: true };
   }
 
   const order = [...new Set(db.categoryOrder || [])];
@@ -546,9 +570,14 @@ function collectLocalEdits() {
   }
 
   syncBaseline = new Map([...current].map(([id, sound]) => [id, { ...sound, updatedAt: ownEdits.sounds[id]?.updatedAt ?? syncBaseline.get(id)?.updatedAt ?? 0 }]));
+  const tombstones = [...deletedSoundTombstones.values()];
   for (const [id, record] of Object.entries(ownEdits.sounds)) {
-    if (record.deleted) syncBaseline.set(id, { id, deleted: true, updatedAt: record.updatedAt });
+    if (!record.deleted) continue;
+    const tombstone = { ...record, id, deleted: true };
+    syncBaseline.set(id, tombstone);
+    tombstones.push(tombstone);
   }
+  setDeletedSoundTombstones(tombstones);
 }
 
 async function saveDb() {
@@ -831,7 +860,7 @@ async function walkCategoryFolders(rootPath) {
   return results;
 }
 
-async function indexFiles(filePaths, { reportProgress = true, categoryFolders = null } = {}) {
+async function indexFiles(filePaths, { reportProgress = true, categoryFolders = null, allowRestore = false } = {}) {
   const existingByPath = new Map(db.sounds.map((sound) => [normalizedFsPath(sound.path), sound]));
   const existingByRelativePath = new Map(db.sounds
     .filter((sound) => sound.relativePath)
@@ -846,11 +875,14 @@ async function indexFiles(filePaths, { reportProgress = true, categoryFolders = 
     // is a disposable transport artifact and must never become library data.
     if (isTemporaryClipPath(filePath)) continue;
     const relativePath = soundRelativePath(filePath);
+    const indexedCurrent = existingByPath.get(normalizedFsPath(filePath))
+      || (relativePath ? existingByRelativePath.get(relativePath) : null);
+    if (!allowRestore && !indexedCurrent && relativePath
+      && deletedRelativePaths.has(normalizedRelativePath(relativePath))) continue;
     const stat = await fsp.stat(filePath).catch(() => null);
     if (!stat?.isFile()) continue;
 
-    let current = existingByPath.get(normalizedFsPath(filePath))
-      || (relativePath ? existingByRelativePath.get(relativePath) : null);
+    let current = indexedCurrent;
     let discoveredRename = false;
     if (!current) {
       const normalizedName = path.basename(filePath).normalize('NFC').toLocaleLowerCase('ko');
@@ -1006,7 +1038,7 @@ async function relinkMissingFromFiles(filePaths) {
   return { missing: missing.length, relinked, unresolved: missing.length - relinked, idChanges };
 }
 
-async function rescanWatchedFolders({ reportProgress = true } = {}) {
+async function rescanWatchedFolders({ reportProgress = true, allowRestore = false } = {}) {
   const [groups, categoryGroups] = await Promise.all([
     Promise.all(db.settings.watchedFolders.map(walkAudioFiles)),
     Promise.all(db.settings.watchedFolders.map(walkCategoryFolders))
@@ -1014,7 +1046,11 @@ async function rescanWatchedFolders({ reportProgress = true } = {}) {
   const files = [...new Set(groups.flat())];
   lastFullScanAt = Date.now();
   const relinkResult = await relinkMissingFromFiles(files);
-  const snapshot = await indexFiles(files, { reportProgress, categoryFolders: [...new Set(categoryGroups.flat())] });
+  const snapshot = await indexFiles(files, {
+    reportProgress,
+    categoryFolders: [...new Set(categoryGroups.flat())],
+    allowRestore
+  });
   db.categories = [...new Set([...categoryGroups.flat(), ...db.sounds.map((sound) => sound.categoryPath)].filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, 'ko'));
   await saveDb();
@@ -1624,7 +1660,7 @@ ipcMain.handle('library:add-files', async () => {
       moved.push(destination);
     }
   }
-  return indexFiles(moved);
+  return indexFiles(moved, { allowRestore: true });
 });
 
 ipcMain.handle('library:add-paths', async (_event, paths) => {
@@ -1658,7 +1694,7 @@ ipcMain.handle('library:add-paths', async (_event, paths) => {
     }
   }
   refreshFolderWatchers();
-  return indexFiles([...new Set(files)]);
+  return indexFiles([...new Set(files)], { allowRestore: true });
 });
 
 ipcMain.handle('library:add-folder', async () => {
@@ -1873,12 +1909,10 @@ ipcMain.handle('library:move-category-batch', (_event, { ids, category }) => wit
   };
 }));
 
-ipcMain.handle('library:remove-batch', (_event, { ids, trashFiles }) => withLocalMutation(async () => {
+ipcMain.handle('library:remove-batch', (_event, { ids }) => withLocalMutation(async () => {
   const selected = new Set(ids || []);
   const removing = db.sounds.filter((sound) => selected.has(sound.id));
-  if (trashFiles) {
-    for (const sound of removing) if (fs.existsSync(sound.path)) await shell.trashItem(sound.path);
-  }
+  for (const sound of removing) if (fs.existsSync(sound.path)) await shell.trashItem(sound.path);
   db.sounds = db.sounds.filter((sound) => !selected.has(sound.id));
   waveformCache.clear();
   await saveDb();
@@ -2216,7 +2250,7 @@ ipcMain.handle('category:add-files', async (_event, category) => {
   if (result.canceled) return null;
   const moved = [];
   for (const filePath of result.filePaths) moved.push(await moveFileIntoCategory(filePath, category));
-  return indexFiles(moved);
+  return indexFiles(moved, { allowRestore: true });
 });
 
 ipcMain.handle('category:drop-paths', async (_event, { category, paths }) => {
@@ -2253,8 +2287,8 @@ ipcMain.handle('category:drop-paths', async (_event, { category, paths }) => {
       movedFiles.push(destination);
     } else movedFiles.push(await moveFileIntoCategory(itemPath, targetCategory));
   }
-  if (movedFiles.length) snapshot = await indexFiles(movedFiles);
-  if (needsRescan) snapshot = await rescanWatchedFolders({ reportProgress: false });
+  if (movedFiles.length) snapshot = await indexFiles(movedFiles, { allowRestore: true });
+  if (needsRescan) snapshot = await rescanWatchedFolders({ reportProgress: false, allowRestore: true });
   if (!snapshot) snapshot = await rescanWatchedFolders({ reportProgress: false });
   return snapshot;
 });
@@ -2273,14 +2307,14 @@ ipcMain.handle('preview-volume:set', async (_event, volume) => {
 
 ipcMain.on('shortcuts:capture', (_event, active) => { shortcutCapture = Boolean(active); });
 
-ipcMain.handle('library:remove', async (_event, { id, trashFile }) => {
+ipcMain.handle('library:remove', (_event, { id }) => withLocalMutation(async () => {
   const index = db.sounds.findIndex((item) => item.id === id);
   if (index < 0) return librarySnapshot();
   const [sound] = db.sounds.splice(index, 1);
-  if (trashFile && fs.existsSync(sound.path)) await shell.trashItem(sound.path);
+  if (fs.existsSync(sound.path)) await shell.trashItem(sound.path);
   await saveDb();
   return librarySnapshot();
-});
+}));
 
 ipcMain.handle('library:reveal', async (_event, filePath) => {
   shell.showItemInFolder(filePath);
@@ -2435,7 +2469,7 @@ ipcMain.handle('library:create-clip', async (_event, payload) => {
       '-ss', start.toFixed(6), '-t', (end - start).toFixed(6),
       '-map', '0:a:0', '-vn', '-c:a', 'pcm_s24le', outputPath
     ], { maxBuffer: 1024 * 1024 * 4, timeout: 60000 });
-    await indexFiles([outputPath], { reportProgress: false });
+    await indexFiles([outputPath], { reportProgress: false, allowRestore: true });
     const created = db.sounds.find((item) => normalizedFsPath(item.path) === normalizedFsPath(outputPath));
     if (!created) throw new Error('생성된 파일을 라이브러리에 추가하지 못했습니다.');
     created.tags = [...new Set(sound.tags || [])];
