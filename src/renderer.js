@@ -46,6 +46,7 @@ const state = {
   categoryAnchor: null,
   sortBy: 'title',
   sortDirection: 1,
+  frozenRatingOrder: null,
   minimumRating: 0,
   fileFilter: 'all',
   tagFilters: new Set(),
@@ -183,9 +184,23 @@ function parseSearchQuery(value) {
   };
 }
 
+function compareSoundsForCurrentSort(a, b) {
+  let comparison = 0;
+  if (state.sortBy === 'title') comparison = a.title.localeCompare(b.title, 'ko', { numeric: true });
+  else comparison = Number(a[state.sortBy] || 0) - Number(b[state.sortBy] || 0);
+  return comparison * state.sortDirection;
+}
+
+function freezeRatingSortOrder() {
+  if (state.sortBy !== 'rating' || state.frozenRatingOrder) return;
+  state.frozenRatingOrder = [...state.sounds]
+    .sort(compareSoundsForCurrentSort)
+    .map((sound) => sound.id);
+}
+
 function filteredSounds() {
   const { textTerms, tagTerms } = parseSearchQuery(state.query);
-  return state.sounds.filter((sound) => {
+  const sounds = state.sounds.filter((sound) => {
     if (state.filter === 'favorites' && !sound.favorite) return false;
     if (state.filter.startsWith('category:')) {
       const selectedPath = state.filter.slice(9);
@@ -208,12 +223,19 @@ function filteredSounds() {
     const matchesAnyTag = !tagTerms.length
       || tagTerms.some((term) => tags.some((tag) => tag.includes(term)));
     return matchesText && matchesAnyTag;
-  }).sort((a, b) => {
-    let comparison = 0;
-    if (state.sortBy === 'title') comparison = a.title.localeCompare(b.title, 'ko', { numeric: true });
-    else comparison = Number(a[state.sortBy] || 0) - Number(b[state.sortBy] || 0);
-    return comparison * state.sortDirection;
   });
+  if (state.sortBy === 'rating' && state.frozenRatingOrder) {
+    const positions = new Map(state.frozenRatingOrder.map((id, index) => [id, index]));
+    return sounds.sort((a, b) => {
+      const aPosition = positions.get(a.id);
+      const bPosition = positions.get(b.id);
+      if (aPosition !== undefined && bPosition !== undefined) return aPosition - bPosition;
+      if (aPosition !== undefined) return -1;
+      if (bPosition !== undefined) return 1;
+      return compareSoundsForCurrentSort(a, b);
+    });
+  }
+  return sounds.sort(compareSoundsForCurrentSort);
 }
 
 function setLibrary(snapshot, { preserveListPosition = null } = {}) {
@@ -1583,14 +1605,28 @@ async function toggleFavoriteSelected() {
   setLibrary(await window.soundLibrary.updateSound({ id: sound.id, favorite: !sound.favorite }));
 }
 
+async function updateRatingsWithoutReordering(ids, rating) {
+  const soundIds = [...new Set(ids || [])].filter((id) => state.sounds.some((sound) => sound.id === id));
+  if (!soundIds.length) return null;
+  const listPosition = captureListPosition(soundIds);
+  const previousFrozenOrder = state.frozenRatingOrder;
+  freezeRatingSortOrder();
+  try {
+    const snapshot = await window.soundLibrary.updateSoundsBatch({ ids: soundIds, updates: { rating } });
+    setLibrary(snapshot, { preserveListPosition: listPosition });
+    return snapshot;
+  } catch (error) {
+    state.frozenRatingOrder = previousFrozenOrder;
+    throw error;
+  }
+}
+
 async function setSelectedRating(rating) {
   const ids = selectedIdList();
   if (!ids.length) return showToast('별점을 지정할 사운드를 먼저 선택해 주세요.');
   const value = Math.max(1, Math.min(5, Number(rating) || 1));
-  const listPosition = captureListPosition(ids);
   try {
-    const snapshot = await window.soundLibrary.updateSoundsBatch({ ids, updates: { rating: value } });
-    setLibrary(snapshot, { preserveListPosition: listPosition });
+    await updateRatingsWithoutReordering(ids, value);
     showToast(ids.length === 1
       ? `별점 ${value}점을 지정했습니다.`
       : `${ids.length}개 사운드에 별점 ${value}점을 지정했습니다.`);
@@ -1711,7 +1747,11 @@ list.addEventListener('click', async (event) => {
   if (action === 'rating') {
     const rating = Number(event.target.closest('[data-rating]')?.dataset.rating || 0);
     const nextRating = Number(sound.rating || 0) === rating ? 0 : rating;
-    setLibrary(await window.soundLibrary.updateSound({ id: sound.id, rating: nextRating }));
+    try {
+      await updateRatingsWithoutReordering([sound.id], nextRating);
+    } catch (error) {
+      showToast(`별점 지정 실패: ${error.message}`, 5000);
+    }
     return;
   }
   if (action === 'inspect') {
@@ -2159,8 +2199,22 @@ $('#searchInput').addEventListener('input', (event) => {
   const value = event.target.value;
   searchDebounce = setTimeout(() => { state.query = value; list.scrollTop = 0; renderList(); }, 130);
 });
-$('#sortSelect').addEventListener('change', (event) => { state.sortBy = event.target.value; list.scrollTop = 0; renderList(); });
-$('#sortDirectionBtn').addEventListener('click', (event) => { state.sortDirection *= -1; event.currentTarget.textContent = state.sortDirection > 0 ? '↑' : '↓'; renderList(); });
+function applyCurrentSort({ resetScroll = false } = {}) {
+  state.frozenRatingOrder = null;
+  if (resetScroll) list.scrollTop = 0;
+  renderList();
+}
+
+$('#sortSelect').addEventListener('change', (event) => {
+  state.sortBy = event.target.value;
+  applyCurrentSort({ resetScroll: true });
+});
+$('#sortDirectionBtn').addEventListener('click', (event) => {
+  state.sortDirection *= -1;
+  event.currentTarget.textContent = state.sortDirection > 0 ? '↑' : '↓';
+  applyCurrentSort();
+});
+$('#sortApplyBtn').addEventListener('click', () => applyCurrentSort());
 $('#ratingFilter').addEventListener('change', (event) => { state.minimumRating = Number(event.target.value || 0); list.scrollTop = 0; renderList(); });
 $('#fileFilter').addEventListener('change', (event) => { state.fileFilter = event.target.value; list.scrollTop = 0; renderList(); });
 $('#batchTagsBtn').addEventListener('click', addTagsToSelection);
@@ -2370,13 +2424,16 @@ $('#editTitle').addEventListener('input', (event) => updateSelected({ title: eve
 $('#editCategory').addEventListener('input', (event) => updateSelected({ category: event.target.value }));
 $('#editTags').addEventListener('input', (event) => updateSelected({ tags: event.target.value.split(',').map((tag) => tag.trim()).filter(Boolean) }));
 $('#editNotes').addEventListener('input', (event) => updateSelected({ notes: event.target.value }));
-$('#inspectorRating').addEventListener('click', (event) => {
+$('#inspectorRating').addEventListener('click', async (event) => {
   const button = event.target.closest('[data-rating]');
   const sound = selectedSound();
   if (!button || !sound) return;
   const rating = Number(button.dataset.rating);
-  updateSelected({ rating: Number(sound.rating || 0) === rating ? 0 : rating });
-  renderInspector();
+  try {
+    await updateRatingsWithoutReordering([sound.id], Number(sound.rating || 0) === rating ? 0 : rating);
+  } catch (error) {
+    showToast(`별점 지정 실패: ${error.message}`, 5000);
+  }
 });
 $('#revealBtn').addEventListener('click', () => { const sound = selectedSound(); if (sound) window.soundLibrary.reveal(sound.path); });
 $('#moveBtn').addEventListener('click', moveSelectedToFolder);
