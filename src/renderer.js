@@ -1277,6 +1277,7 @@ function openTagEditor(ids) {
       if (button) toggleTag(button.dataset.tagChoice);
     };
     const searchKeydown = (event) => {
+      if (event.key === 'Enter' && event.metaKey) return;
       const spaceKey = event.key === ' ' || event.code === 'Space';
       const addKey = event.key === 'Enter' || spaceKey;
       if (!addKey || event.metaKey || event.ctrlKey || event.altKey) return;
@@ -1302,6 +1303,12 @@ function openTagEditor(ids) {
       }, 0);
     };
     const dialogKeydown = (event) => {
+      if (event.key === 'Enter' && event.metaKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        form.requestSubmit();
+        return;
+      }
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
