@@ -46,6 +46,7 @@ const state = {
   categoryAnchor: null,
   sortBy: 'title',
   sortDirection: 1,
+  frozenTitleOrder: null,
   frozenRatingOrder: null,
   minimumRating: 0,
   fileFilter: 'all',
@@ -198,6 +199,13 @@ function freezeRatingSortOrder() {
     .map((sound) => sound.id);
 }
 
+function freezeTitleSortOrder() {
+  if (state.sortBy !== 'title' || state.frozenTitleOrder) return;
+  state.frozenTitleOrder = [...state.sounds]
+    .sort(compareSoundsForCurrentSort)
+    .map((sound) => sound.id);
+}
+
 function filteredSounds() {
   const { textTerms, tagTerms } = parseSearchQuery(state.query);
   const sounds = state.sounds.filter((sound) => {
@@ -224,8 +232,11 @@ function filteredSounds() {
       || tagTerms.some((term) => tags.some((tag) => tag.includes(term)));
     return matchesText && matchesAnyTag;
   });
-  if (state.sortBy === 'rating' && state.frozenRatingOrder) {
-    const positions = new Map(state.frozenRatingOrder.map((id, index) => [id, index]));
+  const frozenOrder = state.sortBy === 'title'
+    ? state.frozenTitleOrder
+    : state.sortBy === 'rating' ? state.frozenRatingOrder : null;
+  if (frozenOrder) {
+    const positions = new Map(frozenOrder.map((id, index) => [id, index]));
     return sounds.sort((a, b) => {
       const aPosition = positions.get(a.id);
       const bPosition = positions.get(b.id);
@@ -1735,12 +1746,15 @@ async function renameSelectedSound() {
     confirmWithShiftSpace: true
   });
   if (!name || name === currentName) return;
-  const listPosition = captureListPosition([sound.id], { keepFocusOnReorder: true });
+  const previousFrozenOrder = state.frozenTitleOrder;
+  freezeTitleSortOrder();
+  const listPosition = captureListPosition([sound.id]);
   try {
     const snapshot = await window.soundLibrary.renameSound({ id: sound.id, name });
     setLibrary(snapshot, { preserveListPosition: listPosition });
-    showToast('이름을 변경했습니다. 현재 탐색 위치를 유지합니다.');
+    showToast('이름을 변경했습니다. 정렬 버튼을 누르기 전까지 현재 위치를 유지합니다.');
   } catch (error) {
+    state.frozenTitleOrder = previousFrozenOrder;
     showToast(`이름 변경 실패: ${error.message}`, 5000);
   }
 }
@@ -2255,6 +2269,7 @@ $('#searchInput').addEventListener('input', (event) => {
   searchDebounce = setTimeout(() => { state.query = value; list.scrollTop = 0; renderList(); }, 130);
 });
 function applyCurrentSort({ resetScroll = false } = {}) {
+  state.frozenTitleOrder = null;
   state.frozenRatingOrder = null;
   if (resetScroll) list.scrollTop = 0;
   renderList();
