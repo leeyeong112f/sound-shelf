@@ -141,6 +141,8 @@ function captureListPosition(movingIds = [], { keepFocusOnReorder = false } = {}
 
 function moveSoundSelectionWithArrow(direction) {
   if (!state.visibleSounds.length) return;
+  const previousSelectedId = state.selectedId;
+  const continueAudition = Boolean(previousSelectedId && state.playingId === previousSelectedId && !player.paused);
   const currentIndex = state.visibleSounds.findIndex((sound) => sound.id === state.selectedId);
   const fallbackIndex = direction > 0 ? 0 : state.visibleSounds.length - 1;
   const nextIndex = currentIndex < 0
@@ -161,6 +163,7 @@ function moveSoundSelectionWithArrow(direction) {
   updateBatchToolbar();
   renderInspector();
   renderDetailPanel();
+  if (continueAudition && nextSound.id !== previousSelectedId) toggleFullPlayback(nextSound);
 }
 
 function showToast(message, duration = 3000) {
