@@ -222,6 +222,7 @@ function filteredSounds() {
     if (Number(sound.rating || 0) < state.minimumRating) return false;
     if (state.fileFilter === 'missing' && !sound.missing) return false;
     if (state.fileFilter === 'available' && sound.missing) return false;
+    if (state.fileFilter === 'untagged' && (sound.tags || []).length > 0) return false;
     if (!textTerms.length && !tagTerms.length) return true;
     const haystack = [sound.title, sound.fileName, sound.category, sound.categoryPath, sound.notes,
       ...(sound.embeddedTags || []), ...Object.values(sound.embeddedMetadata || {})]
