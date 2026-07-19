@@ -1388,16 +1388,22 @@ async function moveSelectedToFolder() {
   }
 }
 
-async function createSubfolder(category) {
+async function createCategoryFolder(parentCategory = '') {
+  const rootLevel = !parentCategory || parentCategory === '미분류';
+  const vaultName = state.vault?.name || '현재 볼트';
   const name = await openInputDialog({
-    title: '새 하위 폴더', description: `“${category}” 안에 만들 폴더 이름을 입력하세요.`, placeholder: '새 폴더'
+    title: rootLevel ? '새 최상위 카테고리' : '새 하위 폴더',
+    description: rootLevel
+      ? `“${vaultName}” 바로 아래에 만들 최상위 폴더 이름을 입력하세요.`
+      : `“${parentCategory}” 안에 만들 하위 폴더 이름을 입력하세요.`,
+    placeholder: rootLevel ? '새 최상위 폴더' : '새 하위 폴더'
   });
   if (!name) return;
   try {
-    setLibrary(await window.soundLibrary.createCategoryFolder({ parentCategory: category, name }));
-    state.collapsedCategories.delete(category);
+    setLibrary(await window.soundLibrary.createCategoryFolder({ parentCategory: rootLevel ? '' : parentCategory, name }));
+    if (!rootLevel) state.collapsedCategories.delete(parentCategory);
     renderSidebar();
-    showToast('새 폴더를 만들었습니다.');
+    showToast(rootLevel ? '새 최상위 카테고리 폴더를 만들었습니다.' : '새 하위 폴더를 만들었습니다.');
   } catch (error) {
     showToast(`폴더 생성 실패: ${error.message}`, 5000);
   }
@@ -1663,8 +1669,8 @@ async function runShortcut(action) {
   else if (action === 'renameSound') await renameSelectedSound();
   else if (action === 'insertResolve') await insertSelectedIntoResolve();
   else if (action === 'newSubfolder') {
-    const parent = state.filter.startsWith('category:') ? state.filter.slice(9) : '미분류';
-    await createSubfolder(parent);
+    const parent = state.filter.startsWith('category:') ? state.filter.slice(9) : '';
+    await createCategoryFolder(parent);
   }
 }
 
@@ -2097,7 +2103,7 @@ $('#contextMenu').addEventListener('click', async (event) => {
   hideContextMenu();
   if (target.type === 'category') {
     if (action === 'toggle-category') return toggleCategoryCollapse(target.category);
-    if (action === 'new-folder') return createSubfolder(target.category);
+    if (action === 'new-folder') return createCategoryFolder(target.category);
     if (action === 'add-files') return addFilesToCategory(target.category);
     if (action === 'rename-category') return renameCategory(target.category);
     if (action === 'move-category-up') {
@@ -2165,7 +2171,7 @@ $('#clearSelectionBtn').addEventListener('click', () => { state.selectedIds.clea
 $('#addFolderBtn').addEventListener('click', async () => setLibrary(await window.soundLibrary.addFolder()));
 $('#newRootCategoryBtn').addEventListener('click', (event) => {
   event.stopPropagation();
-  createSubfolder('미분류');
+  createCategoryFolder('');
 });
 $('#emptyAddBtn').addEventListener('click', async () => setLibrary(await window.soundLibrary.addFolder()));
 $('#addFilesBtn').addEventListener('click', async () => setLibrary(await window.soundLibrary.addFiles()));

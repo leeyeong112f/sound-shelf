@@ -622,7 +622,16 @@ function vaultSnapshot() {
 }
 
 function librarySnapshot() {
-  const categoryPaths = [...new Set([...db.categories, ...db.sounds.map((sound) => sound.categoryPath || sound.category)].filter(Boolean))];
+  const orderedEmptyFolders = [...new Set(db.categoryOrder || [])].filter((category) => {
+    if (!category || category === '미분류') return false;
+    const folder = categoryFolderPath(category);
+    return Boolean(folder && fs.existsSync(folder));
+  });
+  const categoryPaths = [...new Set([
+    ...db.categories,
+    ...orderedEmptyFolders,
+    ...db.sounds.map((sound) => sound.categoryPath || sound.category)
+  ].filter(Boolean))];
   const savedOrder = [...new Set(db.categoryOrder || [])].filter((category) => categoryPaths.includes(category));
   const unordered = categoryPaths
     .filter((category) => !savedOrder.includes(category))
@@ -2032,14 +2041,15 @@ ipcMain.handle('library:move-category', async (_event, { id, category }) => {
 
 ipcMain.handle('category:create', async (_event, { parentCategory, name }) => {
   const parent = normalizeCategoryPath(parentCategory);
+  const rootLevel = !parent || parent === '미분류';
   const safeName = normalizeCategoryPath(name).split('/').pop();
   if (!safeName) throw new Error('새 폴더 이름을 입력해 주세요.');
-  const parentFolder = categoryFolderPath(parent);
+  const parentFolder = categoryFolderPath(rootLevel ? '' : parent);
   if (!parentFolder) throw new Error('상위 폴더를 찾을 수 없습니다.');
   const folder = path.join(parentFolder, safeName);
   if (fs.existsSync(folder)) throw new Error('같은 이름의 폴더가 이미 있습니다.');
   await fsp.mkdir(folder, { recursive: true });
-  const categoryPath = parent && parent !== '미분류' ? `${parent}/${safeName}` : safeName;
+  const categoryPath = rootLevel ? safeName : `${parent}/${safeName}`;
   if (!db.categories.includes(categoryPath)) db.categories.push(categoryPath);
   db.categoryOrder = [...new Set([...(db.categoryOrder || []), categoryPath])];
   db.categories.sort((a, b) => a.localeCompare(b, 'ko'));
@@ -2139,6 +2149,7 @@ ipcMain.handle('category:trash', async (_event, category) => {
     return soundCategory !== normalized && !soundCategory?.startsWith(`${normalized}/`);
   });
   db.categories = db.categories.filter((item) => item !== normalized && !item.startsWith(`${normalized}/`));
+  db.categoryOrder = (db.categoryOrder || []).filter((item) => item !== normalized && !item.startsWith(`${normalized}/`));
   waveformCache.clear();
   await saveDb();
   return librarySnapshot();
@@ -2156,6 +2167,7 @@ ipcMain.handle('category:trash-batch', async (_event, categories) => {
       return soundCategory !== category && !soundCategory?.startsWith(`${category}/`);
     });
     db.categories = db.categories.filter((item) => item !== category && !item.startsWith(`${category}/`));
+    db.categoryOrder = (db.categoryOrder || []).filter((item) => item !== category && !item.startsWith(`${category}/`));
   }
   waveformCache.clear();
   await saveDb();
