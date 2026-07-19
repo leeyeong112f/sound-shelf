@@ -182,6 +182,7 @@ h1 { margin: 4px 0 2px; font-size: 28px; letter-spacing: -.03em; }
 .settings-heading p, .settings-footer p { margin: 0; color: var(--muted); }
 .vault-settings { margin-top: 22px; padding: 18px; border: 1px solid #34402e; border-radius: 14px; background: linear-gradient(145deg, #192018, #15171b 55%); }
 .vault-settings-title { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 16px; }
+.vault-title-actions { flex: 0 0 auto; display: flex; gap: 8px; }
 .vault-settings-title h2 { margin: 5px 0 3px; font-size: 20px; }
 .vault-settings-title p { margin: 0; max-width: 720px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .vault-badge { color: var(--accent); font-size: 10px; font-weight: 900; letter-spacing: .12em; }

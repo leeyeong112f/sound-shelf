@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('soundLibrary', {
   locateVault: () => ipcRenderer.invoke('vault:locate'),
   moveVault: () => ipcRenderer.invoke('vault:move'),
   checkVault: () => ipcRenderer.invoke('vault:check'),
+  compactVault: () => ipcRenderer.invoke('vault:compact'),
   revealVault: () => ipcRenderer.invoke('vault:reveal'),
   rescan: () => ipcRenderer.invoke('library:rescan'),
   updateSound: (payload) => ipcRenderer.invoke('library:update', payload),

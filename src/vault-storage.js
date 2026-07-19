@@ -260,6 +260,25 @@ class VaultStorage {
     });
   }
 
+  // 볼트 압축 전용. 편집 파일을 전부 지운다 — 호출자는 병합 결과를 새 베이스로
+  // 굳힌 직후여야 하고, 삭제 표식을 자기 편집 파일로 승계할 책임이 있다.
+  async clearEditFiles() {
+    let entries = [];
+    try {
+      entries = await fsp.readdir(this.editsDirectory, { withFileTypes: true });
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      return 0;
+    }
+    let removed = 0;
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      await fsp.unlink(path.join(this.editsDirectory, entry.name)).catch(() => {});
+      removed += 1;
+    }
+    return removed;
+  }
+
   cachedSounds() {
     if (!this.database) return [];
     const rows = this.database.prepare('SELECT * FROM technical_cache').all();

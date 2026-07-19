@@ -585,6 +585,7 @@ function renderSettings() {
     ? `${state.vault.connected === false ? '연결 끊김 · ' : ''}${state.vault.root}`
     : '볼트 폴더를 선택해 주세요.';
   $('#revealVaultBtn').disabled = !state.vault?.connected;
+  $('#compactVaultBtn').disabled = !state.vault?.connected;
   $('#moveVaultBtn').disabled = !state.vault?.connected;
   $('#locateVaultBtn').disabled = !state.vault;
   $('#checkVaultBtn').disabled = !state.vault?.connected;
@@ -2398,6 +2399,21 @@ $('#checkVaultBtn').addEventListener('click', async () => {
     $('#vaultHealth').textContent = `${result.ok ? '✓ 볼트 구조 정상' : '⚠ 확인 필요'} · ${message}`;
     showToast(result.ok ? '볼트 연결 상태가 정상입니다.' : '볼트에서 확인할 항목이 발견되었습니다.', 5000);
   } catch (error) { alert(error.message); }
+});
+$('#compactVaultBtn').addEventListener('click', async () => {
+  const ok = confirm(
+    '볼트를 압축합니다.\n\n'
+    + '모든 편집 기록을 베이스에 접어 넣고 편집 파일을 정리합니다.\n'
+    + '실행 전에 다른 Mac의 Sound Shelf가 종료되어 있는지 확인해 주세요.\n\n'
+    + '계속할까요?'
+  );
+  if (!ok) return;
+  try {
+    const result = await window.soundLibrary.compactVault();
+    showToast(`볼트 압축 완료 — 사운드 ${result.sounds}개를 베이스로 접었습니다 (삭제 기록 ${result.tombstones}건 유지).`, 3500);
+  } catch (error) {
+    showToast(`볼트 압축 실패: ${error.message}`, 4000);
+  }
 });
 $('#revealVaultBtn').addEventListener('click', async () => {
   try { await window.soundLibrary.revealVault(); } catch (error) { alert(error.message); }

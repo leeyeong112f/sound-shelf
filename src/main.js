@@ -1814,6 +1814,47 @@ ipcMain.handle('vault:check', async () => {
   return { ...result, vault: activeVault };
 });
 
+ipcMain.handle('vault:compact', () => withLocalMutation(async () => {
+  if (!vaultStorage || !activeVault) throw new Error('현재 열린 볼트가 없습니다.');
+  if (!fs.existsSync(activeVault.root)) throw new Error('볼트 폴더에 연결되어 있지 않습니다.');
+  // 스캔·폴링·활성화와 겹치지 않게 활성화 큐에 얹어 단독 실행을 보장한다.
+  const run = vaultActivationQueue.catch(() => {}).then(async () => {
+    await saveDb();
+    await vaultStorage.backupPortableMetadata('pre-compact');
+    const [portableMetadata, savedFolderOrder, editSources] = await Promise.all([
+      vaultStorage.loadMetadata(),
+      vaultStorage.loadFolderOrder(),
+      vaultStorage.loadEditSources()
+    ]);
+    const merged = mergeVaultState(
+      { sounds: portableMetadata.sounds, folderOrder: savedFolderOrder },
+      editSources
+    );
+    // 병합 결과를 새 베이스로 굳힌다. 이 두 줄이 이 앱에서 공유 파일을 쓰는
+    // 유일한 순간이며, 위의 확인·직렬화 가드가 그 전제다.
+    await vaultStorage.overwriteBaseMetadata(merged.sounds.map(({ updatedAt, ...sound }) => sound));
+    await vaultStorage.saveFolderOrder(merged.folderOrder);
+    const removedFiles = await vaultStorage.clearEditFiles();
+    // 삭제 표식은 새 베이스에 실리지 않으므로 내 편집 파일이 승계해 보관한다.
+    // 잃어버리면 파일이 남아있는 record-only 삭제가 다음 스캔에서 부활한다.
+    ownEdits = { sounds: {}, folderOrder: null, settings: null };
+    for (const record of merged.deletedSounds) {
+      ownEdits.sounds[record.id] = { ...record, deleted: true };
+    }
+    await vaultStorage.saveEdits(db.settings.machineId, os.hostname(), ownEdits);
+    setSyncBaseline(merged);
+    lastEditStamps = '';
+    mainWindow?.webContents.send('library-updated', { ...librarySnapshot(), updateReason: 'vault-compacted' });
+    return {
+      sounds: merged.sounds.length,
+      tombstones: merged.deletedSounds.length,
+      editFilesRemoved: removedFiles
+    };
+  });
+  vaultActivationQueue = run.catch(() => {});
+  return run;
+}));
+
 ipcMain.handle('vault:reveal', async () => {
   const root = activeVaultRoot();
   if (!root || !fs.existsSync(root)) throw new Error('현재 볼트 폴더를 찾을 수 없습니다.');
