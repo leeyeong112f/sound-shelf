@@ -2335,12 +2335,16 @@ function navigateCategoryHorizontally(direction) {
     if (separator >= 0) selectKeyboardCategory(categoryPath.slice(0, separator));
     return;
   }
+  if (hasChildren && state.collapsedCategories.has(categoryPath)) {
+    state.collapsedCategories.delete(categoryPath);
+    renderSidebar();
+    return;
+  }
+  if (state.visibleSounds.length) {
+    leaveCategoryKeyboardNavigation();
+    return;
+  }
   if (hasChildren) {
-    if (state.collapsedCategories.has(categoryPath)) {
-      state.collapsedCategories.delete(categoryPath);
-      renderSidebar();
-      return;
-    }
     const next = visibleCategoryOrder().find((category) => category.startsWith(`${categoryPath}/`));
     if (next) selectKeyboardCategory(next);
     return;
