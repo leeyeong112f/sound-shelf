@@ -14,7 +14,7 @@
     "start": "electron .",
     "check": "node --check src/main.js && node --check src/preload.js && node --check src/renderer.js",
     "test": "node --test test/*.js",
-    "build:mac": "electron-packager . 'Sound Shelf' --platform=darwin --arch=arm64 --out=outputs --overwrite --asar --download.cacheRoot=/private/tmp/soundly-electron-cache --ignore='^/(outputs|work)($|/)'",
+    "build:mac": "electron-packager . 'Sound Shelf' --platform=darwin --arch=arm64 --out=outputs --overwrite --asar --icon=src/assets/sound-shelf.icns --download.cacheRoot=/private/tmp/soundly-electron-cache --ignore='^/(outputs|work)($|/)'",
     "dist:mac": "electron-builder --mac --universal",
     "release:mac": "electron-builder --mac --universal --publish always"
   },
@@ -38,6 +38,7 @@
       "package.json"
     ],
     "mac": {
+      "icon": "src/assets/sound-shelf.icns",
       "category": "public.app-category.music",
       "target": [
         "dmg",
