@@ -112,6 +112,39 @@ test('삭제 우선 병합은 편집 파일 순서와 무관하다', () => {
   assert.deepStrictEqual(mergeVaultState(base, edits), mergeVaultState(base, [...edits].reverse()));
 });
 
+test('같은 경로의 다른 ID도 삭제 시각보다 오래됐으면 되살아나지 않는다', () => {
+  const relativePath = '클래식/삭제한 곡.wav';
+  const edits = [
+    {
+      machineId: 'mac-old',
+      sounds: { old: { ...sound('old', { relativePath }), updatedAt: 500 } }
+    },
+    {
+      machineId: 'mac-new',
+      sounds: { current: { ...sound('current', { relativePath }), updatedAt: 500, deleted: true } }
+    }
+  ];
+  const result = mergeVaultState({ sounds: [], folderOrder: [] }, edits);
+  assert.strictEqual(result.sounds.length, 0);
+  assert.strictEqual(result.deletedSounds.length, 1);
+});
+
+test('삭제 뒤 명시적으로 다시 추가한 같은 경로의 새 ID는 복원된다', () => {
+  const relativePath = '클래식/복원한 곡.wav';
+  const edits = [
+    {
+      machineId: 'mac-old',
+      sounds: { old: { ...sound('old', { relativePath }), updatedAt: 500, deleted: true } }
+    },
+    {
+      machineId: 'mac-new',
+      sounds: { restored: { ...sound('restored', { relativePath }), updatedAt: 501 } }
+    }
+  ];
+  const result = mergeVaultState({ sounds: [], folderOrder: [] }, edits);
+  assert.deepStrictEqual(result.sounds.map((item) => item.id), ['restored']);
+});
+
 test('베이스에 없는 사운드도 편집으로 추가된다', () => {
   const base = { sounds: [], folderOrder: [] };
   const edits = [{ machineId: 'mac-1', sounds: { z: { ...sound('z'), updatedAt: 100 } } }];

@@ -16,6 +16,13 @@ function beats(candidate, candidateMachine, current, currentMachine) {
   return String(candidateMachine || '') > String(currentMachine || '');
 }
 
+function relativePathKey(record) {
+  return String(record?.relativePath || '')
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '')
+    .normalize('NFC');
+}
+
 function mergeVaultState(base, editSources) {
   const winners = new Map();
   const owners = new Map();
@@ -74,8 +81,25 @@ function mergeVaultState(base, editSources) {
   }
 
   const records = [...winners.values()];
+  // 파일 이동·재연결 과정에서 같은 상대 경로가 서로 다른 ID로 기록될 수 있다.
+  // 이때 한 ID를 삭제해도 다른 Mac의 오래된 ID가 살아 있으면 원본 없는 유령 행이
+  // 다시 나타난다. 경로별 최신 삭제 시각도 확인해 같거나 더 오래된 별칭을 숨긴다.
+  // 삭제 뒤 사용자가 파일을 명시적으로 다시 추가하면 더 최신 updatedAt을 받으므로
+  // 정상적으로 복원된다.
+  const deletedAtByPath = new Map();
+  for (const record of records) {
+    if (!record.deleted) continue;
+    const key = relativePathKey(record);
+    if (!key) continue;
+    deletedAtByPath.set(key, Math.max(deletedAtByPath.get(key) || 0, stampOf(record)));
+  }
+  const liveRecords = records.filter((record) => {
+    if (record.deleted) return false;
+    const deletedAt = deletedAtByPath.get(relativePathKey(record));
+    return !deletedAt || stampOf(record) > deletedAt;
+  });
   return {
-    sounds: records.filter((record) => !record.deleted),
+    sounds: liveRecords,
     deletedSounds: records.filter((record) => record.deleted),
     folderOrder: [...new Set(folderOrder.order || [])],
     previewVolume: volume
