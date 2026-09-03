@@ -12,6 +12,7 @@ const { VaultStorage, normalizedRelativePath, relativePathInside, writeJsonAtomi
 const { mergeVaultState, pruneRedundantEdits } = require('./vault-sync');
 const { matchesRenameFingerprint, matchesStableFileFingerprint } = require('./file-identity');
 const { failedProbeMetadata, mediaErrorMessage, needsTechnicalProbe } = require('./media-health');
+const { isCurrentKeyAnalysis, keyAnalysisErrorMessage } = require('./key-analysis');
 
 const execFileAsync = promisify(execFile);
 const AUDIO_EXTENSIONS = new Set([
@@ -2469,7 +2470,7 @@ ipcMain.handle('library:analyze-key', async (_event, { id, force = false }) => {
   const sound = db.sounds.find((item) => item.id === id);
   if (!sound || !fs.existsSync(sound.path)) throw new Error('분석할 원본 사운드 파일을 찾을 수 없습니다.');
   const cached = sound.keyAnalysis;
-  if (!force && cached && Number(cached.sourceModifiedAt) === Number(sound.modifiedAt)) {
+  if (!force && isCurrentKeyAnalysis(cached, sound)) {
     return { ...librarySnapshot(), keyAnalysisResult: { id: sound.id, analysis: cached, cached: true } };
   }
   try {
@@ -2492,7 +2493,7 @@ ipcMain.handle('library:analyze-key', async (_event, { id, force = false }) => {
     await saveDb();
     return { ...librarySnapshot(), keyAnalysisResult: { id: sound.id, analysis, cached: false } };
   } catch (error) {
-    throw new Error(`조성 분석 실패: ${error.message}`);
+    throw new Error(`조성 분석 실패: ${keyAnalysisErrorMessage(error)}`);
   }
 });
 
