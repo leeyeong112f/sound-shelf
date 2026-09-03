@@ -19,6 +19,12 @@ npm start
 brew install ffmpeg
 ```
 
+조성(Key) 분석에는 `python3`와 `numpy`가 추가로 필요합니다. 설치되어 있지 않으면 조성 분석만 동작하지 않고 나머지 기능은 그대로 쓸 수 있습니다.
+
+```bash
+pip3 install numpy
+```
+
 ## macOS 앱 빌드
 
 ```bash

@@ -1688,8 +1688,7 @@ let contextTarget = null;
 
 function currentKeyAnalysis(sound) {
   const analysis = sound?.keyAnalysis;
-  if (!analysis || Number(analysis.sourceModifiedAt) !== Number(sound.modifiedAt)) return null;
-  return analysis;
+  return window.KeyAnalysis.isCurrentKeyAnalysis(analysis, sound) ? analysis : null;
 }
 
 function keyConfidenceLabel(confidence) {
