@@ -50,11 +50,13 @@ contextBridge.exposeInMainWorld('soundLibrary', {
   analyzeKey: (payload) => ipcRenderer.invoke('library:analyze-key', payload),
   prepareClip: (payload) => ipcRenderer.invoke('library:prepare-clip', payload),
   createClip: (payload) => ipcRenderer.invoke('library:create-clip', payload),
+  importYouTube: (payload) => ipcRenderer.invoke('youtube:import', payload),
   reveal: (filePath) => ipcRenderer.invoke('library:reveal', filePath),
   insertIntoResolve: (sound) => ipcRenderer.invoke('resolve:insert', sound),
   startDrag: (filePath) => ipcRenderer.send('library:start-drag', filePath),
   onDragError: (callback) => ipcRenderer.on('drag-error', (_event, message) => callback(message)),
   onScanProgress: (callback) => ipcRenderer.on('scan-progress', (_event, payload) => callback(payload)),
+  onYouTubeProgress: (callback) => ipcRenderer.on('youtube-progress', (_event, payload) => callback(payload)),
   onLibraryUpdated: (callback) => ipcRenderer.on('library-updated', (_event, snapshot) => callback(snapshot)),
   onUpdateStatus: (callback) => ipcRenderer.on('update-status', (_event, status) => callback(status)),
   onShortcut: (callback) => ipcRenderer.on('shortcut-triggered', (_event, shortcut) => callback(shortcut))

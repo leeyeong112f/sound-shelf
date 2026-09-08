@@ -66,6 +66,20 @@ xvfb-run -a --server-args='-screen 0 1600x1000x24' node .claude/skills/run-app/d
 03_A단조_코드진행 → A Minor     04_잡음_효과음   → 미검출
 ```
 
+## 유튜브 가져오기 시험
+
+이 컨테이너는 유튜브에 접속할 수 없으므로 `SOUND_SHELF_YT_DLP` 환경 변수로 가짜 yt-dlp를
+지정한다. 가짜 실행 파일은 `-o` 템플릿 폴더에 `source.<ext>`와 `source.info.json`을 쓰고
+`[download]  45.0% …` 형식의 진행률 줄을 출력하면 된다. 붙여넣기는 렌더러에서 합성한다.
+
+```bash
+SOUND_SHELF_YT_DLP=/path/to/fake-yt-dlp printf '%s\n' launch 'open-vault /tmp/vault' \
+  "eval (() => { const dt = new DataTransfer(); dt.setData('text/plain', 'https://youtu.be/dQw4w9WgXcQ'); document.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })); return 'ok'; })()" \
+  'ss after-paste' sounds quit | xvfb-run -a --server-args='-screen 0 1600x1000x24' node .claude/skills/run-app/driver.mjs
+```
+
+완료 토스트(`… WAV 파일을 … 저장했습니다.`)가 뜰 때까지 `eval`로 `#scanToast` 문구를 폴링한다.
+
 ## 사람이 직접 실행할 때
 
 ```bash

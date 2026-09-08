@@ -2993,22 +2993,106 @@ function categoryDropIntent(event) {
 }
 
 // A Finder/native audio drop must always be handled by Sound Shelf. Without
+// ---- 유튜브 주소 붙여넣기 → WAV 자동 저장 -------------------------------------
+const youtubeImportQueue = [];
+const youtubeImportPending = new Set();
+let youtubeImportRunning = false;
+
+function currentCategoryForImport() {
+  return state.filter.startsWith('category:') ? state.filter.slice('category:'.length) : '';
+}
+
+function shortYouTubeLabel(url) {
+  return window.YouTubeImport.youtubeVideoId(url) || url;
+}
+
+// ipcRenderer.invoke 는 메인 쪽 오류 앞에 "Error invoking remote method …" 를 덧붙인다.
+function ipcErrorMessage(error) {
+  return String(error?.message || error || '').replace(/^Error invoking remote method '[^']*': (?:Error: )?/, '');
+}
+
+async function runYouTubeImport(url, category) {
+  const label = shortYouTubeLabel(url);
+  showToast(`유튜브 음원 가져오는 중 · ${label}`, 60000);
+  try {
+    const snapshot = await window.soundLibrary.importYouTube({ url, category });
+    const imported = snapshot.importedSound;
+    if (imported) {
+      state.selectedId = imported.id;
+      state.selectedIds = new Set([imported.id]);
+      if (imported.categoryPath && imported.categoryPath !== '미분류') state.collapsedCategories.delete(imported.categoryPath);
+    }
+    setLibrary(snapshot);
+    const folder = imported?.categoryPath && imported.categoryPath !== '미분류' ? `“${imported.categoryPath}” 폴더` : '볼트';
+    showToast(`“${imported?.title || label}” WAV 파일을 ${folder}에 저장했습니다.`, 5000);
+  } catch (error) {
+    showToast(`유튜브 가져오기 실패: ${ipcErrorMessage(error)}`, 7000);
+  }
+}
+
+// 여러 주소를 한 번에 붙여 넣어도 순서대로 하나씩 받고, 같은 영상을 두 번 붙여 넣으면 한 번만 받는다.
+async function importYouTubeUrls(urls, category = currentCategoryForImport()) {
+  const fresh = urls.filter((url) => !youtubeImportPending.has(url));
+  if (!fresh.length) return showToast('같은 영상을 이미 가져오는 중입니다.', 3000);
+  for (const url of fresh) {
+    youtubeImportPending.add(url);
+    youtubeImportQueue.push({ url, category });
+  }
+  if (fresh.length > 1) showToast(`유튜브 주소 ${fresh.length}개를 순서대로 가져옵니다.`, 4000);
+  if (youtubeImportRunning) return;
+  youtubeImportRunning = true;
+  try {
+    while (youtubeImportQueue.length) {
+      const next = youtubeImportQueue.shift();
+      try {
+        await runYouTubeImport(next.url, next.category);
+      } finally {
+        youtubeImportPending.delete(next.url);
+      }
+    }
+  } finally {
+    youtubeImportRunning = false;
+  }
+}
+
+// ⌘V로 유튜브 영상·뮤직 주소를 붙여 넣으면 바로 가져온다.
+// 메모·태그·이름 입력 중에는 주소를 글자 그대로 붙여 넣어야 하므로 건드리지 않는다.
+// 검색창은 예외: 검색창에 주소를 붙여 넣는 사람은 검색이 아니라 가져오기를 기대한다.
+document.addEventListener('paste', (event) => {
+  if (document.querySelector('.dialog-backdrop:not(.hidden)')) return;
+  const active = document.activeElement;
+  const isTextEntry = ['INPUT', 'TEXTAREA', 'SELECT'].includes(active?.tagName) || active?.isContentEditable;
+  if (isTextEntry && active !== $('#searchInput')) return;
+  const text = event.clipboardData?.getData('text/plain') || '';
+  const urls = window.YouTubeImport.extractYouTubeUrls(text);
+  if (!urls.length) {
+    if (window.YouTubeImport.isPlaylistOnlyUrl(text.trim())) {
+      event.preventDefault();
+      showToast('재생목록 주소는 지원하지 않습니다. 영상 하나의 주소를 붙여 넣어 주세요.', 5000);
+    }
+    return;
+  }
+  event.preventDefault();
+  importYouTubeUrls(urls);
+});
+
 // this capture-phase guard, Chromium can navigate to the dropped audio file
 // and show its black, standalone media-player window.
 for (const eventName of ['dragenter', 'dragover', 'drop']) {
   window.addEventListener(eventName, (event) => {
-    if ([...(event.dataTransfer?.types || [])].includes('Files')) event.preventDefault();
+    const types = [...(event.dataTransfer?.types || [])];
+    if (types.includes('Files') || types.includes('text/uri-list')) event.preventDefault();
   }, { capture: true });
 }
 
 document.addEventListener('dragenter', (event) => {
   const internalCategory = internalNativeDrag === 'category' || event.dataTransfer?.types.includes(CATEGORY_DRAG_TYPE);
-  if (!internalCategory && !event.dataTransfer?.types.includes('Files')) return;
+  if (!internalCategory && !event.dataTransfer?.types.includes('Files') && !event.dataTransfer?.types.includes('text/uri-list')) return;
   event.preventDefault();
 });
 document.addEventListener('dragover', (event) => {
   const internalCategory = internalNativeDrag === 'category' || event.dataTransfer?.types.includes(CATEGORY_DRAG_TYPE);
-  if (!internalCategory && !event.dataTransfer?.types.includes('Files')) return;
+  if (!internalCategory && !event.dataTransfer?.types.includes('Files') && !event.dataTransfer?.types.includes('text/uri-list')) return;
   event.preventDefault();
   clearCategoryDropIndicators();
   if (internalNativeDrag === 'range') {
@@ -3082,7 +3166,13 @@ document.addEventListener('drop', async (event) => {
     return;
   }
   const files = [...(event.dataTransfer?.files || [])];
-  if (!files.length) return;
+  if (!files.length) {
+    // 브라우저 주소창이나 링크를 끌어다 놓은 경우: 유튜브 주소면 음원을 WAV로 가져온다.
+    const droppedText = `${event.dataTransfer?.getData('text/uri-list') || ''}\n${event.dataTransfer?.getData('text/plain') || ''}`;
+    const urls = window.YouTubeImport.extractYouTubeUrls(droppedText);
+    if (urls.length) await importYouTubeUrls(urls, dropCategory);
+    return;
+  }
   if (dropCategory) {
     showToast(dropCategory === '미분류' ? '최상위 폴더로 이동하는 중…' : `“${dropCategory}” 폴더로 이동하는 중…`, 10000);
     try {
@@ -3133,6 +3223,11 @@ player.addEventListener('timeupdate', () => {
   }
 });
 window.soundLibrary.onScanProgress(({ current, total, fileName }) => showToast(`사운드 분석 중 ${current}/${total} · ${fileName}`, 1200));
+window.soundLibrary.onYouTubeProgress(({ url, phase, percent, title }) => {
+  const label = title || shortYouTubeLabel(url);
+  if (phase === 'convert') showToast(`WAV로 변환 중 · ${label}`, 60000);
+  else showToast(`유튜브 음원 내려받는 중 ${Math.floor(percent || 0)}% · ${label}`, 60000);
+});
 window.soundLibrary.onLibraryUpdated((snapshot) => {
   setLibrary(snapshot);
   if (snapshot.updateReason === 'folder-change') showToast('폴더 변경 사항을 자동으로 반영했습니다.', 1800);
