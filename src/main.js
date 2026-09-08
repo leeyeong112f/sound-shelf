@@ -5,7 +5,7 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const crypto = require('node:crypto');
-const { execFile } = require('node:child_process');
+const { execFile, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
 const os = require('node:os');
 const { VaultStorage, normalizedRelativePath, relativePathInside, writeJsonAtomic } = require('./vault-storage');
@@ -13,6 +13,7 @@ const { mergeVaultState, pruneRedundantEdits } = require('./vault-sync');
 const { matchesRenameFingerprint, matchesStableFileFingerprint } = require('./file-identity');
 const { failedProbeMetadata, mediaErrorMessage, needsTechnicalProbe } = require('./media-health');
 const { isCurrentKeyAnalysis, keyAnalysisErrorMessage } = require('./key-analysis');
+const { canonicalYouTubeUrl, parseDownloadProgress, safeFileStem, youtubeImportErrorMessage } = require('./youtube-import');
 
 const execFileAsync = promisify(execFile);
 const AUDIO_EXTENSIONS = new Set([
@@ -113,6 +114,23 @@ function findPython() {
     '/usr/bin/python3'
   ];
   return candidates.find((candidate) => fs.existsSync(candidate)) || 'python3';
+}
+
+// Electron 앱은 셸 PATH를 물려받지 못하므로 Homebrew·pip 설치 위치를 직접 찾는다.
+// SOUND_SHELF_YT_DLP 환경 변수로 다른 실행 파일을 지정할 수 있다.
+function findYtDlp() {
+  const override = String(process.env.SOUND_SHELF_YT_DLP || '').trim();
+  if (override && fs.existsSync(override)) return override;
+  const candidates = [
+    '/opt/homebrew/bin/yt-dlp',
+    '/usr/local/bin/yt-dlp',
+    path.join(os.homedir(), '.local', 'bin', 'yt-dlp'),
+    path.join(os.homedir(), 'Library', 'Python', '3.13', 'bin', 'yt-dlp'),
+    path.join(os.homedir(), 'Library', 'Python', '3.12', 'bin', 'yt-dlp'),
+    '/Library/Frameworks/Python.framework/Versions/3.13/bin/yt-dlp',
+    '/usr/bin/yt-dlp'
+  ];
+  return candidates.find((candidate) => fs.existsSync(candidate)) || 'yt-dlp';
 }
 
 function wait(milliseconds) {
@@ -1618,6 +1636,7 @@ if (singleInstanceLock) app.whenReady().then(async () => {
     await loadDb();
     await pruneWaveformDiskCache();
     await pruneTemporaryClips();
+    await pruneYouTubeTemporaryFiles();
   } catch (error) {
     console.error('Startup library load failed:', error);
   } finally {
@@ -2568,6 +2587,178 @@ ipcMain.handle('library:create-clip', async (_event, payload) => {
   } catch (error) {
     await fsp.unlink(outputPath).catch(() => {});
     throw new Error(`선택 구간 파일을 만들지 못했습니다: ${error.message}`);
+  }
+});
+
+// ---- 유튜브 주소 붙여넣기 → WAV 자동 저장 -------------------------------------
+// yt-dlp로 최고 음질 오디오 스트림만 임시 폴더에 받고, ffmpeg로 24bit WAV로 바꾼 뒤
+// 볼트(현재 보고 있는 카테고리 폴더)로 옮겨 라이브러리에 등록한다.
+// 임시 폴더를 거치는 이유: 받다 만 파일이 볼트 감시 스캔에 잡히지 않게 하기 위해서다.
+const youtubeImports = new Map();
+const YOUTUBE_DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000;
+const YOUTUBE_CONVERT_TIMEOUT_MS = 10 * 60 * 1000;
+
+function temporaryYouTubeDirectory() {
+  return path.join(app.getPath('temp'), 'sound-shelf-youtube');
+}
+
+// 앱은 단일 인스턴스이므로 시작 시점에 남아 있는 작업 폴더는 모두 지난 실행이 남긴 찌꺼기다.
+async function pruneYouTubeTemporaryFiles() {
+  await fsp.rm(temporaryYouTubeDirectory(), { recursive: true, force: true }).catch(() => {});
+}
+
+function mediaToolEnvironment() {
+  const extra = ['/opt/homebrew/bin', '/usr/local/bin', path.join(os.homedir(), '.local', 'bin')];
+  const current = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  return { ...process.env, PATH: [...new Set([...current, ...extra])].join(path.delimiter) };
+}
+
+function sendYouTubeProgress(payload) {
+  mainWindow?.webContents.send('youtube-progress', payload);
+}
+
+function runYtDlp(url, jobDirectory, onProgress) {
+  return new Promise((resolve, reject) => {
+    const ffmpegPath = findMediaTool('ffmpeg');
+    const args = [
+      '--no-playlist', '--no-warnings', '--newline', '--progress', '--no-mtime',
+      '--no-write-playlist-metafiles', '--write-info-json',
+      '-f', 'bestaudio/best',
+      '-o', path.join(jobDirectory, 'source.%(ext)s')
+    ];
+    if (path.isAbsolute(ffmpegPath)) args.push('--ffmpeg-location', path.dirname(ffmpegPath));
+    args.push('--', url);
+    const child = spawn(findYtDlp(), args, { env: mediaToolEnvironment(), windowsHide: true });
+    let stderr = '';
+    let pendingStdout = '';
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish(Object.assign(new Error('yt-dlp timed out'), { code: 'ETIMEDOUT' }));
+    }, YOUTUBE_DOWNLOAD_TIMEOUT_MS);
+    child.stdout.on('data', (chunk) => {
+      pendingStdout += chunk.toString();
+      const lines = pendingStdout.split(/\r?\n/);
+      pendingStdout = lines.pop();
+      for (const line of lines) {
+        const percent = parseDownloadProgress(line);
+        if (percent !== null) onProgress(percent);
+      }
+    });
+    child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk}`.slice(-16000); });
+    child.on('error', (error) => finish(Object.assign(error, { stderr })));
+    child.on('close', (code, signal) => {
+      if (code === 0) finish();
+      else finish(Object.assign(new Error(stderr.trim() || `yt-dlp exited with ${code ?? signal}`), { stderr, exitCode: code }));
+    });
+  });
+}
+
+async function readYouTubeInfo(jobDirectory) {
+  const infoPath = path.join(jobDirectory, 'source.info.json');
+  try {
+    const info = JSON.parse(await fsp.readFile(infoPath, 'utf8'));
+    return {
+      title: String(info.title || '').trim(),
+      uploader: String(info.uploader || info.channel || '').trim(),
+      webpageUrl: String(info.webpage_url || '').trim(),
+      duration: Number(info.duration || 0)
+    };
+  } catch {
+    return { title: '', uploader: '', webpageUrl: '', duration: 0 };
+  }
+}
+
+async function downloadedSourceFile(jobDirectory) {
+  const entries = await fsp.readdir(jobDirectory, { withFileTypes: true }).catch(() => []);
+  const media = entries
+    .filter((entry) => entry.isFile() && entry.name.startsWith('source.') && !entry.name.endsWith('.json') && !entry.name.endsWith('.part'))
+    .map((entry) => path.join(jobDirectory, entry.name));
+  return media[0] || null;
+}
+
+async function convertToWav(sourcePath, outputPath) {
+  await execFileAsync(findMediaTool('ffmpeg'), [
+    '-v', 'error', '-y', '-i', sourcePath,
+    '-map', '0:a:0', '-vn', '-c:a', 'pcm_s24le', outputPath
+  ], { maxBuffer: 1024 * 1024 * 4, timeout: YOUTUBE_CONVERT_TIMEOUT_MS, env: mediaToolEnvironment() });
+}
+
+function youtubeDestinationFolder(category) {
+  const root = activeVaultRoot();
+  if (!root) throw new Error('먼저 사운드 볼트를 열어 주세요.');
+  const normalized = normalizeCategoryPath(category);
+  if (!normalized || normalized === '미분류') return path.resolve(root);
+  const folder = categoryFolderPath(normalized);
+  return folder && fs.existsSync(folder) ? folder : path.resolve(root);
+}
+
+async function importYouTubeAudio(url, category) {
+  const destinationFolder = youtubeDestinationFolder(category);
+  const jobDirectory = path.join(temporaryYouTubeDirectory(), crypto.randomUUID());
+  await fsp.mkdir(jobDirectory, { recursive: true });
+  let destination = '';
+  try {
+    sendYouTubeProgress({ url, phase: 'download', percent: 0 });
+    let lastPercent = -1;
+    await runYtDlp(url, jobDirectory, (percent) => {
+      if (Math.floor(percent) === Math.floor(lastPercent)) return;
+      lastPercent = percent;
+      sendYouTubeProgress({ url, phase: 'download', percent });
+    });
+    const sourcePath = await downloadedSourceFile(jobDirectory);
+    if (!sourcePath) throw new Error('yt-dlp가 오디오 파일을 만들지 않았습니다.');
+    const info = await readYouTubeInfo(jobDirectory);
+    sendYouTubeProgress({ url, phase: 'convert', percent: 100, title: info.title });
+    const wavPath = path.join(jobDirectory, 'converted.wav');
+    await convertToWav(sourcePath, wavPath);
+
+    // 다운로드는 수 분이 걸릴 수 있으므로 db.sounds 를 건드리는 등록 단계만 동기화 병합에서 보호한다.
+    return await withLocalMutation(async () => {
+      await fsp.mkdir(destinationFolder, { recursive: true });
+      destination = uniqueDestination(destinationFolder, `${safeFileStem(info.title)}.wav`);
+      await moveFile(wavPath, destination);
+      await indexFiles([destination], { reportProgress: false, allowRestore: true });
+      const created = db.sounds.find((item) => normalizedFsPath(item.path) === normalizedFsPath(destination));
+      if (!created) throw new Error('변환한 파일을 라이브러리에 추가하지 못했습니다.');
+      created.categoryPath = inferCategoryPath(destination);
+      created.category = created.categoryPath.split('/').filter(Boolean).pop() || inferCategory(destination);
+      const sourceNote = `출처: ${info.webpageUrl || url}${info.uploader ? ` · ${info.uploader}` : ''}`;
+      if (!String(created.notes || '').includes(info.webpageUrl || url)) {
+        created.notes = created.notes ? `${created.notes}\n${sourceNote}` : sourceNote;
+      }
+      await saveDb();
+      refreshFolderWatchers();
+      return { ...librarySnapshot(), importedSound: publicSound(created) };
+    });
+  } catch (error) {
+    if (destination) await fsp.unlink(destination).catch(() => {});
+    throw error;
+  } finally {
+    await fsp.rm(jobDirectory, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+ipcMain.handle('youtube:import', async (_event, payload) => {
+  const url = canonicalYouTubeUrl(payload?.url);
+  if (!url) throw new Error('유튜브 영상 또는 뮤직 주소가 아닙니다.');
+  if (youtubeImports.has(url)) throw new Error('같은 영상을 이미 가져오는 중입니다.');
+  const job = importYouTubeAudio(url, payload?.category || '');
+  youtubeImports.set(url, job);
+  try {
+    return await job;
+  } catch (error) {
+    console.error('YouTube import failed:', error);
+    throw new Error(youtubeImportErrorMessage(error));
+  } finally {
+    youtubeImports.delete(url);
   }
 });
 
