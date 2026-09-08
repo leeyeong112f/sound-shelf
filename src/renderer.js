@@ -2998,10 +2998,6 @@ const youtubeImportQueue = [];
 const youtubeImportPending = new Set();
 let youtubeImportRunning = false;
 
-function currentCategoryForImport() {
-  return state.filter.startsWith('category:') ? state.filter.slice('category:'.length) : '';
-}
-
 function shortYouTubeLabel(url) {
   return window.YouTubeImport.youtubeVideoId(url) || url;
 }
@@ -3031,7 +3027,8 @@ async function runYouTubeImport(url, category) {
 }
 
 // 여러 주소를 한 번에 붙여 넣어도 순서대로 하나씩 받고, 같은 영상을 두 번 붙여 넣으면 한 번만 받는다.
-async function importYouTubeUrls(urls, category = currentCategoryForImport()) {
+// 기본 저장 위치는 미분류(볼트 루트)다. 카테고리 폴더 위에 링크를 직접 떨어뜨린 경우에만 그 폴더로 간다.
+async function importYouTubeUrls(urls, category = '') {
   const fresh = urls.filter((url) => !youtubeImportPending.has(url));
   if (!fresh.length) return showToast('같은 영상을 이미 가져오는 중입니다.', 3000);
   for (const url of fresh) {
@@ -3170,7 +3167,7 @@ document.addEventListener('drop', async (event) => {
     // 브라우저 주소창이나 링크를 끌어다 놓은 경우: 유튜브 주소면 음원을 WAV로 가져온다.
     const droppedText = `${event.dataTransfer?.getData('text/uri-list') || ''}\n${event.dataTransfer?.getData('text/plain') || ''}`;
     const urls = window.YouTubeImport.extractYouTubeUrls(droppedText);
-    if (urls.length) await importYouTubeUrls(urls, dropCategory);
+    if (urls.length) await importYouTubeUrls(urls, intent?.category || '');
     return;
   }
   if (dropCategory) {
