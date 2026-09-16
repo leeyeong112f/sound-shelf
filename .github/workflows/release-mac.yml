@@ -73,9 +73,10 @@ jobs:
           fi
 
       # GitHub은 실제 git 태그가 없으면 게시된 릴리스를 만들지 못한다
-      # (422 Published releases must have a valid tag). electron-builder가
-      # 게시하기 전에 태그를 먼저 올려 둔다.
-      - name: Create release tag
+      # (422 Published releases must have a valid tag). 그리고 electron-builder는
+      # DMG와 ZIP을 동시에 올리면서 릴리스를 각각 만들어 중복을 남긴다. 태그와
+      # 릴리스를 미리 하나씩 만들어 두면 electron-builder가 그것을 재사용한다.
+      - name: Create release tag and release
         shell: bash
         run: |
           TAG="v${{ steps.version.outputs.version }}"
@@ -83,6 +84,29 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag "${TAG}" || true
           git push origin "refs/tags/${TAG}" || echo "태그 ${TAG} 가 이미 있어 그대로 사용합니다."
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "릴리스 ${TAG} 가 이미 있어 그대로 사용합니다."
+            exit 0
+          fi
+          {
+            echo "### 설치 방법"
+            echo ""
+            echo "1. 아래 \`Sound-Shelf-*-universal.dmg\`를 내려받습니다."
+            echo "2. DMG를 열고 \`Sound Shelf\`를 \`응용 프로그램\` 폴더로 드래그합니다."
+            if [ "${{ steps.signing.outputs.signed }}" != "true" ]; then
+              echo "3. **첫 실행은 더블클릭이 아니라 우클릭 → 열기 → 열기** 를 누릅니다."
+              echo ""
+              echo "3번이 필요한 이유는 이 빌드에 Apple 개발자 서명이 없기 때문입니다."
+              echo "한 번만 하면 다음부터는 그냥 열립니다. 같은 이유로 앱 안의 자동"
+              echo "업데이트는 동작하지 않으므로, 새 버전은 이 페이지에서 받아 다시"
+              echo "설치해 주세요."
+            else
+              echo "3. \`응용 프로그램\`에서 Sound Shelf를 실행합니다."
+              echo ""
+              echo "서명·공증된 빌드입니다. 이미 설치된 앱은 자동으로 이 버전을 받습니다."
+            fi
+          } > release-notes.md
+          gh release create "${TAG}" --title "${{ steps.version.outputs.version }}" --notes-file release-notes.md
 
       - name: Build, sign, notarize, and publish
         if: steps.signing.outputs.signed == 'true'
@@ -101,27 +125,6 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
         run: npm run release:mac
-
-      # 서명이 없으면 macOS가 첫 실행을 막는다. 받는 사람이 방법을 알 수 있도록
-      # 릴리스 설명에 적어 둔다. 실패해도 이미 게시된 릴리스는 그대로 남는다.
-      - name: Explain the Gatekeeper step in the release notes
-        if: steps.signing.outputs.signed != 'true'
-        continue-on-error: true
-        shell: bash
-        run: |
-          {
-            echo "### 설치 방법"
-            echo ""
-            echo "1. 아래 \`Sound-Shelf-*-universal.dmg\`를 내려받습니다."
-            echo "2. DMG를 열고 \`Sound Shelf\`를 \`응용 프로그램\` 폴더로 드래그합니다."
-            echo "3. **첫 실행은 더블클릭이 아니라 우클릭 → 열기 → 열기** 를 누릅니다."
-            echo ""
-            echo "3번이 필요한 이유는 이 빌드에 Apple 개발자 서명이 없기 때문입니다."
-            echo "한 번만 하면 다음부터는 그냥 열립니다. 같은 이유로 앱 안의 자동"
-            echo "업데이트는 동작하지 않으므로, 새 버전은 이 페이지에서 받아 다시"
-            echo "설치해 주세요."
-          } > release-notes.md
-          gh release edit "v${{ steps.version.outputs.version }}" --notes-file release-notes.md
 
       - name: Show released version
         shell: bash
