@@ -72,6 +72,18 @@ jobs:
             echo "signed=true" >> "${GITHUB_OUTPUT}"
           fi
 
+      # GitHub은 실제 git 태그가 없으면 게시된 릴리스를 만들지 못한다
+      # (422 Published releases must have a valid tag). electron-builder가
+      # 게시하기 전에 태그를 먼저 올려 둔다.
+      - name: Create release tag
+        shell: bash
+        run: |
+          TAG="v${{ steps.version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "${TAG}" || true
+          git push origin "refs/tags/${TAG}" || echo "태그 ${TAG} 가 이미 있어 그대로 사용합니다."
+
       - name: Build, sign, notarize, and publish
         if: steps.signing.outputs.signed == 'true'
         env:
