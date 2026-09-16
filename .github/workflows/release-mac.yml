@@ -15,15 +15,9 @@ concurrency:
 
 jobs:
   release:
-    if: github.event_name == 'workflow_dispatch' || vars.AUTO_RELEASE_ENABLED == 'true'
     runs-on: macos-14
     env:
       GH_TOKEN: ${{ github.token }}
-      CSC_LINK: ${{ secrets.CSC_LINK }}
-      CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -40,6 +34,10 @@ jobs:
       - name: Check source
         run: npm run check
 
+      # 모든 푸시가 그대로 배포되므로 깨진 코드가 나가지 않도록 테스트를 먼저 돌린다.
+      - name: Run tests
+        run: npm test
+
       - name: Create automatic version
         id: version
         shell: bash
@@ -49,22 +47,95 @@ jobs:
           npm version "${RELEASE_VERSION}" --no-git-tag-version
           echo "version=${RELEASE_VERSION}" >> "${GITHUB_OUTPUT}"
 
-      - name: Verify Apple signing secrets
+      # Apple 인증서가 없어도 배포는 계속한다. 서명 없는 빌드는 Gatekeeper 경고가
+      # 뜨고 앱 내 자동 업데이트가 동작하지 않지만, 내려받아 설치할 수는 있다.
+      - name: Decide signing mode
+        id: signing
         shell: bash
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          missing=0
+          missing=""
           for name in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
             if [ -z "${!name}" ]; then
-              echo "::error::GitHub Actions secret ${name} is required."
-              missing=1
+              missing="${missing} ${name}"
             fi
           done
-          if [ "${missing}" -ne 0 ]; then
-            exit 1
+          if [ -n "${missing}" ]; then
+            echo "signed=false" >> "${GITHUB_OUTPUT}"
+            echo "::warning::Apple 서명 인증서가 없어 서명 없는 빌드로 진행합니다. 누락:${missing}"
+          else
+            echo "signed=true" >> "${GITHUB_OUTPUT}"
           fi
 
+      # GitHub은 실제 git 태그가 없으면 게시된 릴리스를 만들지 못한다
+      # (422 Published releases must have a valid tag). 그리고 electron-builder는
+      # DMG와 ZIP을 동시에 올리면서 릴리스를 각각 만들어 중복을 남긴다. 태그와
+      # 릴리스를 미리 하나씩 만들어 두면 electron-builder가 그것을 재사용한다.
+      - name: Create release tag and release
+        shell: bash
+        run: |
+          TAG="v${{ steps.version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "${TAG}" || true
+          git push origin "refs/tags/${TAG}" || echo "태그 ${TAG} 가 이미 있어 그대로 사용합니다."
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "릴리스 ${TAG} 가 이미 있어 그대로 사용합니다."
+            exit 0
+          fi
+          {
+            echo "### 설치 방법"
+            echo ""
+            echo "1. 아래 \`Sound-Shelf-*-universal.dmg\`를 내려받습니다."
+            echo "2. DMG를 열고 \`Sound Shelf\`를 \`응용 프로그램\` 폴더로 드래그합니다."
+            if [ "${{ steps.signing.outputs.signed }}" != "true" ]; then
+              echo "3. **첫 실행은 더블클릭이 아니라 우클릭 → 열기 → 열기** 를 누릅니다."
+              echo ""
+              echo "3번이 필요한 이유는 이 빌드에 Apple 개발자 서명이 없기 때문입니다."
+              echo "한 번만 하면 다음부터는 그냥 열립니다. 같은 이유로 앱 안의 자동"
+              echo "업데이트는 동작하지 않으므로, 새 버전은 이 페이지에서 받아 다시"
+              echo "설치해 주세요."
+            else
+              echo "3. \`응용 프로그램\`에서 Sound Shelf를 실행합니다."
+              echo ""
+              echo "서명·공증된 빌드입니다. 이미 설치된 앱은 자동으로 이 버전을 받습니다."
+            fi
+          } > release-notes.md
+          gh release create "${TAG}" --title "${{ steps.version.outputs.version }}" --notes-file release-notes.md
+
       - name: Build, sign, notarize, and publish
+        if: steps.signing.outputs.signed == 'true'
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npm run release:mac
+
+      # CSC_LINK을 빈 문자열로라도 두면 electron-builder가 그 경로에서 인증서를
+      # 읽으려다 실패한다. 이 단계에는 Apple 관련 변수를 아예 넘기지 않는다.
+      - name: Build and publish without signing
+        if: steps.signing.outputs.signed != 'true'
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
         run: npm run release:mac
 
       - name: Show released version
-        run: echo "Published Sound Shelf v${{ steps.version.outputs.version }}"
+        shell: bash
+        run: |
+          {
+            echo "### Sound Shelf v${{ steps.version.outputs.version }} 배포됨"
+            if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+              echo "서명·공증된 빌드입니다. 설치된 앱이 자동으로 업데이트됩니다."
+            else
+              echo "서명 없는 빌드입니다. 첫 실행 시 우클릭 → 열기가 필요하고, 자동 업데이트는 동작하지 않습니다."
+            fi
+            echo ""
+            echo "https://github.com/${GITHUB_REPOSITORY}/releases/latest"
+          } >> "${GITHUB_STEP_SUMMARY}"
