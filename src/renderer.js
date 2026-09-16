@@ -3052,14 +3052,46 @@ async function importYouTubeUrls(urls, category = '') {
   }
 }
 
-// ⌘V로 유튜브 영상·뮤직 주소를 붙여 넣으면 바로 가져온다.
-// 메모·태그·이름 입력 중에는 주소를 글자 그대로 붙여 넣어야 하므로 건드리지 않는다.
-// 검색창은 예외: 검색창에 주소를 붙여 넣는 사람은 검색이 아니라 가져오기를 기대한다.
+// Finder에서 끌어다 놓았거나 ⌘C 후 ⌘V로 붙여 넣은 파일·폴더를 볼트로 옮긴다.
+// 카테고리가 있으면 그 폴더로, 없으면 볼트 루트(미분류)로 이동하며 두 경로 모두 같은 규칙을 따른다.
+async function importNativeFiles(files, category, sourceLabel) {
+  if (category) {
+    showToast(category === '미분류' ? '최상위 폴더로 이동하는 중…' : `“${category}” 폴더로 이동하는 중…`, 10000);
+    try {
+      const snapshot = await window.soundLibrary.dropFilesToCategory(category, files);
+      if (category !== '미분류') state.collapsedCategories.delete(category);
+      setLibrary(snapshot);
+      showToast('파일 또는 폴더를 이동했습니다.');
+    } catch (error) {
+      showToast(`이동 실패: ${error.message}`, 5000);
+    }
+    return;
+  }
+  showToast(`${sourceLabel} 사운드를 추가하는 중…`, 10000);
+  try {
+    setLibrary(await window.soundLibrary.addDroppedFiles(files));
+    showToast('사운드를 라이브러리에 추가했습니다.');
+  } catch (error) {
+    showToast(`추가 실패: ${error.message}`, 5000);
+  }
+}
+
+// ⌘V로 Finder에서 복사한 파일·폴더나 유튜브 영상·뮤직 주소를 붙여 넣으면 바로 가져온다.
+// 메모·태그·이름 입력 중에는 글자 그대로 붙여 넣어야 하므로 건드리지 않는다.
+// 검색창은 예외: 검색창에 붙여 넣는 사람은 검색이 아니라 가져오기를 기대한다.
 document.addEventListener('paste', (event) => {
   if (document.querySelector('.dialog-backdrop:not(.hidden)')) return;
   const active = document.activeElement;
   const isTextEntry = ['INPUT', 'TEXTAREA', 'SELECT'].includes(active?.tagName) || active?.isContentEditable;
   if (isTextEntry && active !== $('#searchInput')) return;
+  // Finder ⌘C로 복사한 파일·폴더는 지금 보고 있는 카테고리 폴더로 옮긴다 (드롭과 같은 규칙).
+  const files = [...(event.clipboardData?.files || [])];
+  if (files.length) {
+    event.preventDefault();
+    const category = state.filter.startsWith('category:') ? state.filter.slice('category:'.length) : '';
+    importNativeFiles(files, category, '붙여 넣은');
+    return;
+  }
   const text = event.clipboardData?.getData('text/plain') || '';
   const urls = window.YouTubeImport.extractYouTubeUrls(text);
   if (!urls.length) {
@@ -3170,25 +3202,7 @@ document.addEventListener('drop', async (event) => {
     if (urls.length) await importYouTubeUrls(urls, intent?.category || '');
     return;
   }
-  if (dropCategory) {
-    showToast(dropCategory === '미분류' ? '최상위 폴더로 이동하는 중…' : `“${dropCategory}” 폴더로 이동하는 중…`, 10000);
-    try {
-      const snapshot = await window.soundLibrary.dropFilesToCategory(dropCategory, files);
-      if (dropCategory !== '미분류') state.collapsedCategories.delete(dropCategory);
-      setLibrary(snapshot);
-      showToast('파일 또는 폴더를 이동했습니다.');
-    } catch (error) {
-      showToast(`이동 실패: ${error.message}`, 5000);
-    }
-    return;
-  }
-  showToast('드롭한 사운드를 추가하는 중…', 10000);
-  try {
-    setLibrary(await window.soundLibrary.addDroppedFiles(files));
-    showToast('사운드를 라이브러리에 추가했습니다.');
-  } catch (error) {
-    showToast(`추가 실패: ${error.message}`, 5000);
-  }
+  await importNativeFiles(files, dropCategory, '드롭한');
 });
 
 document.addEventListener('dragend', () => {
