@@ -3052,25 +3052,65 @@ async function importYouTubeUrls(urls, category = '') {
   }
 }
 
-// ⌘V로 유튜브 영상·뮤직 주소를 붙여 넣으면 바로 가져온다.
-// 메모·태그·이름 입력 중에는 주소를 글자 그대로 붙여 넣어야 하므로 건드리지 않는다.
+// 카테고리를 보고 있으면 그 폴더로 넣는다. 그 외에는 볼트 루트로.
+function pasteTargetCategory() {
+  if (!state.filter.startsWith('category:')) return null;
+  const category = state.filter.slice(9);
+  return category && category !== '미분류' ? category : null;
+}
+
+// Finder에서 ⌘C로 복사한 오디오 파일을 볼트로 옮긴다. Finder가 복사한 파일은
+// 렌더러의 clipboardData에 실려 오지 않으므로 메인 프로세스가 붙여넣기판을 읽는다.
+async function pasteClipboardFiles() {
+  const where = pasteTargetCategory();
+  try {
+    const result = await window.soundLibrary.pasteClipboardFiles({ category: where });
+    if (result?.reason === 'unsupported') {
+      showToast('복사한 항목 중에 오디오 파일이 없습니다.', 4000);
+      return;
+    }
+    if (!result?.ok) return;
+    setLibrary(result.snapshot);
+    showToast(`${result.count}개를 ${where ? `“${where}”로` : '볼트로'} 가져왔습니다.`, 4000);
+  } catch (error) {
+    showToast(error.message, 6000);
+  }
+}
+
+// ⌘V는 클립보드 내용에 따라 두 가지로 갈린다.
+//   유튜브 영상·뮤직 주소 → 내려받아 가져오기
+//   Finder에서 복사한 오디오 파일·폴더 → 볼트로 옮겨 등록
+// 메모·태그·이름 입력 중에는 글자 그대로 붙여 넣어야 하므로 건드리지 않는다.
 // 검색창은 예외: 검색창에 주소를 붙여 넣는 사람은 검색이 아니라 가져오기를 기대한다.
 document.addEventListener('paste', (event) => {
   if (document.querySelector('.dialog-backdrop:not(.hidden)')) return;
   const active = document.activeElement;
   const isTextEntry = ['INPUT', 'TEXTAREA', 'SELECT'].includes(active?.tagName) || active?.isContentEditable;
   if (isTextEntry && active !== $('#searchInput')) return;
+
   const text = event.clipboardData?.getData('text/plain') || '';
   const urls = window.YouTubeImport.extractYouTubeUrls(text);
-  if (!urls.length) {
-    if (window.YouTubeImport.isPlaylistOnlyUrl(text.trim())) {
-      event.preventDefault();
-      showToast('재생목록 주소는 지원하지 않습니다. 영상 하나의 주소를 붙여 넣어 주세요.', 5000);
-    }
+  if (urls.length) {
+    event.preventDefault();
+    importYouTubeUrls(urls);
     return;
   }
-  event.preventDefault();
-  importYouTubeUrls(urls);
+  if (window.YouTubeImport.isPlaylistOnlyUrl(text.trim())) {
+    event.preventDefault();
+    showToast('재생목록 주소는 지원하지 않습니다. 영상 하나의 주소를 붙여 넣어 주세요.', 5000);
+    return;
+  }
+  // 주소가 아니면 파일 쪽이다. 붙여넣기판에 파일이 있으면 Chromium이 types에
+  // 'Files'를 넣어 주므로, 그때만 기본 동작을 막는다. 이렇게 하지 않으면
+  // 검색창에 평범한 글자를 붙여 넣는 것까지 막힌다.
+  if ([...(event.clipboardData?.types || [])].includes('Files')) {
+    event.preventDefault();
+    pasteClipboardFiles();
+    return;
+  }
+  // 입력창이 아니면 글자를 붙여 넣을 곳이 없다. Chromium이 'Files'를 알려주지
+  // 않는 경우까지 받아내되, 붙여넣기판이 비어 있으면 조용히 지나간다.
+  if (!isTextEntry) pasteClipboardFiles();
 });
 
 // this capture-phase guard, Chromium can navigate to the dropped audio file

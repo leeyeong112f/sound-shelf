@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
@@ -12,6 +12,7 @@ const { VaultStorage, normalizedRelativePath, relativePathInside, writeJsonAtomi
 const { mergeVaultState, pruneRedundantEdits } = require('./vault-sync');
 const { matchesRenameFingerprint, matchesStableFileFingerprint } = require('./file-identity');
 const { failedProbeMetadata, mediaErrorMessage, needsTechnicalProbe } = require('./media-health');
+const { clipboardFilePaths } = require('./clipboard-files');
 const { isCurrentKeyAnalysis, keyAnalysisErrorMessage } = require('./key-analysis');
 const { canonicalYouTubeUrl, parseDownloadProgress, safeFileStem, youtubeImportErrorMessage } = require('./youtube-import');
 
@@ -1725,7 +1726,7 @@ ipcMain.handle('library:add-files', async () => {
   return indexFiles(moved, { allowRestore: true });
 });
 
-ipcMain.handle('library:add-paths', async (_event, paths) => {
+async function addPathsToLibrary(paths) {
   const files = [];
   const root = activeVaultRoot();
   if (!root) throw new Error('먼저 사운드 볼트를 열어 주세요.');
@@ -1757,6 +1758,44 @@ ipcMain.handle('library:add-paths', async (_event, paths) => {
   }
   refreshFolderWatchers();
   return indexFiles([...new Set(files)], { allowRestore: true });
+}
+
+ipcMain.handle('library:add-paths', async (_event, paths) => addPathsToLibrary(paths));
+
+// Finder에서 ⌘C로 복사한 파일은 렌더러의 paste 이벤트에 실려 오지 않는다.
+// macOS 붙여넣기판을 메인 프로세스에서 직접 읽어야 한다.
+function pasteboardFilePaths() {
+  let filenamesPlist = '';
+  try {
+    filenamesPlist = clipboard.readBuffer('NSFilenamesPboardType').toString('utf8');
+  } catch {
+    // 이 형식이 없는 경우다. 아래 public.file-url로 넘어간다.
+  }
+  let fileUrl = '';
+  try {
+    fileUrl = clipboard.read('public.file-url');
+  } catch {
+    // macOS가 아닌 환경.
+  }
+  return clipboardFilePaths({ filenamesPlist, fileUrl });
+}
+
+// 붙여넣기는 드래그앤드롭과 같은 일을 한다. 카테고리를 보고 있으면 그 폴더로,
+// 아니면 볼트 루트로 파일을 옮긴 뒤 등록한다.
+ipcMain.handle('library:paste-clipboard-files', async (_event, { category = null } = {}) => {
+  const paths = pasteboardFilePaths();
+  if (!paths.length) return { ok: false, reason: 'empty' };
+  const usable = [];
+  for (const itemPath of paths) {
+    const stat = await fsp.stat(itemPath).catch(() => null);
+    if (!stat) continue;
+    if (stat.isDirectory() || AUDIO_EXTENSIONS.has(path.extname(itemPath).toLowerCase())) usable.push(itemPath);
+  }
+  if (!usable.length) return { ok: false, reason: 'unsupported', total: paths.length };
+  const snapshot = category
+    ? await dropPathsIntoCategory(category, usable)
+    : await addPathsToLibrary(usable);
+  return { ok: true, count: usable.length, snapshot };
 });
 
 ipcMain.handle('library:add-folder', async () => {
@@ -2356,7 +2395,7 @@ ipcMain.handle('category:add-files', async (_event, category) => {
   return indexFiles(moved, { allowRestore: true });
 });
 
-ipcMain.handle('category:drop-paths', async (_event, { category, paths }) => {
+async function dropPathsIntoCategory(category, paths) {
   const targetCategory = normalizeCategoryPath(category);
   const targetFolder = categoryFolderPath(targetCategory);
   if (!targetFolder) throw new Error('대상 폴더를 찾을 수 없습니다.');
@@ -2394,7 +2433,9 @@ ipcMain.handle('category:drop-paths', async (_event, { category, paths }) => {
   if (needsRescan) snapshot = await rescanWatchedFolders({ reportProgress: false, allowRestore: true });
   if (!snapshot) snapshot = await rescanWatchedFolders({ reportProgress: false });
   return snapshot;
-});
+}
+
+ipcMain.handle('category:drop-paths', async (_event, { category, paths }) => dropPathsIntoCategory(category, paths));
 
 ipcMain.handle('shortcuts:set', async (_event, shortcuts) => {
   db.settings.shortcuts = { ...DEFAULT_SHORTCUTS, ...(shortcuts || {}) };
