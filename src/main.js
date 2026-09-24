@@ -1762,12 +1762,12 @@ async function addPathsToLibrary(paths) {
 
 ipcMain.handle('library:add-paths', async (_event, paths) => addPathsToLibrary(paths));
 
-// Finder에서 ⌘C로 복사한 파일은 렌더러의 paste 이벤트에 실려 오지 않는다.
-// macOS 붙여넣기판을 메인 프로세스에서 직접 읽어야 한다.
+// Finder에서 ⌘C로 복사한 파일이 렌더러의 paste 이벤트에 실려 오지 않는 경우가
+// 있다. 그때 쓰려고 macOS 붙여넣기판을 메인 프로세스에서 직접 읽는다.
 function pasteboardFilePaths() {
-  let filenamesPlist = '';
+  let filenamesPlist = null;
   try {
-    filenamesPlist = clipboard.readBuffer('NSFilenamesPboardType').toString('utf8');
+    filenamesPlist = clipboard.readBuffer('NSFilenamesPboardType');
   } catch {
     // 이 형식이 없는 경우다. 아래 public.file-url로 넘어간다.
   }
@@ -1782,8 +1782,11 @@ function pasteboardFilePaths() {
 
 // 붙여넣기는 드래그앤드롭과 같은 일을 한다. 카테고리를 보고 있으면 그 폴더로,
 // 아니면 볼트 루트로 파일을 옮긴 뒤 등록한다.
-ipcMain.handle('library:paste-clipboard-files', async (_event, { category = null } = {}) => {
-  const paths = pasteboardFilePaths();
+ipcMain.handle('library:paste-clipboard-files', async (_event, { category = null, paths: fromRenderer = [] } = {}) => {
+  // 렌더러가 clipboardData.files로 경로를 알아냈으면 그것이 가장 정확하다.
+  // 여러 개를 복사한 경우까지 한 번에 들어온다. 못 알아냈을 때만 붙여넣기판을 읽는다.
+  const given = Array.isArray(fromRenderer) ? fromRenderer.filter((item) => typeof item === 'string' && item) : [];
+  const paths = given.length ? [...new Set(given)] : pasteboardFilePaths();
   if (!paths.length) return { ok: false, reason: 'empty' };
   const usable = [];
   for (const itemPath of paths) {

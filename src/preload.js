@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('soundLibrary', {
   addDroppedFiles: (files) => ipcRenderer.invoke('library:add-paths', filePaths(files)),
   addFolder: () => ipcRenderer.invoke('library:add-folder'),
   pasteClipboardFiles: (payload) => ipcRenderer.invoke('library:paste-clipboard-files', payload),
+  pasteFiles: (files, category = null) => ipcRenderer.invoke('library:paste-clipboard-files', { category, paths: filePaths(files) }),
   openVault: () => ipcRenderer.invoke('vault:open'),
   createVault: () => ipcRenderer.invoke('vault:create'),
   locateVault: () => ipcRenderer.invoke('vault:locate'),
