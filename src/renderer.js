@@ -1584,17 +1584,28 @@ async function moveSelectionToCategory() {
   }
 }
 
-async function trashSelection() {
+// trashFile 이 false 면 원본은 그대로 두고 목록에서만 뺀다. 그 경로는 자동 스캔이
+// 되돌리지 않고, 나중에 앱으로 다시 끌어다 놓으면 태그·별점이 함께 살아난다.
+async function trashSelection({ trashFile = true } = {}) {
   const ids = selectedIdList();
   if (!ids.length) return;
   if (state.playingId && ids.includes(state.playingId)) pausePreviewPlayback();
   const listPosition = captureListPosition(ids);
-  showToast(`${ids.length}개 파일을 휴지통으로 이동하는 중…`, 15000);
+  const label = trashFile ? '휴지통으로 이동' : '라이브러리에서 제거';
+  showToast(`${ids.length}개를 ${label}하는 중…`, 15000);
   try {
-    const snapshot = await window.soundLibrary.removeSoundsBatch({ ids });
+    const snapshot = await window.soundLibrary.removeSoundsBatch({ ids, trashFile });
     state.inspectorOpen = false;
     setLibrary(snapshot, { preserveListPosition: listPosition });
-    showToast(`${ids.length}개 파일을 휴지통으로 이동했습니다.`);
+    const result = snapshot.removeResult;
+    if (result?.failures?.length) {
+      const first = result.failures[0];
+      showToast(`${result.removed}개 처리 · ${result.failures.length}개 실패 (${first.fileName}: ${first.message})`, 8000);
+      return;
+    }
+    showToast(trashFile
+      ? `${ids.length}개 파일을 휴지통으로 이동했습니다.`
+      : `${ids.length}개를 라이브러리에서 제거했습니다. 원본 파일은 그대로 있습니다.`, 4000);
   } catch (error) {
     showToast(`삭제 실패: ${error.message}`, 5000);
   }
@@ -1833,7 +1844,9 @@ function showContextMenu(event, target) {
       <button data-context-action="move-category">카테고리 폴더로 이동…</button>
       <button data-context-action="move-folder">다른 폴더로 이동…</button>
       <button data-context-action="reveal-sound">Finder에서 보기</button>
-      <div class="separator"></div><button class="danger" data-context-action="trash-sound">${selectedSoundCount > 1 ? `선택한 ${selectedSoundCount}개 파일을 휴지통으로` : '원본 파일을 휴지통으로'}</button>`;
+      <div class="separator"></div>
+      <button data-context-action="unlink-sound">${selectedSoundCount > 1 ? `선택한 ${selectedSoundCount}개를 라이브러리에서만 제거` : '라이브러리에서만 제거 (파일은 유지)'}</button>
+      <button class="danger" data-context-action="trash-sound">${selectedSoundCount > 1 ? `선택한 ${selectedSoundCount}개 파일을 휴지통으로` : '원본 파일을 휴지통으로'}</button>`;
   }
   menu.classList.remove('hidden');
   const rect = menu.getBoundingClientRect();
@@ -2558,7 +2571,7 @@ $('#contextMenu').addEventListener('click', async (event) => {
     if (action === 'manage-tags') return openTagManager();
     return;
   }
-  const keepMultipleSelection = action === 'trash-sound'
+  const keepMultipleSelection = (action === 'trash-sound' || action === 'unlink-sound')
     && state.selectedIds.size > 1
     && state.selectedIds.has(target.id);
   state.selectedId = target.id;
@@ -2579,6 +2592,7 @@ $('#contextMenu').addEventListener('click', async (event) => {
   if (action === 'move-category') return moveSelectedToCategory();
   if (action === 'move-folder') return moveSelectedToFolder();
   if (action === 'trash-sound') return trashSelected();
+  if (action === 'unlink-sound') return trashSelection({ trashFile: false });
   if (action === 'reveal-sound') {
     const sound = selectedSound();
     if (sound) window.soundLibrary.reveal(sound.path);

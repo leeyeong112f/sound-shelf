@@ -180,3 +180,64 @@ test('베이스에 없는 신규 사운드는 유지된다', () => {
   const own = { z: { ...sound('z'), updatedAt: 100 } };
   assert.strictEqual(Object.keys(pruneRedundantEdits(own, [], FIELDS)).length, 1);
 });
+
+// --- 명시적 복원 ---
+// 삭제한 파일을 같은 자리에 되돌려 놓고 앱이 "같은 파일"임을 확인했을 때만 붙는 표식이다.
+// 일반 편집과 달리 삭제를 이겨야 하지만, 그 외에는 삭제 우선 원칙이 그대로 유지돼야 한다.
+
+test('명시적 복원은 더 최신이면 삭제를 이긴다', () => {
+  const merged = mergeVaultState(
+    { sounds: [{ id: 's1', relativePath: 'a.wav', title: '원본' }], folderOrder: [] },
+    [
+      { machineId: 'mac-a', sounds: { s1: { id: 's1', relativePath: 'a.wav', updatedAt: 100, deleted: true } } },
+      { machineId: 'mac-b', sounds: { s1: { id: 's1', relativePath: 'a.wav', title: '복원됨', tags: ['x'], updatedAt: 200, restored: true } } }
+    ]
+  );
+  assert.equal(merged.sounds.length, 1);
+  assert.equal(merged.sounds[0].title, '복원됨');
+  assert.deepEqual(merged.sounds[0].tags, ['x']);
+  assert.equal(merged.deletedSounds.length, 0);
+});
+
+test('복원보다 더 최신인 삭제는 다시 삭제로 이긴다', () => {
+  const merged = mergeVaultState(
+    { sounds: [{ id: 's1', relativePath: 'a.wav' }], folderOrder: [] },
+    [
+      { machineId: 'mac-b', sounds: { s1: { id: 's1', relativePath: 'a.wav', updatedAt: 200, restored: true } } },
+      { machineId: 'mac-a', sounds: { s1: { id: 's1', relativePath: 'a.wav', updatedAt: 300, deleted: true } } }
+    ]
+  );
+  assert.equal(merged.sounds.length, 0);
+  assert.equal(merged.deletedSounds.length, 1);
+});
+
+test('복원 병합은 편집 파일 순서와 무관하다', () => {
+  const remove = { machineId: 'mac-a', sounds: { s1: { id: 's1', relativePath: 'a.wav', updatedAt: 100, deleted: true } } };
+  const restore = { machineId: 'mac-b', sounds: { s1: { id: 's1', relativePath: 'a.wav', updatedAt: 200, restored: true } } };
+  const base = { sounds: [{ id: 's1', relativePath: 'a.wav' }], folderOrder: [] };
+  const forward = mergeVaultState(base, [remove, restore]);
+  const backward = mergeVaultState(base, [restore, remove]);
+  assert.equal(forward.sounds.length, 1);
+  assert.deepEqual(forward.sounds.map((s) => s.id), backward.sounds.map((s) => s.id));
+  assert.deepEqual(forward.deletedSounds.map((s) => s.id), backward.deletedSounds.map((s) => s.id));
+});
+
+test('복원 표식이 없는 일반 편집은 여전히 삭제를 이기지 못한다', () => {
+  const merged = mergeVaultState(
+    { sounds: [{ id: 's1', relativePath: 'a.wav' }], folderOrder: [] },
+    [
+      { machineId: 'mac-a', sounds: { s1: { id: 's1', relativePath: 'a.wav', updatedAt: 100, deleted: true } } },
+      { machineId: 'mac-b', sounds: { s1: { id: 's1', relativePath: 'a.wav', tags: ['늦은편집'], updatedAt: 999 } } }
+    ]
+  );
+  assert.equal(merged.sounds.length, 0);
+  assert.equal(merged.deletedSounds.length, 1);
+});
+
+test('복원 레코드는 베이스와 같아 보여도 정리되지 않는다', () => {
+  const base = [{ id: 's1', relativePath: 'a.wav', title: 'a', tags: [] }];
+  const own = { s1: { id: 's1', relativePath: 'a.wav', title: 'a', tags: [], updatedAt: 200, restored: true } };
+  const kept = pruneRedundantEdits(own, base, ['relativePath', 'title', 'tags']);
+  assert.ok(kept.s1, '복원 표식을 지우면 베이스의 삭제 표식이 다시 이겨 사운드가 또 사라진다');
+  assert.equal(kept.s1.restored, true);
+});
