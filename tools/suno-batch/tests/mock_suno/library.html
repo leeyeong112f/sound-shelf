@@ -1,0 +1,83 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mock Suno — Library</title>
+<style>
+  body { font: 14px system-ui; margin: 24px; max-width: 720px; }
+  .row { border: 1px solid #ccc; padding: 8px; margin-top: 8px; }
+  .menu { margin-top: 6px; padding: 6px; background: #eee; }
+  [hidden] { display: none !important; }
+</style>
+
+<header>
+  <button data-testid="user-menu">계정</button>
+  <a href="create.html">만들기</a>
+  <span data-testid="download-quota">남은 다운로드 <b id="left">20</b></span>
+</header>
+
+<h1>Library</h1>
+<div id="clips"></div>
+
+<div data-testid="download-limit-reached" role="dialog" hidden>
+  <p>download limit reached</p>
+</div>
+
+<script src="mock.js"></script>
+<script>
+  // 남은 횟수는 실제 Suno처럼 계정에 걸린 값이라 페이지를 넘어가도 유지된다.
+  const QUOTA = 'mock-suno-quota';
+  const params = new URLSearchParams(location.search);
+  if (params.has('quota')) localStorage.setItem(QUOTA, params.get('quota'));
+  // 표시된 숫자와 무관하게 이만큼만 실제로 받아진다. 화면 숫자가 없거나
+  // 낡았을 때 도중에 막히는 상황을 흉내 낸다.
+  let allowed = params.has('wall_after') ? Number(params.get('wall_after')) : Infinity;
+  const remaining = () => Number(localStorage.getItem(QUOTA) ?? '20');
+  const setRemaining = (value) => {
+    localStorage.setItem(QUOTA, String(value));
+    document.querySelector('#left').textContent = String(value);
+  };
+  setRemaining(remaining());
+
+  function render() {
+    const host = document.querySelector('#clips');
+    host.innerHTML = '';
+    for (const clip of loadClips()) {
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.setAttribute('data-testid', 'clip-row');
+      row.setAttribute('data-clip-id', clip.id);
+
+      const name = document.createElement('span');
+      name.textContent = clip.title;
+      row.appendChild(name);
+
+      const open = document.createElement('button');
+      open.setAttribute('data-testid', 'download-button');
+      open.textContent = 'Download';
+      row.appendChild(open);
+
+      const menu = document.createElement('div');
+      menu.className = 'menu';
+      menu.hidden = true;
+      const wav = document.createElement('button');
+      wav.setAttribute('data-testid', 'download-wav');
+      wav.textContent = 'WAV';
+      menu.appendChild(wav);
+      row.appendChild(menu);
+
+      open.addEventListener('click', () => { menu.hidden = !menu.hidden; });
+      wav.addEventListener('click', () => {
+        if (remaining() <= 0 || allowed <= 0) {
+          document.querySelector('[data-testid=download-limit-reached]').hidden = false;
+          return;
+        }
+        allowed -= 1;
+        setRemaining(remaining() - 1);
+        triggerDownload(clip.title + '.wav', silentWav());
+        menu.hidden = true;
+      });
+
+      host.appendChild(row);
+    }
+  }
+  render();
+</script>

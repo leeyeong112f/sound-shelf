@@ -1,0 +1,69 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mock Suno — Create</title>
+<style>
+  body { font: 14px system-ui; margin: 24px; max-width: 720px; }
+  label { display: block; margin: 12px 0 4px; font-weight: 600; }
+  textarea, input[type=text] { width: 100%; padding: 8px; }
+  .row { border: 1px solid #ccc; padding: 8px; margin-top: 8px; }
+  .on { background: #dfd; }
+</style>
+
+<header>
+  <button data-testid="user-menu">계정</button>
+  <a href="library.html">라이브러리</a>
+</header>
+
+<h1>Create</h1>
+
+<button data-testid="custom-mode-toggle" aria-pressed="false">Custom</button>
+<button data-testid="instrumental-toggle" aria-pressed="false">Instrumental</button>
+
+<label for="style">Style</label>
+<textarea id="style" data-testid="style-input" rows="3"></textarea>
+
+<label for="title">Title</label>
+<input id="title" type="text" data-testid="title-input">
+
+<p><button data-testid="create-button">Create</button></p>
+
+<div id="results"></div>
+
+<script src="mock.js"></script>
+<script>
+  const custom = document.querySelector('[data-testid=custom-mode-toggle]');
+  const instrumental = document.querySelector('[data-testid=instrumental-toggle]');
+  for (const button of [custom, instrumental]) {
+    button.addEventListener('click', () => {
+      const next = button.getAttribute('aria-pressed') !== 'true';
+      button.setAttribute('aria-pressed', String(next));
+      button.classList.toggle('on', next);
+    });
+  }
+
+  document.querySelector('[data-testid=create-button]').addEventListener('click', () => {
+    const title = document.querySelector('[data-testid=title-input]').value.trim();
+    const style = document.querySelector('[data-testid=style-input]').value.trim();
+    if (!title || !style) return;
+
+    const results = document.querySelector('#results');
+    results.textContent = '만드는 중…';
+
+    // 진짜 Suno처럼 결과가 곧바로 나오지 않는다. 기다리는 코드가 실제로
+    // 기다리는지 보려면 지연이 있어야 한다.
+    setTimeout(() => {
+      const clips = loadClips();
+      const id = 'clip-' + Math.random().toString(36).slice(2, 10);
+      clips.push({ id, title, style, instrumental: instrumental.getAttribute('aria-pressed') === 'true' });
+      saveClips(clips);
+
+      results.innerHTML = '';
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.setAttribute('data-testid', 'clip-row');
+      row.setAttribute('data-clip-id', id);
+      row.textContent = title;
+      results.appendChild(row);
+    }, 600);
+  });
+</script>

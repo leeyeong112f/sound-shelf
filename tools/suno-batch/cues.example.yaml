@@ -1,0 +1,24 @@
+# cue 정의. 이 파일을 CODEX_BRIEF.md와 함께 Codex에 주면 prompts.json을 만들어 준다.
+# 여기는 "어떤 음악이 필요한가"만 적는다. 실제 Suno 프롬프트는 Codex가 쓴다.
+
+project: "영화 제목"
+
+defaults:
+  instrumental: true      # 전곡 연주곡. 가사 없음
+  takes_per_cue: 10       # cue마다 후보 몇 곡
+  length_hint: "60-90s"
+
+cues:
+  - id: 1
+    name: "오프닝"
+    mood: "차갑고 광활한, 서서히 밀려오는 긴장"
+
+  - id: 2
+    name: "첫 추격"
+    mood: "빠른 타악, 쫓기는 호흡, 쉴 틈 없음"
+
+  - id: 3
+    name: "회상"
+    mood: "따뜻하지만 물러난 느낌, 피아노 중심, 먼 기억"
+
+  # ... 50번까지

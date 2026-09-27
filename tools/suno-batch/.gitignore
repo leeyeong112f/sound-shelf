@@ -1,0 +1,5 @@
+.profile/
+work/
+prompts.json
+cues.yaml
+__pycache__/

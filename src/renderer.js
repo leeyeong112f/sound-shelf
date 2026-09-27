@@ -3059,17 +3059,25 @@ function pasteTargetCategory() {
   return category && category !== '미분류' ? category : null;
 }
 
-// Finder에서 ⌘C로 복사한 오디오 파일을 볼트로 옮긴다. Finder가 복사한 파일은
-// 렌더러의 clipboardData에 실려 오지 않으므로 메인 프로세스가 붙여넣기판을 읽는다.
-async function pasteClipboardFiles() {
+// Finder에서 ⌘C로 복사한 오디오 파일을 볼트로 옮긴다. 경로는 두 갈래로 얻는다.
+// Chromium이 붙여넣기판의 파일을 clipboardData.files로 넘겨주면 드래그앤드롭과
+// 똑같이 그 File에서 경로를 얻고, 넘겨주지 않으면 메인 프로세스가 macOS
+// 붙여넣기판을 직접 읽는다. announceEmpty는 파일을 붙여 넣은 것이 분명한데도
+// 경로를 못 찾았을 때만 켠다. 평범한 글자 붙여넣기는 조용히 지나가야 한다.
+async function pasteClipboardFiles(files = [], { announceEmpty = false } = {}) {
   const where = pasteTargetCategory();
   try {
-    const result = await window.soundLibrary.pasteClipboardFiles({ category: where });
+    const result = files.length
+      ? await window.soundLibrary.pasteFiles(files, where)
+      : await window.soundLibrary.pasteClipboardFiles({ category: where });
     if (result?.reason === 'unsupported') {
       showToast('복사한 항목 중에 오디오 파일이 없습니다.', 4000);
       return;
     }
-    if (!result?.ok) return;
+    if (!result?.ok) {
+      if (announceEmpty) showToast('복사한 파일을 찾지 못했습니다. 파일을 끌어다 놓아 주세요.', 5000);
+      return;
+    }
     setLibrary(result.snapshot);
     showToast(`${result.count}개를 ${where ? `“${where}”로` : '볼트로'} 가져왔습니다.`, 4000);
   } catch (error) {
@@ -3100,17 +3108,20 @@ document.addEventListener('paste', (event) => {
     showToast('재생목록 주소는 지원하지 않습니다. 영상 하나의 주소를 붙여 넣어 주세요.', 5000);
     return;
   }
-  // 주소가 아니면 파일 쪽이다. 붙여넣기판에 파일이 있으면 Chromium이 types에
-  // 'Files'를 넣어 주므로, 그때만 기본 동작을 막는다. 이렇게 하지 않으면
-  // 검색창에 평범한 글자를 붙여 넣는 것까지 막힌다.
-  if ([...(event.clipboardData?.types || [])].includes('Files')) {
+  // 주소가 아니면 파일 쪽이다. Chromium이 붙여넣기판의 파일을 알려줄 때만
+  // 기본 동작을 막는다. 이렇게 하지 않으면 검색창에 평범한 글자를 붙여 넣는 것까지
+  // 막힌다.
+  const files = [...(event.clipboardData?.files || [])];
+  if (files.length || [...(event.clipboardData?.types || [])].includes('Files')) {
     event.preventDefault();
-    pasteClipboardFiles();
+    pasteClipboardFiles(files, { announceEmpty: true });
     return;
   }
-  // 입력창이 아니면 글자를 붙여 넣을 곳이 없다. Chromium이 'Files'를 알려주지
-  // 않는 경우까지 받아내되, 붙여넣기판이 비어 있으면 조용히 지나간다.
-  if (!isTextEntry) pasteClipboardFiles();
+  // Chromium이 'Files'를 알려주지 않아도 macOS 붙여넣기판에는 Finder가 복사한
+  // 파일이 들어 있을 수 있다. 검색창을 포함해 어디에 초점이 있든 메인 프로세스에
+  // 한 번 물어본다. 붙여넣기판에 파일이 없으면 조용히 지나가므로, 기본 동작을
+  // 막지 않은 글자 붙여넣기는 그대로 동작한다.
+  pasteClipboardFiles();
 });
 
 // this capture-phase guard, Chromium can navigate to the dropped audio file
