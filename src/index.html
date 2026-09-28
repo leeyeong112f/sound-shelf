@@ -200,7 +200,10 @@
     </div>
     <div id="contextMenu" class="context-menu hidden" role="menu"></div>
     <div id="resultsDialog" class="dialog-backdrop hidden"><div class="results-dialog"><div class="results-heading"><h2 id="resultsTitle">중복 파일 검사</h2><button id="closeResultsBtn">×</button></div><div id="resultsContent"></div></div></div>
-    <div id="scanToast" class="toast hidden"></div>
+    <div class="toast-stack">
+      <div id="scanToast" class="toast hidden"></div>
+      <div id="noticeToast" class="toast notice-toast hidden"></div>
+    </div>
     <audio id="audioPlayer"></audio>
     <script src="key-analysis.js"></script>
     <script src="pitch-guide.js"></script>

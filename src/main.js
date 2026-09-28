@@ -9,15 +9,17 @@ const { execFile, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
 const os = require('node:os');
 const { VaultStorage, normalizedRelativePath, relativePathInside, writeJsonAtomic } = require('./vault-storage');
-const { mergeVaultState, pruneRedundantEdits } = require('./vault-sync');
+const { mergeVaultState, pruneRedundantEdits, reconcileOwnTombstones } = require('./vault-sync');
 const { matchesRenameFingerprint, matchesStableFileFingerprint } = require('./file-identity');
 const {
+  MISSING,
   TRASHED,
   UNLINKED,
   restorableTombstone,
   restoredSoundFields,
   unlinkedRelativePaths
 } = require('./sound-restore');
+const { selectMissingForCleanup } = require('./missing-cleanup');
 const { failedProbeMetadata, mediaErrorMessage, needsTechnicalProbe } = require('./media-health');
 const { clipboardFilePaths } = require('./clipboard-files');
 const { isCurrentKeyAnalysis, keyAnalysisErrorMessage } = require('./key-analysis');
@@ -92,6 +94,15 @@ let deletedSoundTombstones = new Map();
 let unlinkedPaths = new Set();
 // 이번 저장에서 "항목만 삭제"로 표식을 남겨야 할 id. collectLocalEdits 가 읽고 비운다.
 const pendingUnlinkIds = new Set();
+// 이번 저장에서 "누락 자동 정리"로 표식을 남겨야 할 id. collectLocalEdits 가 읽고 비운다.
+const pendingMissingIds = new Set();
+// 누락 자동 정리를 한도 초과로 건너뛴 알림은 같은 개수에 대해 세션당 한 번만 띄운다.
+// 창에 포커스가 올 때마다 전체 재스캔이 돌기 때문이다.
+let lastMissingCleanupNotice = 0;
+// 파일을 옮긴 뒤 sound.path 를 고치기 전까지는 옛 경로가 ENOENT 다. 이동 핸들러는 볼트
+// 활성화 큐 밖에서 돌기 때문에, 이 사이에 누락 자동 정리가 돌면 방금 옮긴 사운드를 사라진
+// 것으로 본다. 경로를 바꾸는 작업은 whilePathsChange 로 감싸고, 정리는 이 값이 0 일 때만 한다.
+let pathChangesInFlight = 0;
 let lastEditStamps = '';
 // 기동 시 라이브러리 파손을 복구했거나 볼트를 열지 못했을 때 설정 화면에 알리기 위한 상태.
 let libraryRecovery = null;
@@ -155,6 +166,15 @@ function wait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+async function whilePathsChange(work) {
+  pathChangesInFlight += 1;
+  try {
+    return await work();
+  } finally {
+    pathChangesInFlight -= 1;
+  }
+}
+
 // 앱을 끄거나 타임아웃이 걸렸을 때 정리해야 할, 오래 도는 자식 프로세스들.
 const activeChildProcesses = new Set();
 
@@ -182,6 +202,7 @@ function markSoundRestored(sound) {
   deletedSoundTombstones.delete(sound.id);
   unlinkedPaths = unlinkedRelativePaths([...deletedSoundTombstones.values()]);
   pendingUnlinkIds.delete(sound.id);
+  pendingMissingIds.delete(sound.id);
   const portable = portableSound(sound);
   if (!portable) return;
   ownEdits.sounds[sound.id] = { ...portable, updatedAt: Date.now(), deleted: false, restored: true };
@@ -190,9 +211,11 @@ function markSoundRestored(sound) {
   syncBaseline.set(sound.id, { ...portable, updatedAt: ownEdits.sounds[sound.id].updatedAt });
 }
 
-function setSyncBaseline(merged) {
+// diskOwnSounds 는 이번 병합에 넣은 내 편집 파일 내용이다. 있을 때만 내 삭제 표식을 병합 결과에 맞춘다.
+function setSyncBaseline(merged, diskOwnSounds = null) {
   const live = merged?.sounds || [];
   const deleted = merged?.deletedSounds || [];
+  if (diskOwnSounds) ownEdits.sounds = reconcileOwnTombstones(ownEdits.sounds, live, diskOwnSounds);
   syncBaseline = new Map([...live, ...deleted].filter((sound) => sound?.id)
     .map((sound) => [sound.id, sound]));
   setDeletedSoundTombstones(deleted);
@@ -477,7 +500,7 @@ function hydrateMergedSounds(mergedSounds, root) {
     ));
 }
 
-function applyMergedState(merged) {
+function applyMergedState(merged, diskOwnSounds = null) {
   const before = editSignature(db.sounds.map(portableSound).filter(Boolean));
   const beforeOrder = JSON.stringify(db.categoryOrder || []);
   const beforeVolume = db.settings.previewVolume;
@@ -488,7 +511,7 @@ function applyMergedState(merged) {
   // 합집합한다. 삭제된 폴더의 정리는 지금처럼 다음 폴더 재스캔이 담당한다.
   db.categories = [...new Set([...db.categories, ...db.sounds.map((sound) => sound.categoryPath).filter(Boolean)])]
     .sort((a, b) => a.localeCompare(b, 'ko'));
-  setSyncBaseline(merged);
+  setSyncBaseline(merged, diskOwnSounds);
   // 원격에서 삭제된 사운드의 캐시 행이 남으면, 같은 상대 경로의 새 파일이 옛 기술 정보를
   // 물려받는다. 병합 결과를 캐시에 바로 반영한다.
   try {
@@ -546,6 +569,8 @@ async function activateVaultNow(rootPath, { legacySounds = [], legacyCategoryOrd
     folderOrder: mine?.folderOrder || null,
     settings: mine?.settings || null
   };
+  // 이전 볼트나 실패한 활성화에서 남은 id 가 이 볼트의 무관한 삭제에 붙지 않게 한다.
+  pendingMissingIds.clear();
   // 베이스와 동일해 병합에 기여하지 않는 군더더기 레코드를 정리한다. 과거에
   // 기술 필드 변화만으로 기록된 전 사운드 레코드가 여기서 줄어들고, 다음
   // saveDb 때 슬림해진 자기 편집 파일만 저장된다.
@@ -586,7 +611,7 @@ async function activateVaultNow(rootPath, { legacySounds = [], legacyCategoryOrd
   db.sounds = deduplicateSoundsByPath(hydrated);
   db.categoryOrder = merged.folderOrder.length ? merged.folderOrder : legacyCategoryOrder;
   if (merged.previewVolume !== null) db.settings.previewVolume = merged.previewVolume;
-  setSyncBaseline(merged);
+  setSyncBaseline(merged, mine?.sounds || {});
   db.categories = [...new Set(db.sounds.map((sound) => sound.categoryPath).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, 'ko'));
   // Show the cached library right away — the folder repair and full rescan
@@ -722,10 +747,14 @@ function collectLocalEdits() {
     if (current.has(id) || baseline.deleted) continue;
     // "항목만 삭제"는 파일을 그대로 두므로 자동 스캔이 되돌리면 안 된다. 원본을 휴지통으로
     // 보낸 삭제는 같은 파일이 돌아오면 되살려야 하므로 둘을 구분해 기록한다.
-    const reason = pendingUnlinkIds.has(id) ? UNLINKED : TRASHED;
+    const reason = pendingUnlinkIds.has(id) ? UNLINKED : pendingMissingIds.has(id) ? MISSING : TRASHED;
     ownEdits.sounds[id] = { ...baseline, id, updatedAt: now, deleted: true, restored: false, reason };
+    // 누락 정리 표식에는 이 Mac 이 본 마지막 편집 시각을 남긴다. 파일을 가진 Mac 이 되살릴 때
+    // 자기 기록이 이보다 새로우면(아직 안 올라간 태그 등) 그 값을 쓴다(restoredSoundFields).
+    if (reason === MISSING) ownEdits.sounds[id].liveUpdatedAt = Number(baseline.updatedAt || 0);
   }
   pendingUnlinkIds.clear();
+  pendingMissingIds.clear();
 
   const order = [...new Set(db.categoryOrder || [])];
   if (JSON.stringify(order) !== JSON.stringify(ownEdits.folderOrder?.order || null)) {
@@ -737,7 +766,12 @@ function collectLocalEdits() {
     ownEdits.settings = { updatedAt: now, previewVolume: volume };
   }
 
-  syncBaseline = new Map([...current].map(([id, sound]) => [id, { ...sound, updatedAt: ownEdits.sounds[id]?.updatedAt ?? syncBaseline.get(id)?.updatedAt ?? 0 }]));
+  // 이 Mac 의 옛 기록 시각이 병합으로 받은 다른 Mac 의 최신 시각을 덮으면, 누락 자동 정리가
+  // 방금 다른 Mac 에서 고친 사운드를 오래된 것으로 보고 유예 없이 지운다. 큰 쪽을 남긴다.
+  syncBaseline = new Map([...current].map(([id, sound]) => [id, {
+    ...sound,
+    updatedAt: Math.max(Number(ownEdits.sounds[id]?.updatedAt || 0), Number(syncBaseline.get(id)?.updatedAt || 0))
+  }]));
   const tombstones = [...deletedSoundTombstones.values()];
   for (const [id, record] of Object.entries(ownEdits.sounds)) {
     if (!record.deleted) continue;
@@ -1133,7 +1167,7 @@ async function indexFiles(filePaths, { reportProgress = true, categoryFolders = 
         contentHash: ''
       });
       if (tombstone && !restoredIds.has(tombstone.id)) {
-        restoredFields = restoredSoundFields(tombstone);
+        restoredFields = restoredSoundFields(tombstone, ownEdits.sounds[tombstone.id]);
         restoredIds.add(tombstone.id);
         restored += 1;
       }
@@ -1347,10 +1381,71 @@ async function rescanWatchedFolders({ reportProgress = true, allowRestore = fals
     categoryFolders: [...new Set(categoryGroups.flat())],
     allowRestore
   });
+  await cleanUpMissingSounds(files);
   db.categories = [...new Set([...categoryGroups.flat(), ...db.sounds.map((sound) => sound.categoryPath)].filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, 'ko'));
   await saveDb();
   return { ...librarySnapshot(), idChanges: relinkResult.idChanges, relinkResult };
+}
+
+// 재연결까지 끝난 뒤에도 파일이 없는 레코드 중, 되돌릴 사용자 정보가 없고 오래된 것을
+// 목록에서 뺀다. 판정 규칙은 missing-cleanup.js 에 있다. 뺀 레코드는 saveDb 에서 missing
+// 표식으로 편집 파일에 남아 다른 Mac 에서도 사라진다.
+//
+// 전체 재스캔에서만 부른다. 부분 재스캔은 볼트 일부만 훑으므로 판정 근거로 쓰지 않는다.
+async function cleanUpMissingSounds(files) {
+  // 볼트가 열리지 않았으면 saveDbNow 가 편집 파일을 쓰지 않아 표식이 남지 않는다.
+  if (!vaultStorage || !activeVault) return;
+  const startedVault = activeVault;
+  const startedStorage = vaultStorage;
+  // lstat 을 기다리는 사이 볼트 이동이나 Drive 연결 해제로 루트가 사라지면 남은 레코드가 모두
+  // ENOENT 가 된다. 루트 폴더 대신 vault.json 을 보는 이유: saveEdits 가 사라진 루트를
+  // .sound-shelf/edits 만 있는 폴더로 다시 만들 수 있다.
+  const vaultStillThere = () => activeVault === startedVault && vaultStorage === startedStorage
+    && fs.existsSync(startedStorage.manifestPath);
+  // 볼트가 보이지 않거나 오디오를 하나도 찾지 못했으면 Drive 가 아직 준비되지 않은 것이다.
+  if (!vaultStillThere() || !files.length) return;
+  const missing = [];
+  for (const sound of db.sounds) {
+    if (!sound.relativePath || fs.existsSync(sound.path)) continue;
+    // existsSync 는 권한 오류나 I/O 오류도 false 로 돌려준다. 없다는 확답만 믿는다.
+    try {
+      await fsp.lstat(sound.path);
+    } catch (error) {
+      if (error.code === 'ENOENT' || error.code === 'ENOTDIR') missing.push({ sound, checkedPath: sound.path });
+    }
+  }
+  if (!missing.length) {
+    lastMissingCleanupNotice = 0;
+    return;
+  }
+  const missingIds = new Set(missing.map(({ sound }) => sound.id));
+  const selection = selectMissingForCleanup(missing.map(({ sound }) => sound), {
+    now: Date.now(),
+    baselineById: syncBaseline,
+    presentSounds: db.sounds.filter((sound) => !missingIds.has(sound.id))
+  });
+  if (!vaultStillThere()) return;
+  if (selection.blocked) {
+    console.warn(`Missing-file cleanup skipped: ${selection.candidates} candidates exceed the batch limit.`);
+    if (mainWindow && !mainWindow.isDestroyed() && lastMissingCleanupNotice !== selection.candidates) {
+      lastMissingCleanupNotice = selection.candidates;
+      mainWindow.webContents.send('library-notice',
+        `원본 파일이 없는 항목 ${selection.candidates}개가 한꺼번에 발견되어 자동 정리를 건너뛰었습니다. 볼트 폴더(Google Drive) 연결 상태를 확인해 주세요.`);
+    }
+    return;
+  }
+  lastMissingCleanupNotice = 0;
+  // 위 lstat 을 기다리는 동안 이동·이름 변경이 끼어들었을 수 있다. 여기부터는 동기 구간이다.
+  if (pathChangesInFlight > 0 || !selection.ids.length) return;
+  const checkedPathById = new Map(missing.map(({ sound, checkedPath }) => [sound.id, checkedPath]));
+  const removing = new Set(selection.ids.filter((id) => {
+    const sound = db.sounds.find((candidate) => candidate.id === id);
+    return sound && sound.path === checkedPathById.get(id) && !fs.existsSync(sound.path);
+  }));
+  if (!removing.size) return;
+  for (const id of removing) pendingMissingIds.add(id);
+  db.sounds = db.sounds.filter((sound) => !removing.has(sound.id));
 }
 
 async function rescanChangedFolders(folders, { reportProgress = false } = {}) {
@@ -1448,7 +1543,8 @@ async function pollRemoteEdits() {
     { sounds: portableMetadata.sounds, folderOrder: savedFolderOrder },
     editSources
   );
-  const changed = applyMergedState(merged);
+  const diskOwnSounds = editSources.find((source) => source.machineId === db.settings.machineId)?.sounds || {};
+  const changed = applyMergedState(merged, diskOwnSounds);
   if (!changed) return;
   mainWindow?.webContents.send('library-updated', { ...librarySnapshot(), updateReason: 'remote-sync' });
 }
@@ -1643,11 +1739,13 @@ async function moveCategoryDirectory(sourceCategory, targetCategory) {
   const destinationFolder = path.join(targetFolder, path.basename(sourceFolder));
   if (path.resolve(destinationFolder) === path.resolve(sourceFolder)) return librarySnapshot();
   if (fs.existsSync(destinationFolder)) throw new Error('대상 폴더에 같은 이름의 폴더가 이미 있습니다.');
-  await moveFile(sourceFolder, destinationFolder);
   const destinationCategory = target === '미분류'
     ? path.basename(sourceFolder)
     : `${target}/${path.basename(sourceFolder)}`;
-  const idChanges = updateSoundsForCategoryMove(source, destinationCategory, sourceFolder, destinationFolder);
+  const idChanges = await whilePathsChange(async () => {
+    await moveFile(sourceFolder, destinationFolder);
+    return updateSoundsForCategoryMove(source, destinationCategory, sourceFolder, destinationFolder);
+  });
   await saveDb();
   refreshFolderWatchers();
   return { ...librarySnapshot(), idChanges, categoryMove: { from: source, to: destinationCategory } };
@@ -1671,10 +1769,13 @@ async function moveSoundToFolder(sound, folder, categoryPath, { save = true } = 
   const destination = path.resolve(path.dirname(sound.path)) === path.resolve(folder)
     ? sound.path
     : uniqueDestination(folder, sound.fileName);
-  if (path.resolve(sound.path) !== path.resolve(destination)) await moveFile(sound.path, destination);
   const oldId = sound.id;
-  const stat = await fsp.stat(destination);
-  sound.path = destination;
+  const stat = await whilePathsChange(async () => {
+    if (path.resolve(sound.path) !== path.resolve(destination)) await moveFile(sound.path, destination);
+    const destinationStat = await fsp.stat(destination);
+    sound.path = destination;
+    return destinationStat;
+  });
   sound.fileName = path.basename(destination);
   sound.relativePath = soundRelativePath(destination) || sound.relativePath || '';
   sound.categoryPath = categoryPath || inferCategoryPath(destination);
@@ -2295,12 +2396,15 @@ ipcMain.handle('library:rename', (_event, { id, name }) => withLocalMutation(asy
   const extension = path.extname(sound.path);
   const destination = path.join(path.dirname(sound.path), `${safeName}${extension}`);
   const oldId = sound.id;
-  if (normalizedFsPath(destination) !== normalizedFsPath(sound.path)) {
-    if (fs.existsSync(destination)) throw new Error('같은 이름의 파일이 이미 있습니다.');
-    await fsp.rename(sound.path, destination);
-  }
-  const stat = await fsp.stat(destination);
-  sound.path = destination;
+  const stat = await whilePathsChange(async () => {
+    if (normalizedFsPath(destination) !== normalizedFsPath(sound.path)) {
+      if (fs.existsSync(destination)) throw new Error('같은 이름의 파일이 이미 있습니다.');
+      await fsp.rename(sound.path, destination);
+    }
+    const destinationStat = await fsp.stat(destination);
+    sound.path = destination;
+    return destinationStat;
+  });
   sound.fileName = path.basename(destination);
   sound.title = safeName;
   sound.relativePath = soundRelativePath(destination) || sound.relativePath || '';
@@ -2632,10 +2736,12 @@ handleMutation('category:rename', async (_event, { category, name }) => {
   if (!sourceFolder || !fs.existsSync(sourceFolder)) throw new Error('원본 폴더를 찾을 수 없습니다.');
   const destinationFolder = path.join(path.dirname(sourceFolder), safeName);
   if (fs.existsSync(destinationFolder)) throw new Error('같은 이름의 폴더가 이미 있습니다.');
-  await fsp.rename(sourceFolder, destinationFolder);
   const parentCategory = sourceCategory.includes('/') ? sourceCategory.slice(0, sourceCategory.lastIndexOf('/')) : '';
   const destinationCategory = parentCategory ? `${parentCategory}/${safeName}` : safeName;
-  const idChanges = updateSoundsForCategoryMove(sourceCategory, destinationCategory, sourceFolder, destinationFolder);
+  const idChanges = await whilePathsChange(async () => {
+    await fsp.rename(sourceFolder, destinationFolder);
+    return updateSoundsForCategoryMove(sourceCategory, destinationCategory, sourceFolder, destinationFolder);
+  });
   await saveDb();
   return { ...librarySnapshot(), idChanges, categoryMove: { from: sourceCategory, to: destinationCategory } };
 });
