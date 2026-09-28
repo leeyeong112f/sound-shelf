@@ -48,7 +48,10 @@ function mergeVaultState(base, editSources) {
         // 단, 아래의 명시적 복원(restored)이 더 최신이면 그것이 이긴다.
         if (!current?.deleted && current?.restored && !beats(record, machineId, current, owners.get(id))) continue;
         if (!current?.deleted || beats(record, machineId, current, owners.get(id))) {
-          winners.set(id, { ...(current || {}), ...record, id, deleted: true, restored: false });
+          // 표식 전용 필드(reason, liveUpdatedAt)는 이긴 표식 것만 쓴다. reason 이 없는 옛 빌드
+          // 표식이 missing 표식을 이겼는데 이전 값이 남으면, 휴지통 삭제가 누락 정리로 읽힌다.
+          const { reason: _reason, liveUpdatedAt: _liveUpdatedAt, ...previous } = current || {};
+          winners.set(id, { ...previous, ...record, id, deleted: true, restored: false });
           owners.set(id, machineId);
         }
         continue;
@@ -92,6 +95,29 @@ function mergeVaultState(base, editSources) {
   };
 }
 
+// 다른 Mac 이 되살린 사운드에 내 옛 삭제 표식이 남아 있으면, collectLocalEdits 가 그 id 를
+// 계속 삭제된 것으로 보고 이후 내 편집(태그·별점)을 편집 파일에 쓰지 않는다. 내 표식이
+// 병합에 들어갔는데도 결과가 살아 있다면 되살림이 이긴 것이므로 내 표식을 복원 기록으로 바꾼다.
+// 표식을 지우지 않고 복원 기록으로 두어야, 제3의 Mac 이 가진 더 오래된 삭제 표식이 읽는
+// 순서에 따라 다시 이기지 않는다.
+//
+// 병합에 들어간 표식인지는 디스크의 내 편집 파일(diskOwnSounds)로 판단한다. 저장에 실패해
+// 메모리에만 있는 표식은 병합에 참여하지 않았으므로, 저장되면 이길 표식을 뒤집지 않는다.
+function reconcileOwnTombstones(ownSounds, liveSounds, diskOwnSounds) {
+  const next = { ...(ownSounds || {}) };
+  for (const sound of liveSounds || []) {
+    const own = sound?.id ? next[sound.id] : null;
+    const disk = sound?.id ? diskOwnSounds?.[sound.id] : null;
+    if (!own?.deleted || !disk?.deleted || stampOf(disk) !== stampOf(own)) continue;
+    const { reason: _reason, liveUpdatedAt: _liveUpdatedAt, ...record } = sound;
+    // 병합 승자가 복원 뒤 다른 Mac 의 일반 편집이면 그 시각은 복원 시각이 아니다. 그 시각을
+    // 복원 기록에 옮기면, 일반 편집으로는 이길 수 없는 그 사이의 삭제를 이기게 된다.
+    const updatedAt = sound.restored ? stampOf(sound) : stampOf(own);
+    next[sound.id] = { ...record, updatedAt, deleted: false, restored: true };
+  }
+  return next;
+}
+
 // 베이스와 사용자 필드가 완전히 같은 자기 편집 레코드는 병합 결과에 기여하지
 // 않으므로 제거해도 안전하다. 삭제 표식, 복원 표식, 베이스에 없는 신규 사운드는
 // 편집 파일이 유일한 저장소이므로 반드시 유지한다.
@@ -116,4 +142,4 @@ function pruneRedundantEdits(ownSounds, baseSounds, fields) {
   return kept;
 }
 
-module.exports = { mergeVaultState, pruneRedundantEdits, EDITS_SCHEMA_VERSION };
+module.exports = { mergeVaultState, pruneRedundantEdits, reconcileOwnTombstones, EDITS_SCHEMA_VERSION };

@@ -177,8 +177,10 @@ function moveSoundSelectionWithArrow(direction) {
   if (continueAudition && nextSound.id !== previousSelectedId) toggleFullPlayback(nextSound);
 }
 
-function showToast(message, duration = 3000) {
-  const toast = $('#scanToast');
+// 짧은 상태 토스트는 서로 덮어써도 되지만, 사용자가 조치해야 하는 알림은 따로 띄운다.
+// 같은 칸을 쓰면 뒤이은 "불러왔습니다" 같은 토스트에 곧바로 가려진다.
+function showToast(message, duration = 3000, selector = '#scanToast') {
+  const toast = $(selector);
   toast.textContent = message;
   toast.classList.remove('hidden');
   clearTimeout(toast.hideTimer);
@@ -3309,6 +3311,7 @@ window.soundLibrary.onLibraryUpdated((snapshot) => {
   if (snapshot.updateReason === 'vault-cached') showToast('저장된 목록을 표시했습니다. 폴더 동기화는 백그라운드에서 계속됩니다.', 2500);
   if (snapshot.updateReason === 'remote-sync') showToast('다른 Mac의 변경 사항을 반영했습니다.', 2000);
 });
+window.soundLibrary.onLibraryNotice((message) => showToast(message, 8000, '#noticeToast'));
 window.soundLibrary.onUpdateStatus((status) => {
   state.updateStatus = status;
   renderUpdateSettings();

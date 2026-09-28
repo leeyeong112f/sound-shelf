@@ -9,8 +9,13 @@ const { matchesStableFileFingerprint } = require('./file-identity');
 //
 // reason 이 없는 옛 표식은 trashed 로 본다. 이전 버전에는 "항목만 삭제"가 없었고
 // 모든 삭제가 원본을 휴지통으로 보냈다.
+//
+// missing 은 파일이 이미 사라져 목록에서 자동으로 정리한 표식이다(missing-cleanup.js).
+// 편집 파일에서 원인을 구분하려고 따로 적을 뿐, 판정은 trashed 와 같다. 같은 파일이
+// 같은 자리로 돌아오면 되살린다.
 const TRASHED = 'trashed';
 const UNLINKED = 'unlinked';
+const MISSING = 'missing';
 
 function tombstoneReason(tombstone) {
   return tombstone?.reason === UNLINKED ? UNLINKED : TRASHED;
@@ -60,16 +65,25 @@ function restorableTombstone(tombstones, candidate) {
 
 // 되살릴 값은 사용자가 손으로 넣은 것들뿐이다. 길이·코덱 같은 기술 필드는 파일에서
 // 다시 읽으면 되고, 오히려 옛 값을 물려주면 틀린 정보가 된다.
-function restoredSoundFields(tombstone) {
+//
+// missing 표식은 파일을 못 본 다른 Mac 이 사용자 정보가 없다고 판단해 남긴 것이라, 표식의
+// 사용자 필드는 늘 비어 있다. 그 사이 이 Mac 이 태그를 붙였는데 아직 올라가지 않았다면
+// 표식 값으로 되살리는 순간 그 태그가 지워진다. 이 Mac 의 살아 있는 기록(ownRecord)이
+// 표식을 쓴 Mac 이 본 마지막 편집(liveUpdatedAt)보다 새로우면 사용자 필드는 그쪽을 따른다.
+// 더 오래된 기록이면 다른 Mac 이 그 뒤에 지운 태그를 되살리게 되므로 표식 값을 쓴다.
+function restoredSoundFields(tombstone, ownRecord = null) {
   if (!tombstone) return null;
+  const ownIsNewer = Boolean(ownRecord) && !ownRecord.deleted
+    && Number(ownRecord.updatedAt || 0) > Number(tombstone.liveUpdatedAt || 0);
+  const source = tombstone.reason === MISSING && ownIsNewer ? ownRecord : tombstone;
   return {
     id: tombstone.id,
-    title: tombstone.title || '',
-    tags: [...new Set(tombstone.tags || [])],
-    notes: tombstone.notes || '',
-    favorite: Boolean(tombstone.favorite),
-    rating: Number(tombstone.rating || 0),
-    keyAnalysis: tombstone.keyAnalysis || null,
+    title: source.title || '',
+    tags: [...new Set(source.tags || [])],
+    notes: source.notes || '',
+    favorite: Boolean(source.favorite),
+    rating: Number(source.rating || 0),
+    keyAnalysis: source.keyAnalysis || null,
     createdAt: Number(tombstone.createdAt) || Date.now()
   };
 }
@@ -83,6 +97,7 @@ function unlinkedRelativePaths(tombstones) {
 }
 
 module.exports = {
+  MISSING,
   TRASHED,
   UNLINKED,
   isSameFileAsTombstone,

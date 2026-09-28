@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  MISSING,
   UNLINKED,
   isSameFileAsTombstone,
   restorableTombstone,
@@ -42,6 +43,18 @@ test('같은 자리로 돌아온 같은 파일은 복원 대상이다', () => {
     modifiedAt: MTIME
   });
   assert.equal(found?.id, 'sound-1');
+});
+
+// 누락 자동 정리는 파일이 사라진 것을 확인하고 뺀 것이다. 같은 파일이 돌아오면 되살린다.
+test('missing 표식은 trashed 처럼 복원 대상이다', () => {
+  assert.equal(tombstoneReason(tombstone({ reason: MISSING })), 'trashed');
+  const found = restorableTombstone([tombstone({ reason: MISSING })], {
+    relativePath: '타격/펀치.wav',
+    size: 192078,
+    modifiedAt: MTIME
+  });
+  assert.equal(found?.id, 'sound-1');
+  assert.equal(unlinkedRelativePaths([tombstone({ reason: MISSING })]).size, 0);
 });
 
 test('크기가 다르면 같은 이름이어도 복원하지 않는다', () => {
@@ -136,4 +149,42 @@ test('크기가 0 이거나 알 수 없으면 같은 파일로 보지 않는다'
   assert.equal(isSameFileAsTombstone(tombstone({ size: 0 }), { size: 0, modifiedAt: MTIME }), false);
   assert.equal(isSameFileAsTombstone(tombstone(), { size: NaN, modifiedAt: MTIME }), false);
   assert.equal(isSameFileAsTombstone(null, { size: 1, modifiedAt: MTIME }), false);
+});
+
+// missing 표식의 사용자 필드는 늘 비어 있다. 이 Mac 이 그 사이 붙인 태그가 표식 값에
+// 덮이면 사용자 결정(정보 있는 항목은 자동 정리하지 않음)이 뒤집힌다.
+test('missing 표식을 되살릴 때는 이 Mac 의 더 새로운 기록에서 사용자 필드를 가져온다', () => {
+  const missing = tombstone({ reason: MISSING, title: '펀치', tags: [], notes: '', favorite: false, rating: 0, keyAnalysis: null, liveUpdatedAt: 100 });
+  const own = { id: 'sound-1', title: '펀치 강', tags: ['폭발'], notes: '메모', favorite: true, rating: 5, keyAnalysis: { display: 'A minor' }, updatedAt: 200 };
+  const fields = restoredSoundFields(missing, own);
+  assert.equal(fields.id, 'sound-1');
+  assert.equal(fields.title, '펀치 강');
+  assert.deepEqual(fields.tags, ['폭발']);
+  assert.equal(fields.notes, '메모');
+  assert.equal(fields.favorite, true);
+  assert.equal(fields.rating, 5);
+  assert.deepEqual(fields.keyAnalysis, { display: 'A minor' });
+  assert.equal(fields.createdAt, missing.createdAt);
+});
+
+test('휴지통 표식이나 이 Mac 기록이 삭제 상태면 표식 값으로 되살린다', () => {
+  const own = { id: 'sound-1', tags: ['폭발'], updatedAt: 200 };
+  assert.deepEqual(restoredSoundFields(tombstone(), own).tags, ['타격', '단단함']);
+  const missing = tombstone({ reason: MISSING, tags: [] });
+  assert.deepEqual(restoredSoundFields(missing, { ...own, deleted: true }).tags, []);
+  assert.deepEqual(restoredSoundFields(missing).tags, []);
+});
+
+// A 가 태그를 붙인 뒤 B 가 지웠고, 그다음 C 가 파일을 못 봐 정리했다. A 가 자기 옛 기록으로
+// 되살리면 B 에서 일부러 지운 태그가 돌아온다.
+test('이 Mac 기록이 표식을 쓴 Mac 이 본 편집보다 오래됐으면 표식 값으로 되살린다', () => {
+  const missing = tombstone({ reason: MISSING, tags: [], liveUpdatedAt: 200 });
+  assert.deepEqual(restoredSoundFields(missing, { id: 'sound-1', tags: ['A-old'], updatedAt: 100 }).tags, []);
+  assert.deepEqual(restoredSoundFields(missing, { id: 'sound-1', tags: ['A-old'], updatedAt: 200 }).tags, []);
+});
+
+// liveUpdatedAt 이 없는 표식은 지금과 같이 이 Mac 의 살아 있는 기록을 따른다.
+test('liveUpdatedAt 이 없는 missing 표식은 이 Mac 의 살아 있는 기록을 따른다', () => {
+  const missing = tombstone({ reason: MISSING, tags: [] });
+  assert.deepEqual(restoredSoundFields(missing, { id: 'sound-1', tags: ['A'], updatedAt: 1 }).tags, ['A']);
 });

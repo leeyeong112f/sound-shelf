@@ -179,7 +179,9 @@ h1 { margin: 4px 0 2px; font-size: 28px; letter-spacing: -.03em; }
 .fact { display: flex; justify-content: space-between; padding: 5px 0; color: #737a86; font-size: 11px; }
 .fact b { color: #adb2ba; font-weight: 500; }
 .inspector-actions { display: grid; gap: 8px; }
-.toast { position: fixed; z-index: 10; bottom: 24px; left: 50%; transform: translateX(-50%); background: #2b3038; border: 1px solid #3a404a; border-radius: 9px; padding: 10px 14px; box-shadow: 0 10px 30px #0008; }
+.toast-stack { position: fixed; z-index: 10; bottom: 24px; left: 24px; right: 24px; display: flex; flex-direction: column-reverse; align-items: center; gap: 8px; pointer-events: none; }
+.toast { max-width: 640px; background: #2b3038; border: 1px solid #3a404a; border-radius: 9px; padding: 10px 14px; box-shadow: 0 10px 30px #0008; pointer-events: auto; }
+.notice-toast { border-color: #6b5a2e; }
 .settings-panel { min-height: 0; flex: 1; overflow: auto; padding: 54px max(30px, 7vw); }
 .settings-heading { display: flex; justify-content: space-between; align-items: end; gap: 24px; padding-bottom: 26px; border-bottom: 1px solid var(--line); }
 .settings-heading h1 { margin-bottom: 5px; }

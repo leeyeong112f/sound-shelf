@@ -59,6 +59,7 @@ contextBridge.exposeInMainWorld('soundLibrary', {
   onScanProgress: (callback) => ipcRenderer.on('scan-progress', (_event, payload) => callback(payload)),
   onYouTubeProgress: (callback) => ipcRenderer.on('youtube-progress', (_event, payload) => callback(payload)),
   onLibraryUpdated: (callback) => ipcRenderer.on('library-updated', (_event, snapshot) => callback(snapshot)),
+  onLibraryNotice: (callback) => ipcRenderer.on('library-notice', (_event, message) => callback(message)),
   onUpdateStatus: (callback) => ipcRenderer.on('update-status', (_event, status) => callback(status)),
   onShortcut: (callback) => ipcRenderer.on('shortcut-triggered', (_event, shortcut) => callback(shortcut))
 });

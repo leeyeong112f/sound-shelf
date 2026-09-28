@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { mergeVaultState, pruneRedundantEdits } = require('../src/vault-sync');
+const { mergeVaultState, pruneRedundantEdits, reconcileOwnTombstones } = require('../src/vault-sync');
 
 const FIELDS = ['relativePath', 'fileName', 'title', 'tags', 'notes', 'favorite', 'rating', 'createdAt', 'keyAnalysis'];
 
@@ -240,4 +240,82 @@ test('복원 레코드는 베이스와 같아 보여도 정리되지 않는다',
   const kept = pruneRedundantEdits(own, base, ['relativePath', 'title', 'tags']);
   assert.ok(kept.s1, '복원 표식을 지우면 베이스의 삭제 표식이 다시 이겨 사운드가 또 사라진다');
   assert.equal(kept.s1.restored, true);
+});
+
+// 내가 누락 정리로 지운 사운드를 다른 Mac 이 되살렸는데 내 표식이 그대로면, 이후 내 태그
+// 편집이 편집 파일에 기록되지 않고 다음 병합에서 사라진다.
+test('병합에 들어간 내 삭제 표식이 복원에 졌으면 복원 기록으로 바꾼다', () => {
+  const tombstone = { ...sound('x'), updatedAt: 100, deleted: true, restored: false, reason: 'missing', liveUpdatedAt: 50 };
+  const own = { x: tombstone };
+  const live = [{ ...sound('x'), updatedAt: 200, deleted: false, restored: true }];
+  const next = reconcileOwnTombstones(own, live, { x: tombstone });
+  assert.strictEqual(next.x.deleted, false);
+  assert.strictEqual(next.x.restored, true);
+  assert.strictEqual(next.x.updatedAt, 200);
+  assert.strictEqual('reason' in next.x, false);
+  assert.strictEqual('liveUpdatedAt' in next.x, false);
+  assert.strictEqual(own.x.deleted, true);
+});
+
+// 저장에 실패해 메모리에만 있는 표식은 병합에 참여하지 않았다. 저장되면 이길 표식을 뒤집으면
+// 사용자의 삭제가 영구히 취소된다.
+test('디스크에 없는 내 표식은 병합 결과가 살아 있어도 그대로 둔다', () => {
+  const own = { x: { ...sound('x'), updatedAt: 300, deleted: true } };
+  const live = [{ ...sound('x'), updatedAt: 400 }];
+  assert.strictEqual(reconcileOwnTombstones(own, live, {}).x.deleted, true);
+  const olderDisk = { x: { ...sound('x'), updatedAt: 100, deleted: true } };
+  assert.strictEqual(reconcileOwnTombstones(own, live, olderDisk).x.deleted, true);
+  assert.strictEqual(reconcileOwnTombstones(own, live, undefined).x.deleted, true);
+});
+
+test('살아 있는 내 기록과 병합 결과에 없는 표식은 건드리지 않는다', () => {
+  const own = {
+    live: { ...sound('live'), updatedAt: 100 },
+    gone: { ...sound('gone'), updatedAt: 100, deleted: true }
+  };
+  const next = reconcileOwnTombstones(own, [{ ...sound('live'), updatedAt: 200 }], own);
+  assert.deepStrictEqual(next, own);
+});
+
+// 복원한 Mac 의 편집 파일이 아직 안 보이는 Mac 에서도, 조정한 내 기록만으로 제3의 Mac 이 가진
+// 더 오래된 삭제 표식을 이겨야 한다. 표식을 지우는 구현이면 이 경우 삭제가 이긴다.
+test('조정한 내 기록은 복원한 Mac 없이도 더 오래된 삭제 표식을 이긴다', () => {
+  const mine = { ...sound('x'), updatedAt: 100, deleted: true, reason: 'missing' };
+  const A = { machineId: 'a', sounds: { x: mine } };
+  const B = { machineId: 'b', sounds: { x: { ...sound('x'), updatedAt: 200, deleted: false, restored: true } } };
+  const C = { machineId: 'c', sounds: { x: { ...sound('x'), updatedAt: 50, deleted: true } } };
+  const merged = mergeVaultState({ sounds: [] }, [A, B, C]);
+  const A2 = { ...A, sounds: reconcileOwnTombstones(A.sounds, merged.sounds, A.sounds) };
+  for (const sources of [[A2, C], [C, A2]]) {
+    assert.deepStrictEqual(mergeVaultState({ sounds: [] }, sources).sounds.map((s) => s.id), ['x']);
+  }
+  for (const sources of [[A, C], [C, A]]) {
+    assert.deepStrictEqual(mergeVaultState({ sounds: [] }, sources).sounds, []);
+  }
+});
+
+// A 가 복원하고 B 가 그 뒤 태그만 바꿨다. 내 기록에 B 의 시각을 복원 시각으로 옮기면, 그 사이
+// A 가 다시 지운 삭제를 일반 편집으로는 이길 수 없는데도 내 기록이 이긴다.
+test('승자가 일반 편집이면 조정한 복원 기록은 내 표식 시각을 유지한다', () => {
+  const mine = { ...sound('x'), updatedAt: 1000, deleted: true, reason: 'missing' };
+  const merged = [{ ...sound('x'), tags: ['B'], updatedAt: 3000 }];
+  const next = reconcileOwnTombstones({ x: mine }, merged, { x: mine });
+  assert.strictEqual(next.x.updatedAt, 1000);
+  assert.strictEqual(next.x.restored, true);
+  const ME = { machineId: 'm', sounds: next };
+  const A = { machineId: 'n', sounds: { x: { ...sound('x'), updatedAt: 2500, deleted: true } } };
+  for (const sources of [[ME, A], [A, ME]]) {
+    assert.deepStrictEqual(mergeVaultState({ sounds: [] }, sources).sounds, []);
+  }
+});
+
+test('이긴 삭제 표식의 reason 과 liveUpdatedAt 만 남는다', () => {
+  const missing = { machineId: 'a', sounds: { x: { ...sound('x'), updatedAt: 1000, deleted: true, reason: 'missing', liveUpdatedAt: 500 } } };
+  const oldBuildTrash = { machineId: 'c', sounds: { x: { ...sound('x'), tags: ['휴지통'], updatedAt: 1500, deleted: true } } };
+  for (const sources of [[missing, oldBuildTrash], [oldBuildTrash, missing]]) {
+    const [deleted] = mergeVaultState({ sounds: [] }, sources).deletedSounds;
+    assert.strictEqual('reason' in deleted, false);
+    assert.strictEqual('liveUpdatedAt' in deleted, false);
+    assert.deepStrictEqual(deleted.tags, ['휴지통']);
+  }
 });
