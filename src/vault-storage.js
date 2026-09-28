@@ -16,8 +16,15 @@ function normalizedRelativePath(value) {
     .normalize('NFC');
 }
 
+// path.relative 는 바이트 비교다. macOS 는 같은 한글 이름을 NFC 로도 NFD 로도 저장하고
+// (APFS 는 조회할 때만 둘을 같게 본다), 이 앱이 만드는 경로는 항상 NFC 다. 정규화 전에
+// 비교하면 NFD 볼트 안의 파일이 '../…' 로 나와 "볼트 밖"으로 판정되고, 그 사운드는
+// relativePath 가 없어 볼트 메타데이터와 편집 파일에서 통째로 빠진다.
 function relativePathInside(root, filePath) {
-  const relative = path.relative(path.resolve(root), path.resolve(filePath));
+  const relative = path.relative(
+    path.resolve(root).normalize('NFC'),
+    path.resolve(filePath).normalize('NFC')
+  );
   if (!relative || relative === '.') return '';
   if (relative.startsWith('..') || path.isAbsolute(relative)) return null;
   return normalizedRelativePath(relative);
@@ -34,9 +41,16 @@ async function readJson(filePath, fallback) {
 
 async function writeJsonAtomic(filePath, value) {
   await fsp.mkdir(path.dirname(filePath), { recursive: true });
-  const temporary = `${filePath}.tmp-${process.pid}`;
-  await fsp.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-  await fsp.rename(temporary, filePath);
+  // 같은 프로세스 안에서 두 저장이 겹치면 고정된 임시 이름은 서로를 truncate 하고,
+  // 먼저 끝난 rename 이 아직 쓰는 중인 파일을 본 자리로 옮겨 JSON 을 파손시킨다.
+  const temporary = `${filePath}.tmp-${process.pid}-${crypto.randomUUID()}`;
+  try {
+    await fsp.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    await fsp.rename(temporary, filePath);
+  } catch (error) {
+    await fsp.unlink(temporary).catch(() => {});
+    throw error;
+  }
 }
 
 class VaultStorage {
@@ -57,9 +71,19 @@ class VaultStorage {
     const stat = await fsp.stat(this.root).catch(() => null);
     if (!stat && create) await fsp.mkdir(this.root, { recursive: true });
     else if (!stat?.isDirectory()) throw new Error('볼트 폴더를 찾을 수 없습니다.');
-    await fsp.mkdir(this.controlDirectory, { recursive: true });
 
     let manifest = await readJson(this.manifestPath, null);
+    // create:false 인데 vault.json 이 없다는 건, 아직 .sound-shelf 가 동기화되지 않았거나
+    // 애초에 볼트가 아닌 폴더라는 뜻이다. 여기서 새 UUID 를 발급하면 전체 재스캔이 모든
+    // 사운드를 새 id 로 다시 등록해 태그·별점·메모가 사라지고, 나중에 진짜 vault.json 이
+    // 내려오면 Drive 충돌 사본까지 생긴다.
+    if (!manifest && !create) {
+      throw Object.assign(
+        new Error('선택한 폴더에 Sound Shelf 볼트 정보(.sound-shelf/vault.json)가 없습니다. 클라우드 동기화가 끝났는지 확인하거나 “새 볼트 만들기”를 사용해 주세요.'),
+        { code: 'ENOVAULTMANIFEST' }
+      );
+    }
+    await fsp.mkdir(this.controlDirectory, { recursive: true });
     if (!manifest) {
       manifest = {
         type: 'sound-shelf-vault',
@@ -190,7 +214,11 @@ class VaultStorage {
 
   // edits/ 안의 *.json 을 전부 읽는다. Drive 충돌 사본(`mac-1 (1).json`)이
   // 생기더라도 그 안의 편집을 잃지 않으려면 이름을 가리지 않고 읽어야 한다.
-  async loadEditSources() {
+  // ownMachineId 를 넘기면 그 Mac 자신의 편집 파일이 읽히지 않을 때 조용히 건너뛰지 않고
+  // 예외를 던진다. 남의 파일은 다음 폴링에 다시 읽으면 그만이지만, 자기 파일을 빈 것으로
+  // 보고 넘어가면 호출자가 ownEdits 를 빈 객체로 초기화하고 다음 저장에서 과거 편집을
+  // 통째로 덮어써 영구 유실시킨다.
+  async loadEditSources({ ownMachineId = '' } = {}) {
     let entries = [];
     try {
       entries = await fsp.readdir(this.editsDirectory, { withFileTypes: true });
@@ -200,6 +228,7 @@ class VaultStorage {
     }
     // 읽는 순서가 병합 결과를 바꾸면 두 Mac이 영구히 갈라진다.
     entries.sort((a, b) => a.name.localeCompare(b.name));
+    const ownFileName = ownMachineId ? `${ownMachineId}.json` : '';
     const sources = [];
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
@@ -208,6 +237,12 @@ class VaultStorage {
       try {
         candidate = JSON.parse(await fsp.readFile(filePath, 'utf8'));
       } catch (error) {
+        if (ownFileName && entry.name === ownFileName) {
+          throw Object.assign(
+            new Error(`이 Mac의 편집 파일(${entry.name})을 읽을 수 없습니다. Google Drive 동기화가 끝난 뒤 다시 시도해 주세요.`),
+            { code: 'EOWNEDITSUNREADABLE', cause: error }
+          );
+        }
         // Drive가 내려받는 중이면 반쯤 쓰인 파일이 보일 수 있다.
         // 이번 회차만 건너뛰고 다음 폴링에 다시 시도한다.
         console.error(`Skipping unreadable edit file (${entry.name}):`, error.message);
@@ -401,6 +436,11 @@ class VaultStorage {
       paths.add(relative);
       if (!fs.existsSync(path.join(this.root, ...relative.split('/')))) missingFiles += 1;
     }
+    // 로컬 캐시에만 남아 metadata 에는 없는 행. 같은 상대 경로에 새 파일이 오면 옛 기술
+    // 정보를 물려받을 수 있어, 불일치를 눈으로 확인할 수 있어야 한다.
+    const cache = this.cachedSounds();
+    const staleCacheRows = cache.filter((row) => !ids.has(row.id)
+      && !paths.has(normalizedRelativePath(row.relativePath))).length;
     return {
       ok: duplicateIds === 0 && duplicatePaths === 0 && invalidPaths === 0,
       total: metadata.sounds.length,
@@ -408,7 +448,8 @@ class VaultStorage {
       duplicatePaths,
       invalidPaths,
       missingFiles,
-      cacheEntries: this.cachedSounds().length
+      staleCacheRows,
+      cacheEntries: cache.length
     };
   }
 

@@ -72,6 +72,9 @@ let watcherTimer;
 let autoScanRunning = false;
 let autoScanPending = false;
 const pendingScanFolders = new Set();
+const AUTO_RESCAN_DEBOUNCE_MS = 900;
+const AUTO_RESCAN_MAX_WAIT_MS = 4000;
+let autoRescanFirstRequestAt = 0;
 let lastFullScanAt = 0;
 let startupLoading = true;
 let syncBaseline = new Map();
@@ -79,6 +82,9 @@ let ownEdits = { sounds: {}, folderOrder: null, settings: null };
 let deletedSoundTombstones = new Map();
 let deletedRelativePaths = new Set();
 let lastEditStamps = '';
+// 기동 시 라이브러리 파손을 복구했거나 볼트를 열지 못했을 때 설정 화면에 알리기 위한 상태.
+let libraryRecovery = null;
+let vaultActivationError = '';
 let syncPollTimer;
 const SYNC_POLL_MS = 7000;
 let performanceStats = { storage: '볼트 + 로컬 SQLite 캐시', loadMs: 0, fileSize: 0, soundCount: 0, sqliteRecommended: false };
@@ -136,6 +142,19 @@ function findYtDlp() {
 
 function wait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+// 앱을 끄거나 타임아웃이 걸렸을 때 정리해야 할, 오래 도는 자식 프로세스들.
+const activeChildProcesses = new Set();
+
+function killProcessTree(child) {
+  if (!child?.pid) return;
+  try {
+    // 음수 pid 는 프로세스 그룹 전체를 뜻한다. detached 로 띄운 자식에만 쓸 수 있다.
+    process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    try { child.kill('SIGKILL'); } catch { /* 이미 끝난 프로세스 */ }
+  }
 }
 
 function setDeletedSoundTombstones(records = []) {
@@ -197,6 +216,44 @@ async function createAutomaticBackup(reason = 'automatic') {
     .sort((a, b) => b.time - a.time);
   await Promise.all(backups.slice(15).map((item) => fsp.unlink(item.path).catch(() => {})));
   return destination;
+}
+
+// 손상된 라이브러리 JSON을 빈 DB로 덮어쓰면 볼트 연결과 감시 폴더 설정이 함께 사라진다.
+// 파손 파일은 지우지 말고 따로 옮겨 두고, 최신 백업부터 차례로 읽어 복구를 시도한다.
+async function quarantineCorruptLibrary() {
+  if (!dbPath || !fs.existsSync(dbPath)) return '';
+  const destination = path.join(path.dirname(dbPath), backupFileName('corrupt'));
+  try {
+    await fsp.rename(dbPath, destination);
+    return destination;
+  } catch (error) {
+    console.error('Could not quarantine corrupt library:', error.message);
+    return '';
+  }
+}
+
+async function recoverLibraryFromBackups() {
+  const directory = backupDirectory();
+  const entries = await fsp.readdir(directory, { withFileTypes: true }).catch(() => []);
+  const backups = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+    const filePath = path.join(directory, entry.name);
+    const stat = await fsp.stat(filePath).catch(() => null);
+    if (stat) backups.push({ name: entry.name, path: filePath, time: stat.mtimeMs });
+  }
+  backups.sort((a, b) => b.time - a.time);
+  for (const backup of backups) {
+    try {
+      const candidate = JSON.parse(await fsp.readFile(backup.path, 'utf8'));
+      // 방금 만든 startup 백업은 이미 손상된 파일의 사본일 수 있으므로 형태를 확인한다.
+      validateImportedDb(candidate);
+      return { db: cleanDb(candidate), from: backup.name };
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 function temporaryClipDirectory() {
@@ -380,15 +437,26 @@ function editSignature(sounds) {
     .sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
 }
 
+// 다른 Mac 이 추가한 사운드는 내 로컬 SQLite 에 sound_id 가 없다. 상대 경로로도 찾지 않으면
+// 길이·샘플레이트가 전부 0 으로 뜨고 재스캔이 돌 때까지 그대로 남는다.
+function hydrateMergedSounds(mergedSounds, root) {
+  const cached = vaultStorage?.cachedSounds() || [];
+  const cacheById = new Map(cached.map((sound) => [sound.id, sound]));
+  const cacheByRelativePath = new Map(cached.map((sound) => [normalizedRelativePath(sound.relativePath), sound]));
+  return mergedSounds
+    .filter((sound) => sound?.relativePath)
+    .map((sound) => hydratePortableSound(
+      sound,
+      cacheById.get(sound.id) || cacheByRelativePath.get(normalizedRelativePath(sound.relativePath)),
+      root
+    ));
+}
+
 function applyMergedState(merged) {
   const before = editSignature(db.sounds.map(portableSound).filter(Boolean));
   const beforeOrder = JSON.stringify(db.categoryOrder || []);
   const beforeVolume = db.settings.previewVolume;
-  const cacheById = new Map((vaultStorage?.cachedSounds() || []).map((item) => [item.id, item]));
-  const hydrated = merged.sounds
-    .filter((sound) => sound?.relativePath)
-    .map((sound) => hydratePortableSound(sound, cacheById.get(sound.id), activeVault.root));
-  db.sounds = deduplicateSoundsByPath(hydrated);
+  db.sounds = deduplicateSoundsByPath(hydrateMergedSounds(merged.sounds, activeVault.root));
   if (merged.folderOrder.length) db.categoryOrder = merged.folderOrder;
   if (merged.previewVolume !== null) db.settings.previewVolume = merged.previewVolume;
   // 원격 반영이 빈 카테고리 폴더를 사이드바에서 지우지 않도록 기존 목록과
@@ -396,18 +464,25 @@ function applyMergedState(merged) {
   db.categories = [...new Set([...db.categories, ...db.sounds.map((sound) => sound.categoryPath).filter(Boolean)])]
     .sort((a, b) => a.localeCompare(b, 'ko'));
   setSyncBaseline(merged);
+  // 원격에서 삭제된 사운드의 캐시 행이 남으면, 같은 상대 경로의 새 파일이 옛 기술 정보를
+  // 물려받는다. 병합 결과를 캐시에 바로 반영한다.
+  try {
+    vaultStorage?.replaceTechnicalCache(db.sounds.filter((sound) => sound.relativePath));
+  } catch (error) {
+    console.error('Technical cache rebuild failed after merge:', error.message);
+  }
   const soundsChanged = before !== editSignature(db.sounds.map(portableSound).filter(Boolean));
   const orderChanged = beforeOrder !== JSON.stringify(db.categoryOrder || []);
   const volumeChanged = beforeVolume !== db.settings.previewVolume;
   return soundsChanged || orderChanged || volumeChanged;
 }
 
-async function activateVaultNow(rootPath, { legacySounds = [], legacyCategoryOrder = db.categoryOrder || [], preserveSettings = true } = {}) {
+async function activateVaultNow(rootPath, { legacySounds = [], legacyCategoryOrder = db.categoryOrder || [], preserveSettings = true, create = true } = {}) {
   const root = path.resolve(rootPath);
   const previousSettings = preserveSettings ? { ...db.settings } : {};
   vaultStorage?.close();
   vaultStorage = new VaultStorage(root, app.getPath('userData'));
-  activeVault = await vaultStorage.initialize({ create: true });
+  activeVault = await vaultStorage.initialize({ create });
   db.settings = {
     ...previousSettings,
     shortcuts: { ...DEFAULT_SHORTCUTS, ...(previousSettings.shortcuts || {}) },
@@ -417,11 +492,23 @@ async function activateVaultNow(rootPath, { legacySounds = [], legacyCategoryOrd
     currentVaultId: activeVault.id,
     machineId: previousSettings.machineId || crypto.randomUUID()
   };
-  const [portableMetadata, savedFolderOrder, editSources] = await Promise.all([
-    vaultStorage.loadMetadata(),
-    vaultStorage.loadFolderOrder(),
-    vaultStorage.loadEditSources()
-  ]);
+  let portableMetadata;
+  let savedFolderOrder;
+  let editSources;
+  try {
+    [portableMetadata, savedFolderOrder, editSources] = await Promise.all([
+      vaultStorage.loadMetadata(),
+      vaultStorage.loadFolderOrder(),
+      vaultStorage.loadEditSources({ ownMachineId: db.settings.machineId })
+    ]);
+  } catch (error) {
+    // 볼트를 반쯤 연 채로 두면 다음 saveDb 가 아직 다 못 받은 내 편집 파일을 빈 내용으로
+    // 덮어쓴다. 연결을 완전히 되돌려 로컬 JSON 경로로만 저장하게 한다.
+    vaultStorage?.close();
+    vaultStorage = null;
+    activeVault = null;
+    throw error;
+  }
   const merged = mergeVaultState(
     { sounds: portableMetadata.sounds, folderOrder: savedFolderOrder },
     editSources
@@ -438,21 +525,13 @@ async function activateVaultNow(rootPath, { legacySounds = [], legacyCategoryOrd
   // 기술 필드 변화만으로 기록된 전 사운드 레코드가 여기서 줄어들고, 다음
   // saveDb 때 슬림해진 자기 편집 파일만 저장된다.
   ownEdits.sounds = pruneRedundantEdits(ownEdits.sounds, portableMetadata.sounds, EDITABLE_FIELDS);
-  const cached = vaultStorage.cachedSounds();
-  const cacheById = new Map(cached.map((sound) => [sound.id, sound]));
-  const cacheByRelativePath = new Map(cached.map((sound) => [normalizedRelativePath(sound.relativePath), sound]));
-  const hydrated = merged.sounds
-    .filter((sound) => sound?.relativePath)
-    .map((sound) => hydratePortableSound(
-      sound,
-      cacheById.get(sound.id) || cacheByRelativePath.get(normalizedRelativePath(sound.relativePath)),
-      root
-    ));
+  const hydrated = hydrateMergedSounds(merged.sounds, root);
   const byRelativePath = new Map(hydrated.map((sound) => [sound.relativePath, sound]));
 
   for (const legacy of legacySounds || []) {
     if (!legacy?.path) continue;
     const relativePath = relativePathInside(root, legacy.path);
+    // 볼트 밖(null)과 루트 자신('') 둘 다 사운드가 될 수 없다.
     if (!relativePath) continue;
     const current = byRelativePath.get(relativePath);
     if (current) {
@@ -525,24 +604,49 @@ async function repairDuplicateCategoryFolders() {
 async function loadDb() {
   dbPath = path.join(app.getPath('userData'), 'sound-library.json');
   const startedAt = performance.now();
+  await createAutomaticBackup('startup').catch((error) => console.error('Automatic backup failed:', error.message));
+
+  // 읽기·파싱과 볼트 활성화를 분리한다. 하나의 try 로 묶으면 볼트 오류까지 "라이브러리
+  // 없음"으로 취급되어 빈 DB 가 저장된다.
+  let loaded = null;
   try {
-    await createAutomaticBackup('startup').catch((error) => console.error('Automatic backup failed:', error.message));
-    db = cleanDb(JSON.parse(await fsp.readFile(dbPath, 'utf8')));
-    db.settings.watchedFolders = canonicalizeWatchedFolders(db.settings.watchedFolders);
-    const preferredRoot = db.settings.currentVaultRoot || db.settings.watchedFolders.find((folder) => fs.existsSync(folder));
-    if (preferredRoot && fs.existsSync(preferredRoot)) {
-      // 이미 아는 볼트(currentVaultId 존재)의 로컬 JSON은 캐시 스냅샷일 뿐 원본이
-      // 아니다. 원격에서 삭제·수정된 사운드가 오래된 스냅샷에 남아 legacy 마이그레이션
-      // 루프로 부활하지 않도록, 진짜 legacy(볼트 이전 버전) 라이브러리일 때만 넘긴다.
-      const legacySounds = db.settings.currentVaultId ? [] : db.sounds;
-      await activateVault(preferredRoot, { legacySounds });
+    loaded = cleanDb(JSON.parse(await fsp.readFile(dbPath, 'utf8')));
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      loaded = null;
     } else {
-      db.sounds = deduplicateSoundsByPath(db.sounds);
+      console.error('Could not read library:', error);
+      const quarantined = await quarantineCorruptLibrary();
+      const recovered = await recoverLibraryFromBackups();
+      loaded = recovered?.db || null;
+      libraryRecovery = { quarantined, recoveredFrom: recovered?.from || '' };
+      if (recovered) console.error(`Recovered library from backup: ${recovered.from}`);
+      else console.error('No usable backup found; starting with an empty library.');
+    }
+  }
+
+  try {
+    if (!loaded) {
       await saveDb();
+    } else {
+      db = loaded;
+      db.settings.watchedFolders = canonicalizeWatchedFolders(db.settings.watchedFolders);
+      const preferredRoot = db.settings.currentVaultRoot || db.settings.watchedFolders.find((folder) => fs.existsSync(folder));
+      if (preferredRoot && fs.existsSync(preferredRoot)) {
+        // 이미 아는 볼트(currentVaultId 존재)의 로컬 JSON은 캐시 스냅샷일 뿐 원본이
+        // 아니다. 원격에서 삭제·수정된 사운드가 오래된 스냅샷에 남아 legacy 마이그레이션
+        // 루프로 부활하지 않도록, 진짜 legacy(볼트 이전 버전) 라이브러리일 때만 넘긴다.
+        const legacySounds = db.settings.currentVaultId ? [] : db.sounds;
+        // 이미 아는 볼트인데 vault.json 이 안 보이면 아직 동기화 중인 것이다. 새로 만들지 않는다.
+        await activateVault(preferredRoot, { legacySounds, create: !db.settings.currentVaultId });
+      } else {
+        db.sounds = deduplicateSoundsByPath(db.sounds);
+        await saveDb();
+      }
     }
   } catch (error) {
-    if (error.code !== 'ENOENT') console.error('Could not load library:', error);
-    await saveDb();
+    console.error('Startup vault activation failed:', error);
+    vaultActivationError = error.message || String(error);
   }
   const stat = await fsp.stat(dbPath).catch(() => ({ size: 0 }));
   performanceStats = {
@@ -610,22 +714,48 @@ function collectLocalEdits() {
   setDeletedSoundTombstones(tombstones);
 }
 
-async function saveDb() {
+// saveDb 는 디바운스 저장, IPC 핸들러, 자동 재스캔 세 경로에서 동시에 불린다. 직렬화하지
+// 않으면 두 쓰기가 겹쳐 라이브러리 JSON 이 잘린 채 남고, 다음 기동에서 loadDb 가 그것을
+// 복구해야 하는 상황이 된다. 큐에 얹어 항상 한 번에 하나만 실행한다.
+let savingChain = Promise.resolve();
+
+function saveDb() {
+  const run = savingChain.catch(() => {}).then(saveDbNow);
+  savingChain = run.catch(() => {});
+  return run;
+}
+
+async function saveDbNow() {
   if (vaultStorage && activeVault) {
     for (const sound of db.sounds) {
       const relativePath = soundRelativePath(sound.path);
-      if (relativePath) sound.relativePath = relativePath;
+      // relativePathInside 는 볼트 밖이면 null, 볼트 루트 자신이면 '' 을 돌려준다. truthy
+      // 검사만 하면 볼트 밖으로 나간 파일이 옛 상대 경로를 그대로 들고 있어, 그 경로가
+      // 편집 파일과 technical_cache 의 UNIQUE 제약에 유령으로 남는다.
+      if (relativePath === null) sound.relativePath = '';
+      else sound.relativePath = relativePath;
     }
     collectLocalEdits();
     // 볼트에는 내 편집 파일 하나만 쓴다. metadata.json / folder-order.json /
     // vault.json 은 공유 파일이므로 정상 경로에서 건드리지 않는다.
     await vaultStorage.saveEdits(db.settings.machineId, os.hostname(), ownEdits);
-    vaultStorage.replaceTechnicalCache(db.sounds.filter((sound) => sound.relativePath));
+    // 로컬 캐시는 재생성 가능한 파생물이다. 여기서 실패해도 아래 라이브러리 JSON 쓰기까지
+    // 중단시키면 볼트 편집 파일만 갱신되고 로컬은 뒤처져 불일치가 남는다.
+    try {
+      vaultStorage.replaceTechnicalCache(db.sounds.filter((sound) => sound.relativePath));
+    } catch (error) {
+      console.error('Technical cache rebuild failed:', error.message);
+    }
   }
   await fsp.mkdir(path.dirname(dbPath), { recursive: true });
-  const temporary = `${dbPath}.tmp`;
-  await fsp.writeFile(temporary, JSON.stringify(db, null, 2), 'utf8');
-  await fsp.rename(temporary, dbPath);
+  const temporary = `${dbPath}.tmp-${crypto.randomUUID()}`;
+  try {
+    await fsp.writeFile(temporary, JSON.stringify(db, null, 2), 'utf8');
+    await fsp.rename(temporary, dbPath);
+  } catch (error) {
+    await fsp.unlink(temporary).catch(() => {});
+    throw error;
+  }
   const stat = await fsp.stat(dbPath).catch(() => ({ size: 0 }));
   performanceStats.fileSize = Number(stat.size || 0);
   performanceStats.soundCount = db.sounds.length;
@@ -657,6 +787,14 @@ async function withLocalMutation(work) {
   } finally {
     localMutations -= 1;
   }
+}
+
+// db.sounds 나 db.settings 를 여러 await 에 걸쳐 바꾸는 핸들러는 이 래퍼로 등록한다.
+// 등록 지점에서 감싸 두면 새 핸들러를 추가할 때 보호를 빠뜨리기 어렵다.
+// 다이얼로그처럼 사용자를 무한정 기다리는 구간이 있는 핸들러는 여기에 넣지 말고,
+// 기다림이 끝난 뒤에 withLocalMutation 을 직접 쓰고 대상을 id 로 다시 조회해야 한다.
+function handleMutation(channel, handler) {
+  ipcMain.handle(channel, (event, payload) => withLocalMutation(() => handler(event, payload)));
 }
 
 function publicSound(sound) {
@@ -711,6 +849,8 @@ function librarySnapshot() {
     shortcuts: db.settings.shortcuts,
     previewVolume: db.settings.previewVolume,
     vault: vaultSnapshot(),
+    libraryRecovery,
+    vaultActivationError,
     performance: { ...performanceStats, soundCount: db.sounds.length }
   };
 }
@@ -738,9 +878,14 @@ async function readWaveformDiskCache(cacheKey) {
 async function writeWaveformDiskCache(cacheKey, waveform) {
   const cachePath = waveformCachePath(cacheKey);
   await fsp.mkdir(path.dirname(cachePath), { recursive: true });
-  const temporary = `${cachePath}.tmp`;
-  await fsp.writeFile(temporary, JSON.stringify(waveform), 'utf8');
-  await fsp.rename(temporary, cachePath);
+  const temporary = `${cachePath}.tmp-${crypto.randomUUID()}`;
+  try {
+    await fsp.writeFile(temporary, JSON.stringify(waveform), 'utf8');
+    await fsp.rename(temporary, cachePath);
+  } catch (error) {
+    await fsp.unlink(temporary).catch(() => {});
+    throw error;
+  }
 }
 
 function runWaveformJob(task) {
@@ -1146,10 +1291,24 @@ async function runAutoRescan(reason = 'folder-change') {
   }
 }
 
+// 매 이벤트마다 타이머를 리셋하기만 하면, Google Drive 가 수천 개를 내려받는 동안
+// 900ms 가 한 번도 비지 않아 재스캔이 영영 실행되지 않는다. 첫 이벤트로부터
+// AUTO_RESCAN_MAX_WAIT_MS 가 지나면 더 미루지 않는다.
 function scheduleAutoRescan(reason = 'folder-change', changedPath = '') {
   if (changedPath) pendingScanFolders.add(changedPath);
+  const now = Date.now();
+  if (!autoRescanFirstRequestAt) autoRescanFirstRequestAt = now;
+  const remaining = AUTO_RESCAN_MAX_WAIT_MS - (now - autoRescanFirstRequestAt);
   clearTimeout(watcherTimer);
-  watcherTimer = setTimeout(() => runAutoRescan(reason), 900);
+  watcherTimer = setTimeout(() => {
+    autoRescanFirstRequestAt = 0;
+    // 스캔도 볼트 활성화 큐에 얹는다. 큐를 우회하면 vault:open/move 의 활성화 스캔과
+    // 같은 트리를 동시에 훑게 된다.
+    vaultActivationQueue = vaultActivationQueue
+      .catch(() => {})
+      .then(() => runAutoRescan(reason))
+      .catch((error) => console.error('Automatic library refresh failed:', error));
+  }, Math.max(0, Math.min(AUTO_RESCAN_DEBOUNCE_MS, remaining)));
 }
 
 // fs.watch 를 쓰지 않는 이유: Google Drive 가상 파일시스템이 macOS FSEvents 를
@@ -1170,7 +1329,7 @@ async function pollRemoteEdits() {
   const [portableMetadata, savedFolderOrder, editSources] = await Promise.all([
     vaultStorage.loadMetadata(),
     vaultStorage.loadFolderOrder(),
-    vaultStorage.loadEditSources()
+    vaultStorage.loadEditSources({ ownMachineId: db.settings.machineId })
   ]);
   // await 사이에 로컬 편집이 들어왔으면 이번 회차를 포기한다. fingerprint를 저장하지
   // 않으므로 다음 tick에서 다시 시도한다. 이 지점 이후는 동기 실행이라 안전하다.
@@ -1201,6 +1360,21 @@ function stopSyncPolling() {
   syncPollTimer = null;
 }
 
+// 볼트 제어 폴더와 Finder 가 수시로 건드리는 부산물은 재스캔 대상이 아니다. .DS_Store 는
+// 폴더 창을 열기만 해도 바뀌어서, 거르지 않으면 앱을 쓰지 않는 동안에도 전체 재스캔이 돈다.
+const IGNORED_WATCH_NAMES = new Set(['.DS_Store', '.localized', 'Icon\r']);
+
+function isWatchWorthyChange(relativeName) {
+  const parts = relativeName.split(path.sep).filter(Boolean);
+  if (parts.includes('.sound-shelf')) return false;
+  const base = parts[parts.length - 1] || '';
+  if (IGNORED_WATCH_NAMES.has(base)) return false;
+  // 내려받는 중인 Drive 임시 파일과 우리가 쓰는 원자적 임시 파일도 무시한다.
+  // 확장자로 오디오 여부를 거르지는 않는다. "Drums 2.0" 같은 폴더가 파일로 오인돼
+  // 폴더 생성·이름 변경이 반영되지 않기 때문이다.
+  return !/\.(tmp|part|crdownload|download)$/i.test(base) && !base.includes('.tmp-');
+}
+
 function refreshFolderWatchers() {
   const watched = new Set(db.settings.watchedFolders.map((folder) => path.resolve(folder)));
   for (const [folder, watcher] of folderWatchers) {
@@ -1214,10 +1388,15 @@ function refreshFolderWatchers() {
     try {
       const watcher = fs.watch(folder, { recursive: process.platform === 'darwin' }, (_eventType, fileName) => {
         const relativeName = String(fileName || '');
-        if (!relativeName || relativeName.split(path.sep).includes('.sound-shelf')) return;
+        if (!relativeName || !isWatchWorthyChange(relativeName)) return;
         const changedPath = path.join(folder, relativeName);
-        const stat = fs.existsSync(changedPath) ? fs.statSync(changedPath) : null;
-        scheduleAutoRescan('folder-change', stat?.isDirectory() ? changedPath : path.dirname(changedPath));
+        // 콜백은 메인 프로세스 이벤트 루프에서 돈다. Google Drive 경로의 statSync 는
+        // 네트워크 왕복이라 이벤트가 몰리면 UI 가 통째로 멈춘다. 비동기로 확인하고,
+        // 확인 전에도 부모 폴더는 바로 예약해 이벤트를 놓치지 않는다.
+        scheduleAutoRescan('folder-change', path.dirname(changedPath));
+        fsp.stat(changedPath)
+          .then((stat) => { if (stat.isDirectory()) scheduleAutoRescan('folder-change', changedPath); })
+          .catch(() => { /* 삭제·이동된 경로. 부모 폴더 예약만으로 충분하다 */ });
       });
       watcher.on('error', (error) => console.error(`Folder watcher failed (${folder}):`, error.message));
       folderWatchers.set(folder, watcher);
@@ -1658,6 +1837,9 @@ app.on('before-quit', (event) => {
   clearInterval(updateCheckTimer);
   stopSyncPolling();
   clearTimeout(watcherTimer);
+  // 15분짜리 유튜브 다운로드가 돌고 있으면 앱을 꺼도 백그라운드에 남는다.
+  for (const child of activeChildProcesses) killProcessTree(child);
+  activeChildProcesses.clear();
   for (const watcher of folderWatchers.values()) watcher.close();
   folderWatchers.clear();
   // 대기 중인 디바운스 저장이 있거나 저장·배치가 진행 중이면 종료를 한 번 미루고
@@ -1698,7 +1880,14 @@ ipcMain.handle('update:install', () => {
 });
 
 ipcMain.handle('update:open-release', async () => {
-  await shell.openExternal(updateStatus.releaseUrl || GITHUB_RELEASES_URL);
+  // releaseUrl 은 GitHub API 응답에서 그대로 받은 값이다. 스킴을 확인하지 않으면
+  // 임의 스킴이 shell.openExternal 로 넘어간다.
+  const candidate = String(updateStatus.releaseUrl || '');
+  let target = GITHUB_RELEASES_URL;
+  try {
+    if (new URL(candidate).protocol === 'https:') target = candidate;
+  } catch { /* 잘못된 URL 이면 기본 릴리스 페이지를 연다 */ }
+  await shell.openExternal(target);
   return true;
 });
 
@@ -1712,18 +1901,21 @@ ipcMain.handle('library:add-files', async () => {
   if (result.filePaths.some(isTemporaryClipPath)) {
     throw new Error('Resolve 전송용 임시 구간은 라이브러리에 추가되지 않습니다. “선택 구간 파일 만들기” 버튼을 이용해 주세요.');
   }
-  const moved = [];
   const root = activeVaultRoot();
   if (!root) throw new Error('먼저 사운드 볼트를 열어 주세요.');
-  for (const filePath of result.filePaths) {
-    if (relativePathInside(root, filePath)) moved.push(filePath);
-    else {
-      const destination = uniqueDestination(root, path.basename(filePath));
-      await moveFile(filePath, destination);
-      moved.push(destination);
+  // 다이얼로그 대기는 밖에 두고, 파일 이동과 인덱싱만 보호한다.
+  return withLocalMutation(async () => {
+    const moved = [];
+    for (const filePath of result.filePaths) {
+      if (relativePathInside(root, filePath) !== null) moved.push(filePath);
+      else {
+        const destination = uniqueDestination(root, path.basename(filePath));
+        await moveFile(filePath, destination);
+        moved.push(destination);
+      }
     }
-  }
-  return indexFiles(moved, { allowRestore: true });
+    return indexFiles(moved, { allowRestore: true });
+  });
 });
 
 async function addPathsToLibrary(paths) {
@@ -1740,7 +1932,7 @@ async function addPathsToLibrary(paths) {
       throw new Error('휴지통 파일은 왼쪽의 원하는 카테고리 또는 선택한 카테고리 화면에 놓아주세요.');
     }
     if (stat?.isDirectory()) {
-      if (relativePathInside(root, itemPath)) files.push(...await walkAudioFiles(itemPath));
+      if (relativePathInside(root, itemPath) !== null) files.push(...await walkAudioFiles(itemPath));
       else {
         const destination = uniqueDestination(root, path.basename(itemPath));
         await moveDirectory(itemPath, destination);
@@ -1748,7 +1940,7 @@ async function addPathsToLibrary(paths) {
       }
     }
     else if (stat?.isFile() && AUDIO_EXTENSIONS.has(path.extname(itemPath).toLowerCase())) {
-      if (relativePathInside(root, itemPath)) files.push(itemPath);
+      if (relativePathInside(root, itemPath) !== null) files.push(itemPath);
       else {
         const destination = uniqueDestination(root, path.basename(itemPath));
         await moveFile(itemPath, destination);
@@ -1760,7 +1952,7 @@ async function addPathsToLibrary(paths) {
   return indexFiles([...new Set(files)], { allowRestore: true });
 }
 
-ipcMain.handle('library:add-paths', async (_event, paths) => addPathsToLibrary(paths));
+handleMutation('library:add-paths', async (_event, paths) => addPathsToLibrary(paths));
 
 // Finder에서 ⌘C로 복사한 파일은 렌더러의 paste 이벤트에 실려 오지 않는다.
 // macOS 붙여넣기판을 메인 프로세스에서 직접 읽어야 한다.
@@ -1782,7 +1974,7 @@ function pasteboardFilePaths() {
 
 // 붙여넣기는 드래그앤드롭과 같은 일을 한다. 카테고리를 보고 있으면 그 폴더로,
 // 아니면 볼트 루트로 파일을 옮긴 뒤 등록한다.
-ipcMain.handle('library:paste-clipboard-files', async (_event, { category = null } = {}) => {
+handleMutation('library:paste-clipboard-files', async (_event, { category = null } = {}) => {
   const paths = pasteboardFilePaths();
   if (!paths.length) return { ok: false, reason: 'empty' };
   const usable = [];
@@ -1805,7 +1997,14 @@ ipcMain.handle('library:add-folder', async () => {
   });
   if (result.canceled) return null;
   await saveDb();
-  return activateVault(result.filePaths[0], { legacySounds: [], legacyCategoryOrder: [] });
+  // 이 버튼은 첫 실행 온보딩 경로이기도 하다. 아직 볼트를 모를 때만 새로 만들고,
+  // 이미 볼트를 아는 상태에서는 만들지 않는다. .sound-shelf 가 아직 동기화되지 않은
+  // 폴더를 열었을 때 새 UUID 를 발급하면 태그·별점·메모가 통째로 날아간다.
+  return activateVault(result.filePaths[0], {
+    legacySounds: [],
+    legacyCategoryOrder: [],
+    create: !db.settings.currentVaultId
+  });
 });
 
 ipcMain.handle('vault:open', async () => {
@@ -1815,7 +2014,7 @@ ipcMain.handle('vault:open', async () => {
   });
   if (result.canceled) return null;
   await saveDb();
-  return activateVault(result.filePaths[0], { legacySounds: [], legacyCategoryOrder: [] });
+  return activateVault(result.filePaths[0], { legacySounds: [], legacyCategoryOrder: [], create: false });
 });
 
 ipcMain.handle('vault:create', async () => {
@@ -1866,17 +2065,21 @@ ipcMain.handle('vault:move', async () => {
   const destination = path.join(parent, path.basename(root));
   if (normalizedFsPath(destination) === normalizedFsPath(root)) return librarySnapshot();
   if (fs.existsSync(destination)) throw new Error('대상 위치에 같은 이름의 폴더가 이미 있습니다.');
-  await saveDb();
-  await vaultStorage.backupPortableMetadata('before-move');
-  for (const watcher of folderWatchers.values()) watcher.close();
-  folderWatchers.clear();
-  vaultStorage.close();
-  try {
-    await moveDirectory(root, destination);
-  } catch (error) {
-    if (fs.existsSync(root)) await activateVault(root, { legacySounds: [], legacyCategoryOrder: [] });
-    throw error;
-  }
+  // 캐시를 닫고 폴더를 옮기는 동안 동기화 폴링이 끼어들면, 이미 사라진 옛 루트를 기준으로
+  // 병합해 라이브러리를 통째로 망가뜨린다. 이동이 끝나 볼트를 다시 열 때까지 막는다.
+  await withLocalMutation(async () => {
+    await saveDb();
+    await vaultStorage.backupPortableMetadata('before-move');
+    for (const watcher of folderWatchers.values()) watcher.close();
+    folderWatchers.clear();
+    vaultStorage.close();
+    try {
+      await moveDirectory(root, destination);
+    } catch (error) {
+      if (fs.existsSync(root)) await activateVault(root, { legacySounds: [], legacyCategoryOrder: [] });
+      throw error;
+    }
+  });
   return activateVault(destination, { legacySounds: [], legacyCategoryOrder: [] });
 });
 
@@ -1896,7 +2099,7 @@ ipcMain.handle('vault:compact', () => withLocalMutation(async () => {
     const [portableMetadata, savedFolderOrder, editSources] = await Promise.all([
       vaultStorage.loadMetadata(),
       vaultStorage.loadFolderOrder(),
-      vaultStorage.loadEditSources()
+      vaultStorage.loadEditSources({ ownMachineId: db.settings.machineId })
     ]);
     const merged = mergeVaultState(
       { sounds: portableMetadata.sounds, folderOrder: savedFolderOrder },
@@ -1934,11 +2137,19 @@ ipcMain.handle('vault:reveal', async () => {
   return true;
 });
 
-ipcMain.handle('library:rescan', async () => {
-  return rescanWatchedFolders();
+handleMutation('library:rescan', async () => {
+  // 자동 재스캔·원격 병합과 같은 큐에 얹어 같은 트리를 동시에 훑지 않게 한다.
+  autoRescanFirstRequestAt = 0;
+  clearTimeout(watcherTimer);
+  pendingScanFolders.clear();
+  const run = vaultActivationQueue
+    .catch(() => {})
+    .then(() => rescanWatchedFolders());
+  vaultActivationQueue = run.catch(() => {});
+  return run;
 });
 
-ipcMain.handle('library:update', async (_event, payload) => {
+handleMutation('library:update', async (_event, payload) => {
   const sound = db.sounds.find((item) => item.id === payload.id);
   if (!sound) throw new Error('Sound not found');
   const allowed = ['title', 'category', 'tags', 'notes', 'favorite', 'rating'];
@@ -2068,9 +2279,14 @@ ipcMain.handle('library:backup-export', async () => {
     filters: [{ name: 'Sound Shelf Backup', extensions: ['json'] }]
   });
   if (result.canceled || !result.filePath) return null;
+  // 백업 도중 원격 병합이 db.sounds 를 갈아치우면 반쯤 섞인 스냅샷이 저장된다.
+  return withLocalMutation(() => exportBackupTo(result.filePath));
+});
+
+async function exportBackupTo(filePath) {
   await saveDb();
   if (vaultStorage && activeVault) {
-    await writeJsonAtomic(result.filePath, {
+    await writeJsonAtomic(filePath, {
       type: 'sound-shelf-portable-backup',
       schemaVersion: 1,
       vault: { id: activeVault.id, name: activeVault.name },
@@ -2086,12 +2302,12 @@ ipcMain.handle('library:backup-export', async () => {
       createdAt: new Date().toISOString()
     });
   } else {
-    await fsp.copyFile(dbPath, result.filePath);
+    await fsp.copyFile(dbPath, filePath);
   }
-  return { ok: true, path: result.filePath };
-});
+  return { ok: true, path: filePath };
+}
 
-ipcMain.handle('library:backup-import', async () => {
+handleMutation('library:backup-import', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Sound Shelf 백업 복원', properties: ['openFile'],
     filters: [{ name: 'Sound Shelf Backup', extensions: ['json'] }]
@@ -2188,7 +2404,7 @@ ipcMain.handle('library:relink-one', async (_event, id) => {
   if (result.canceled) return null;
   let filePath = result.filePaths[0];
   const root = activeVaultRoot();
-  if (root && !relativePathInside(root, filePath)) {
+  if (root && relativePathInside(root, filePath) === null) {
     const folder = categoryFolderPath(sound.categoryPath || sound.category || '미분류') || root;
     await fsp.mkdir(folder, { recursive: true });
     const destination = uniqueDestination(folder, path.basename(filePath));
@@ -2196,18 +2412,26 @@ ipcMain.handle('library:relink-one', async (_event, id) => {
     filePath = destination;
   }
   const stat = await fsp.stat(filePath);
-  const oldId = sound.id;
-  sound.path = filePath;
-  sound.fileName = path.basename(filePath);
-  sound.relativePath = soundRelativePath(filePath) || sound.relativePath || '';
-  sound.size = stat.size;
-  sound.modifiedAt = stat.mtimeMs;
-  sound.categoryPath = inferCategoryPath(filePath);
-  sound.category = sound.categoryPath.split('/').pop();
-  Object.assign(sound, await probeAudio(filePath));
-  db.sounds = deduplicateSoundsByPath(db.sounds);
-  await saveDb();
-  return { ...librarySnapshot(), idChanges: { [oldId]: sound.id } };
+  const technical = await probeAudio(filePath);
+  // 다이얼로그가 떠 있는 동안 원격 동기화가 db.sounds 를 통째로 교체했을 수 있다. 위에서
+  // 잡은 sound 는 그러면 어느 배열에도 속하지 않는 고아 객체라, 여기서 바꿔도 저장되지
+  // 않는다. 기다림이 끝난 뒤 id 로 다시 조회한다.
+  return withLocalMutation(async () => {
+    const target = db.sounds.find((item) => item.id === id);
+    if (!target) throw new Error('재연결할 항목을 찾을 수 없습니다.');
+    const oldId = target.id;
+    target.path = filePath;
+    target.fileName = path.basename(filePath);
+    target.relativePath = soundRelativePath(filePath) || target.relativePath || '';
+    target.size = stat.size;
+    target.modifiedAt = stat.mtimeMs;
+    target.categoryPath = inferCategoryPath(filePath);
+    target.category = target.categoryPath.split('/').pop();
+    Object.assign(target, technical);
+    db.sounds = deduplicateSoundsByPath(db.sounds);
+    await saveDb();
+    return { ...librarySnapshot(), idChanges: { [oldId]: target.id } };
+  });
 });
 
 ipcMain.handle('library:move-folder', async (_event, id) => {
@@ -2223,10 +2447,15 @@ ipcMain.handle('library:move-folder', async (_event, id) => {
   if (!root || relativePathInside(root, selectedFolder) === null) {
     throw new Error('사운드는 현재 볼트 안의 폴더로만 이동할 수 있습니다.');
   }
-  return moveSoundToFolder(sound, selectedFolder, inferCategoryPath(path.join(selectedFolder, sound.fileName)));
+  // 다이얼로그 대기 중 db.sounds 가 교체됐을 수 있으므로 id 로 다시 조회한다.
+  return withLocalMutation(async () => {
+    const target = db.sounds.find((item) => item.id === id);
+    if (!target || !fs.existsSync(target.path)) throw new Error('원본 파일을 찾을 수 없습니다.');
+    return moveSoundToFolder(target, selectedFolder, inferCategoryPath(path.join(selectedFolder, target.fileName)));
+  });
 });
 
-ipcMain.handle('library:move-category', async (_event, { id, category }) => {
+handleMutation('library:move-category', async (_event, { id, category }) => {
   const sound = db.sounds.find((item) => item.id === id);
   const categoryParts = String(category || '').split(/[\\/>]+/)
     .map((part) => part.trim().replace(/[:*?"<>|]/g, '-')).filter(Boolean);
@@ -2241,7 +2470,7 @@ ipcMain.handle('library:move-category', async (_event, { id, category }) => {
   return moveSoundToFolder(sound, targetFolder, safeCategory);
 });
 
-ipcMain.handle('category:create', async (_event, { parentCategory, name }) => {
+handleMutation('category:create', async (_event, { parentCategory, name }) => {
   const parent = normalizeCategoryPath(parentCategory);
   const rootLevel = !parent || parent === '미분류';
   const safeName = normalizeCategoryPath(name).split('/').pop();
@@ -2259,7 +2488,7 @@ ipcMain.handle('category:create', async (_event, { parentCategory, name }) => {
   return librarySnapshot();
 });
 
-ipcMain.handle('category:rename', async (_event, { category, name }) => {
+handleMutation('category:rename', async (_event, { category, name }) => {
   const sourceCategory = normalizeCategoryPath(category);
   const safeName = normalizeCategoryPath(name).split('/').pop();
   if (!sourceCategory || sourceCategory === '미분류') throw new Error('미분류 루트는 이름을 바꿀 수 없습니다.');
@@ -2276,7 +2505,7 @@ ipcMain.handle('category:rename', async (_event, { category, name }) => {
   return { ...librarySnapshot(), idChanges, categoryMove: { from: sourceCategory, to: destinationCategory } };
 });
 
-ipcMain.handle('category:move-up', async (_event, category) => {
+handleMutation('category:move-up', async (_event, category) => {
   const source = normalizeCategoryPath(category);
   const parts = source.split('/').filter(Boolean);
   if (parts.length < 2) throw new Error('이미 최상위 폴더입니다.');
@@ -2284,7 +2513,7 @@ ipcMain.handle('category:move-up', async (_event, category) => {
   return moveCategoryDirectory(source, target);
 });
 
-ipcMain.handle('category:reorder', async (_event, { categories, referenceCategory, position }) => {
+handleMutation('category:reorder', async (_event, { categories, referenceCategory, position }) => {
   const reference = normalizeCategoryPath(referenceCategory);
   const requested = [...new Set((categories || []).map(normalizeCategoryPath))]
     .filter(Boolean);
@@ -2340,7 +2569,7 @@ ipcMain.handle('category:reorder', async (_event, { categories, referenceCategor
   return { ...librarySnapshot(), idChanges, categoryMove };
 });
 
-ipcMain.handle('category:trash', async (_event, category) => {
+handleMutation('category:trash', async (_event, category) => {
   const normalized = normalizeCategoryPath(category);
   if (!normalized || normalized === '미분류') throw new Error('미분류 루트는 삭제할 수 없습니다.');
   const folder = categoryFolderPath(normalized);
@@ -2357,7 +2586,7 @@ ipcMain.handle('category:trash', async (_event, category) => {
   return librarySnapshot();
 });
 
-ipcMain.handle('category:trash-batch', async (_event, categories) => {
+handleMutation('category:trash-batch', async (_event, categories) => {
   const normalized = [...new Set((categories || []).map(normalizeCategoryPath))].filter((item) => item && item !== '미분류');
   const targets = normalized.filter((item) => !normalized.some((other) => other !== item && item.startsWith(`${other}/`)));
   if (!targets.length) throw new Error('삭제할 폴더가 없습니다.');
@@ -2390,9 +2619,12 @@ ipcMain.handle('category:add-files', async (_event, category) => {
     filters: [{ name: 'Audio', extensions: [...AUDIO_EXTENSIONS].map((ext) => ext.slice(1)) }]
   });
   if (result.canceled) return null;
-  const moved = [];
-  for (const filePath of result.filePaths) moved.push(await moveFileIntoCategory(filePath, category));
-  return indexFiles(moved, { allowRestore: true });
+  // 다이얼로그 대기는 밖에 두고, 파일 이동과 인덱싱만 보호한다.
+  return withLocalMutation(async () => {
+    const moved = [];
+    for (const filePath of result.filePaths) moved.push(await moveFileIntoCategory(filePath, category));
+    return indexFiles(moved, { allowRestore: true });
+  });
 });
 
 async function dropPathsIntoCategory(category, paths) {
@@ -2435,15 +2667,15 @@ async function dropPathsIntoCategory(category, paths) {
   return snapshot;
 }
 
-ipcMain.handle('category:drop-paths', async (_event, { category, paths }) => dropPathsIntoCategory(category, paths));
+handleMutation('category:drop-paths', async (_event, { category, paths }) => dropPathsIntoCategory(category, paths));
 
-ipcMain.handle('shortcuts:set', async (_event, shortcuts) => {
+handleMutation('shortcuts:set', async (_event, shortcuts) => {
   db.settings.shortcuts = { ...DEFAULT_SHORTCUTS, ...(shortcuts || {}) };
   await saveDb();
   return librarySnapshot();
 });
 
-ipcMain.handle('preview-volume:set', async (_event, volume) => {
+handleMutation('preview-volume:set', async (_event, volume) => {
   db.settings.previewVolume = Math.max(0, Math.min(1, Number(volume) || 0));
   queueSave();
   return db.settings.previewVolume;
@@ -2549,9 +2781,16 @@ ipcMain.handle('library:analyze-key', async (_event, { id, force = false }) => {
       analyzedAt: Date.now(),
       sourceModifiedAt: sound.modifiedAt
     };
-    sound.keyAnalysis = analysis;
-    await saveDb();
-    return { ...librarySnapshot(), keyAnalysisResult: { id: sound.id, analysis, cached: false } };
+    // python 실행은 최대 240초다. 그 사이 원격 동기화가 db.sounds 를 교체했을 수 있으므로
+    // 결과를 붙일 때 id 로 다시 조회한다. 분석 자체를 withLocalMutation 으로 감싸면
+    // 4분 동안 다른 Mac 의 편집이 들어오지 못한다.
+    return withLocalMutation(async () => {
+      const target = db.sounds.find((item) => item.id === id);
+      if (!target) throw new Error('분석 대상을 라이브러리에서 찾을 수 없습니다.');
+      target.keyAnalysis = analysis;
+      await saveDb();
+      return { ...librarySnapshot(), keyAnalysisResult: { id: target.id, analysis, cached: false } };
+    });
   } catch (error) {
     throw new Error(`조성 분석 실패: ${keyAnalysisErrorMessage(error)}`);
   }
@@ -2613,14 +2852,18 @@ ipcMain.handle('library:create-clip', async (_event, payload) => {
       '-ss', start.toFixed(6), '-t', (end - start).toFixed(6),
       '-map', '0:a:0', '-vn', '-c:a', 'pcm_s24le', outputPath
     ], { maxBuffer: 1024 * 1024 * 4, timeout: 60000 });
-    await indexFiles([outputPath], { reportProgress: false, allowRestore: true });
-    const created = db.sounds.find((item) => normalizedFsPath(item.path) === normalizedFsPath(outputPath));
-    if (!created) throw new Error('생성된 파일을 라이브러리에 추가하지 못했습니다.');
-    created.tags = [...new Set(sound.tags || [])];
-    created.rating = Number(sound.rating || 0);
-    created.categoryPath = sound.categoryPath || inferCategoryPath(outputPath);
-    created.category = created.categoryPath.split('/').filter(Boolean).pop() || inferCategory(outputPath);
-    await saveDb();
+    // ffmpeg 실행은 밖에서 끝내고, db.sounds 를 건드리는 등록 단계만 보호한다.
+    const created = await withLocalMutation(async () => {
+      await indexFiles([outputPath], { reportProgress: false, allowRestore: true });
+      const registered = db.sounds.find((item) => normalizedFsPath(item.path) === normalizedFsPath(outputPath));
+      if (!registered) throw new Error('생성된 파일을 라이브러리에 추가하지 못했습니다.');
+      registered.tags = [...new Set(sound.tags || [])];
+      registered.rating = Number(sound.rating || 0);
+      registered.categoryPath = sound.categoryPath || inferCategoryPath(outputPath);
+      registered.category = registered.categoryPath.split('/').filter(Boolean).pop() || inferCategory(outputPath);
+      await saveDb();
+      return registered;
+    });
     return {
       ...librarySnapshot(),
       createdClip: { ...publicSound(created), start, end, sourceId: sound.id }
@@ -2669,7 +2912,10 @@ function runYtDlp(url, jobDirectory, onProgress) {
     ];
     if (path.isAbsolute(ffmpegPath)) args.push('--ffmpeg-location', path.dirname(ffmpegPath));
     args.push('--', url);
-    const child = spawn(findYtDlp(), args, { env: mediaToolEnvironment(), windowsHide: true });
+    // detached 로 띄워 자기 프로세스 그룹을 갖게 한다. 그러지 않으면 kill 이 yt-dlp 하나만
+    // 죽이고, yt-dlp 가 먹싱용으로 띄운 ffmpeg 은 살아남아 곧 지워질 작업 폴더에 계속 쓴다.
+    const child = spawn(findYtDlp(), args, { env: mediaToolEnvironment(), windowsHide: true, detached: true });
+    activeChildProcesses.add(child);
     let stderr = '';
     let pendingStdout = '';
     let settled = false;
@@ -2677,11 +2923,12 @@ function runYtDlp(url, jobDirectory, onProgress) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      activeChildProcesses.delete(child);
       if (error) reject(error);
       else resolve();
     };
     const timer = setTimeout(() => {
-      child.kill('SIGKILL');
+      killProcessTree(child);
       finish(Object.assign(new Error('yt-dlp timed out'), { code: 'ETIMEDOUT' }));
     }, YOUTUBE_DOWNLOAD_TIMEOUT_MS);
     child.stdout.on('data', (chunk) => {
@@ -2803,16 +3050,25 @@ ipcMain.handle('youtube:import', async (_event, payload) => {
   }
 });
 
-ipcMain.handle('resolve:insert', async (_event, sound) => {
-  if (!sound?.path || !fs.existsSync(sound.path)) {
+// 다른 핸들러와 달리 렌더러가 보낸 객체의 path 를 그대로 쓰면 라이브러리에 없는 임의
+// 경로가 python 으로 넘어간다. 사운드는 id 로 조회하고, 구간 삽입용 경로는 prepareClip 이
+// 만든 임시 폴더 안의 것만 받는다.
+ipcMain.handle('resolve:insert', async (_event, payload) => {
+  const sound = db.sounds.find((item) => item.id === payload?.id);
+  if (!sound?.path) return { ok: false, message: '원본 사운드 파일을 찾을 수 없습니다.' };
+  const clipPath = String(payload?.clipPath || '');
+  const useClip = Boolean(clipPath) && isTemporaryClipPath(clipPath);
+  const target = useClip ? clipPath : sound.path;
+  const duration = useClip ? Number(payload?.duration || 0) : Number(sound.duration || 0);
+  if (!fs.existsSync(target)) {
     return { ok: false, message: '원본 사운드 파일을 찾을 수 없습니다.' };
   }
   try {
     const script = await fsp.readFile(path.join(__dirname, 'resolve_insert.py'), 'utf8');
     const { stdout } = await execFileAsync(findPython(), [
       '-c', script,
-      sound.path,
-      String(sound.duration || 0),
+      target,
+      String(duration),
       String(sound.sampleRate || 0)
     ], { maxBuffer: 1024 * 1024, timeout: 30000 });
     const line = stdout.trim().split('\n').filter(Boolean).pop();

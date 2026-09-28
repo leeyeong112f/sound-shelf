@@ -125,8 +125,10 @@ function escapeHtml(value = '') {
   })[character]);
 }
 
+// encodeURI 는 # 과 ? 를 그대로 둔다. "Drum #3.wav" 는 #3.wav 가 프래그먼트로 잘려
+// 존재하지 않는 파일을 가리키게 되고, 재생이 실패하면서 엉뚱한 안내가 뜬다.
 function fileUrl(filePath) {
-  return encodeURI(`file://${filePath}`);
+  return `file://${String(filePath).split('/').map(encodeURIComponent).join('/')}`;
 }
 
 function selectedSound() {
@@ -547,6 +549,7 @@ function renderInspector() {
   $('#editNotes').value = sound.notes || '';
   $('#inspectorRating').innerHTML = ratingMarkup(sound, 'inspector');
   $('#largePlay').textContent = state.playingId === sound.id && !player.paused ? '❚❚' : '▶';
+  // value 는 ffprobe 가 파일 내장 태그에서 읽은 값이라 임의의 마크업이 들어올 수 있다.
   $('#soundFacts').innerHTML = [
     ['파일 상태', sound.missing ? '원본 파일 없음 · 재연결 필요' : (sound.technicalError || '정상')],
     ['길이', formatDuration(sound.duration)],
@@ -557,7 +560,7 @@ function renderInspector() {
     ['조성(Key)', currentKeyAnalysis(sound)?.detected ? `${currentKeyAnalysis(sound).display} · ${Math.round(currentKeyAnalysis(sound).confidence * 100)}%` : (currentKeyAnalysis(sound) ? '조성 불명확' : '우클릭하여 분석')],
     ['내장 설명', sound.embeddedMetadata?.description || sound.embeddedMetadata?.comment || '—'],
     ['내장 키워드', (sound.embeddedTags || []).join(', ') || '—']
-  ].map(([key, value]) => `<div class="fact"><span>${key}</span><b>${value}</b></div>`).join('');
+  ].map(([key, value]) => `<div class="fact"><span>${escapeHtml(key)}</span><b>${escapeHtml(value)}</b></div>`).join('');
   const seed = [...sound.id.slice(0, 36)].map((character) => parseInt(character, 16));
   $('#waveBars').innerHTML = seed.map(() => '<i></i>').join('');
   [...$('#waveBars').children].forEach((bar, index) => { bar.style.height = `${15 + seed[index] * 4}%`; });
@@ -1897,11 +1900,11 @@ async function insertSelectedIntoResolve() {
   const selection = state.selections.get(sound.id);
   const hasRange = selection && selection.end - selection.start >= 0.05;
   showToast(hasRange ? '선택 구간을 Fairlight 타임헤드에 삽입 중…' : 'Fairlight 타임헤드에 삽입 중…', 15000);
-  let payload = { path: sound.path, duration: sound.duration, sampleRate: sound.sampleRate };
+  let payload = { id: sound.id };
   if (hasRange) {
     const clip = await window.soundLibrary.prepareClip({ id: sound.id, start: selection.start, end: selection.end });
     if (!clip.ok) return showToast(clip.message, 5000);
-    payload = { path: clip.path, duration: clip.duration, sampleRate: sound.sampleRate };
+    payload = { id: sound.id, clipPath: clip.path, duration: clip.duration };
   }
   const result = await window.soundLibrary.insertIntoResolve(payload);
   showToast(result.message, result.ok ? 2200 : 6000);
@@ -2165,7 +2168,7 @@ list.addEventListener('dblclick', async (event) => {
   const sound = state.sounds.find((item) => item.id === row.dataset.id);
   if (!sound || sound.missing) return;
   showToast('DaVinci Resolve 타임헤드에 삽입 중…', 15000);
-  const result = await window.soundLibrary.insertIntoResolve({ path: sound.path, duration: sound.duration, sampleRate: sound.sampleRate });
+  const result = await window.soundLibrary.insertIntoResolve({ id: sound.id });
   showToast(result.message, result.ok ? 2200 : 6000);
 });
 
@@ -2630,7 +2633,8 @@ async function addFolderWithFeedback() {
   try {
     setLibrary(await window.soundLibrary.addFolder());
   } catch (error) {
-    showToast(`폴더를 열지 못했습니다: ${error.message}`, 5000);
+    // 볼트 정보가 없다는 안내는 다음에 뭘 눌러야 하는지까지 알려줘야 해서 길다.
+    showToast(`폴더를 열지 못했습니다: ${error.message}`, 10000);
   }
 }
 
@@ -2703,7 +2707,8 @@ $('#moveVaultBtn').addEventListener('click', async () => {
 $('#checkVaultBtn').addEventListener('click', async () => {
   try {
     const result = await window.soundLibrary.checkVault();
-    const message = `메타데이터 ${result.total.toLocaleString()}개 · 누락 ${result.missingFiles}개 · 중복 경로 ${result.duplicatePaths}개 · 로컬 캐시 ${result.cacheEntries.toLocaleString()}개`;
+    const stale = Number(result.staleCacheRows || 0);
+    const message = `메타데이터 ${result.total.toLocaleString()}개 · 누락 ${result.missingFiles}개 · 중복 경로 ${result.duplicatePaths}개 · 로컬 캐시 ${result.cacheEntries.toLocaleString()}개${stale ? ` (잔여 ${stale.toLocaleString()}개)` : ''}`;
     $('#vaultHealth').textContent = `${result.ok ? '✓ 볼트 구조 정상' : '⚠ 확인 필요'} · ${message}`;
     showToast(result.ok ? '볼트 연결 상태가 정상입니다.' : '볼트에서 확인할 항목이 발견되었습니다.', 5000);
   } catch (error) { alert(error.message); }
@@ -3265,8 +3270,26 @@ window.soundLibrary.onYouTubeProgress(({ url, phase, percent, title }) => {
   if (phase === 'convert') showToast(`WAV로 변환 중 · ${label}`, 60000);
   else showToast(`유튜브 음원 내려받는 중 ${Math.floor(percent || 0)}% · ${label}`, 60000);
 });
+// 기동 시 라이브러리 파손을 복구했거나 볼트를 열지 못했으면 조용히 넘어가지 않는다.
+// 사용자가 모르면 "태그가 다 사라졌다"로만 보이고, 원인을 짚을 단서가 없다.
+let startupWarningShown = false;
+function reportStartupProblems(snapshot) {
+  if (startupWarningShown) return;
+  const recovery = snapshot?.libraryRecovery;
+  const vaultError = snapshot?.vaultActivationError;
+  if (!recovery && !vaultError) return;
+  startupWarningShown = true;
+  if (recovery?.recoveredFrom) {
+    showToast(`라이브러리 파일이 손상되어 백업(${recovery.recoveredFrom})에서 복구했습니다.`, 10000);
+  } else if (recovery) {
+    showToast('라이브러리 파일이 손상되었고 쓸 수 있는 백업이 없습니다. 볼트를 다시 열어 주세요.', 12000);
+  }
+  if (vaultError) showToast(`볼트를 열지 못했습니다: ${vaultError}`, 12000);
+}
+
 window.soundLibrary.onLibraryUpdated((snapshot) => {
   setLibrary(snapshot);
+  reportStartupProblems(snapshot);
   if (snapshot.updateReason === 'folder-change') showToast('폴더 변경 사항을 자동으로 반영했습니다.', 1800);
   if (snapshot.updateReason === 'startup') showToast('사운드 라이브러리를 불러왔습니다.', 1800);
   if (snapshot.updateReason === 'vault-cached') showToast('저장된 목록을 표시했습니다. 폴더 동기화는 백그라운드에서 계속됩니다.', 2500);
@@ -3285,9 +3308,10 @@ new ResizeObserver(drawDetailWaveform).observe(detailWrap);
 
 window.soundLibrary.getLibrary().then((snapshot) => {
   setLibrary(snapshot);
+  reportStartupProblems(snapshot);
   if (snapshot.loading) showToast('사운드 라이브러리를 불러오는 중입니다…', 4000);
-});
+}).catch((error) => showToast(`라이브러리를 불러오지 못했습니다: ${error.message}`, 10000));
 window.soundLibrary.getUpdateStatus().then((status) => {
   state.updateStatus = status;
   renderUpdateSettings();
-});
+}).catch((error) => console.error('Could not read update status:', error));
