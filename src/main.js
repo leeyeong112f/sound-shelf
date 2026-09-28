@@ -11,6 +11,13 @@ const os = require('node:os');
 const { VaultStorage, normalizedRelativePath, relativePathInside, writeJsonAtomic } = require('./vault-storage');
 const { mergeVaultState, pruneRedundantEdits } = require('./vault-sync');
 const { matchesRenameFingerprint, matchesStableFileFingerprint } = require('./file-identity');
+const {
+  TRASHED,
+  UNLINKED,
+  restorableTombstone,
+  restoredSoundFields,
+  unlinkedRelativePaths
+} = require('./sound-restore');
 const { failedProbeMetadata, mediaErrorMessage, needsTechnicalProbe } = require('./media-health');
 const { clipboardFilePaths } = require('./clipboard-files');
 const { isCurrentKeyAnalysis, keyAnalysisErrorMessage } = require('./key-analysis');
@@ -80,7 +87,11 @@ let startupLoading = true;
 let syncBaseline = new Map();
 let ownEdits = { sounds: {}, folderOrder: null, settings: null };
 let deletedSoundTombstones = new Map();
-let deletedRelativePaths = new Set();
+// 자동 스캔이 건너뛰어야 하는 경로. "라이브러리에서만 제거"한 것만 해당한다.
+// 휴지통으로 보낸 것은 같은 파일이 돌아오면 메타데이터와 함께 되살린다.
+let unlinkedPaths = new Set();
+// 이번 저장에서 "항목만 삭제"로 표식을 남겨야 할 id. collectLocalEdits 가 읽고 비운다.
+const pendingUnlinkIds = new Set();
 let lastEditStamps = '';
 // 기동 시 라이브러리 파손을 복구했거나 볼트를 열지 못했을 때 설정 화면에 알리기 위한 상태.
 let libraryRecovery = null;
@@ -160,9 +171,23 @@ function killProcessTree(child) {
 function setDeletedSoundTombstones(records = []) {
   deletedSoundTombstones = new Map((records || []).filter((record) => record?.id)
     .map((record) => [record.id, { ...record, deleted: true }]));
-  deletedRelativePaths = new Set([...deletedSoundTombstones.values()]
-    .map((record) => normalizedRelativePath(record.relativePath || ''))
-    .filter(Boolean));
+  unlinkedPaths = unlinkedRelativePaths([...deletedSoundTombstones.values()]);
+}
+
+// 삭제한 파일이 같은 자리로 돌아와 되살렸을 때 호출한다. 표식만 지우면 collectLocalEdits 가
+// "베이스에는 있는데 db.sounds 에는 없다"를 다시 삭제로 읽거나, 다른 Mac 의 병합이 옛 삭제
+// 표식으로 또 지운다. 복원 기록(restored)을 편집 파일에 남겨야 병합에서 삭제를 이긴다.
+function markSoundRestored(sound) {
+  if (!sound?.id) return;
+  deletedSoundTombstones.delete(sound.id);
+  unlinkedPaths = unlinkedRelativePaths([...deletedSoundTombstones.values()]);
+  pendingUnlinkIds.delete(sound.id);
+  const portable = portableSound(sound);
+  if (!portable) return;
+  ownEdits.sounds[sound.id] = { ...portable, updatedAt: Date.now(), deleted: false, restored: true };
+  // 베이스라인에도 살아있는 것으로 올려야, 다음 collectLocalEdits 가 이 id 를 다시
+  // "사라진 것"으로 보고 삭제 표식을 찍지 않는다.
+  syncBaseline.set(sound.id, { ...portable, updatedAt: ownEdits.sounds[sound.id].updatedAt });
 }
 
 function setSyncBaseline(merged) {
@@ -678,10 +703,15 @@ function collectLocalEdits() {
 
   for (const [id, sound] of current) {
     const baseline = syncBaseline.get(id);
-    // 한 번 삭제한 ID는 명시적인 복원 기능 없이는 일반 스캔 결과로 되살리지 않는다.
+    // 한 번 삭제한 ID는 명시적인 복원 없이는 일반 스캔 결과로 되살리지 않는다.
+    // markSoundRestored 가 표식을 풀고 restored 기록을 남긴 경우만 여기를 통과한다.
     if (ownEdits.sounds[id]?.deleted || deletedSoundTombstones.has(id)) continue;
     if (baseline && !baseline.deleted && sameSound(baseline, sound)) continue;
-    ownEdits.sounds[id] = { ...sound, updatedAt: now };
+    // 복원 표식을 잃으면 병합에서 옛 삭제 표식이 다시 이겨 사운드가 또 사라진다.
+    const restored = ownEdits.sounds[id]?.restored === true;
+    ownEdits.sounds[id] = restored
+      ? { ...sound, updatedAt: now, deleted: false, restored: true }
+      : { ...sound, updatedAt: now };
   }
 
   const known = new Map(syncBaseline);
@@ -690,8 +720,12 @@ function collectLocalEdits() {
   }
   for (const [id, baseline] of known) {
     if (current.has(id) || baseline.deleted) continue;
-    ownEdits.sounds[id] = { ...baseline, id, updatedAt: now, deleted: true };
+    // "항목만 삭제"는 파일을 그대로 두므로 자동 스캔이 되돌리면 안 된다. 원본을 휴지통으로
+    // 보낸 삭제는 같은 파일이 돌아오면 되살려야 하므로 둘을 구분해 기록한다.
+    const reason = pendingUnlinkIds.has(id) ? UNLINKED : TRASHED;
+    ownEdits.sounds[id] = { ...baseline, id, updatedAt: now, deleted: true, restored: false, reason };
   }
+  pendingUnlinkIds.clear();
 
   const order = [...new Set(db.categoryOrder || [])];
   if (JSON.stringify(order) !== JSON.stringify(ownEdits.folderOrder?.order || null)) {
@@ -933,7 +967,9 @@ function inferCategoryPath(filePath) {
   return relativeFolder.split(path.sep).filter(Boolean).join('/').normalize('NFC');
 }
 
-async function probeAudio(filePath) {
+// previous 를 넘기면 연속 실패 횟수가 이어져 재시도 간격이 늘어난다. 넘기지 않으면
+// 사용자가 직접 요청한 재분석으로 보고 처음부터 다시 센다.
+async function probeAudio(filePath, previous = null) {
   let lastError = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
@@ -971,7 +1007,7 @@ async function probeAudio(filePath) {
     }
   }
   console.error(`Audio metadata probe failed (${path.basename(filePath)}):`, lastError?.message || lastError);
-  return failedProbeMetadata(lastError, fs.existsSync(filePath));
+  return failedProbeMetadata(lastError, fs.existsSync(filePath), previous);
 }
 
 async function walkAudioFiles(rootPath) {
@@ -1040,8 +1076,21 @@ async function indexFiles(filePaths, { reportProgress = true, categoryFolders = 
   const existingByRelativePath = new Map(db.sounds
     .filter((sound) => sound.relativePath)
     .map((sound) => [normalizedRelativePath(sound.relativePath), sound]));
+  // 원본이 사라진 사운드 목록은 루프 밖에서 한 번만 만든다. 안에서 db.sounds 전체에
+  // existsSync 를 돌리면 신규 파일 수 × 라이브러리 크기가 되어, 2,000개짜리 볼트를
+  // 처음 넣을 때만 수백만 번의 동기 stat 이 발생한다.
+  const missingSounds = db.sounds.filter((sound) => !fs.existsSync(sound.path));
+  const missingByName = new Map();
+  for (const sound of missingSounds) {
+    const key = `${path.basename(sound.path).normalize('NFC').toLocaleLowerCase('ko')}:${Number(sound.size)}`;
+    if (!missingByName.has(key)) missingByName.set(key, []);
+    missingByName.get(key).push(sound);
+  }
+  const tombstones = [...deletedSoundTombstones.values()];
+  const restoredIds = new Set();
   let added = 0;
   let updated = 0;
+  let restored = 0;
   const total = filePaths.length;
 
   for (let index = 0; index < total; index += 1) {
@@ -1052,45 +1101,65 @@ async function indexFiles(filePaths, { reportProgress = true, categoryFolders = 
     const relativePath = soundRelativePath(filePath);
     const indexedCurrent = existingByPath.get(normalizedFsPath(filePath))
       || (relativePath ? existingByRelativePath.get(relativePath) : null);
+    // "라이브러리에서만 제거"한 경로는 파일이 그대로 있는 게 정상이므로 자동 스캔이
+    // 되돌리지 않는다. 앱 안에서 명시적으로 추가할 때(allowRestore)만 다시 들어온다.
     if (!allowRestore && !indexedCurrent && relativePath
-      && deletedRelativePaths.has(normalizedRelativePath(relativePath))) continue;
+      && unlinkedPaths.has(normalizedRelativePath(relativePath))) continue;
     const stat = await fsp.stat(filePath).catch(() => null);
     if (!stat?.isFile()) continue;
 
     let current = indexedCurrent;
     let discoveredRename = false;
+    let restoredFields = null;
     if (!current) {
-      const normalizedName = path.basename(filePath).normalize('NFC').toLocaleLowerCase('ko');
-      const missingMatches = db.sounds.filter((sound) => !fs.existsSync(sound.path)
-        && path.basename(sound.path).normalize('NFC').toLocaleLowerCase('ko') === normalizedName
-        && Number(sound.size) === Number(stat.size));
-      if (missingMatches.length === 1) current = missingMatches[0];
+      const key = `${path.basename(filePath).normalize('NFC').toLocaleLowerCase('ko')}:${Number(stat.size)}`;
+      const nameMatches = (missingByName.get(key) || []).filter((sound) => !existingByPath.has(normalizedFsPath(sound.path)));
+      if (nameMatches.length === 1) current = nameMatches[0];
     }
     if (!current) {
-      const renamedMatches = db.sounds.filter((sound) => !fs.existsSync(sound.path)
-        && isRenamedSoundMatch(sound, filePath, stat));
+      const renamedMatches = missingSounds.filter((sound) => isRenamedSoundMatch(sound, filePath, stat));
       if (renamedMatches.length === 1) {
         current = renamedMatches[0];
         discoveredRename = true;
       }
     }
-    const id = current?.id || crypto.randomUUID();
+    if (!current && relativePath) {
+      // 휴지통으로 보냈던 파일이 같은 자리로 돌아왔다면 사용자가 되돌린 것이다.
+      // 태그·별점·메모·Key 를 같은 id 로 되살린다.
+      const tombstone = restorableTombstone(tombstones, {
+        relativePath,
+        size: stat.size,
+        modifiedAt: stat.mtimeMs,
+        contentHash: ''
+      });
+      if (tombstone && !restoredIds.has(tombstone.id)) {
+        restoredFields = restoredSoundFields(tombstone);
+        restoredIds.add(tombstone.id);
+        restored += 1;
+      }
+    }
+    const id = restoredFields?.id || current?.id || crypto.randomUUID();
     const needsProbe = needsTechnicalProbe(current, stat);
-    const technical = needsProbe ? await probeAudio(filePath) : current;
+    const hashStillValid = Boolean(current?.contentHash)
+      && current.contentHashKey === `${stat.size}:${stat.mtimeMs}`;
+    const technical = needsProbe ? await probeAudio(filePath, current) : current;
     const categoryPath = current?.categoryPath || inferCategoryPath(filePath);
     const next = {
       id,
       relativePath: relativePath || current?.relativePath || '',
       path: filePath,
       fileName: path.basename(filePath),
-      title: discoveredRename ? path.basename(filePath, path.extname(filePath)) : (current?.title || path.basename(filePath, path.extname(filePath))),
+      title: discoveredRename
+        ? path.basename(filePath, path.extname(filePath))
+        : (restoredFields?.title || current?.title || path.basename(filePath, path.extname(filePath))),
       categoryPath,
       category: categoryPath.split('/').filter(Boolean).pop() || current?.category || inferCategory(filePath),
-      tags: current?.tags || [],
-      notes: current?.notes || '',
-      favorite: Boolean(current?.favorite),
-      rating: Number(current?.rating || 0),
-      createdAt: current?.createdAt || Date.now(),
+      tags: restoredFields?.tags || current?.tags || [],
+      notes: restoredFields?.notes || current?.notes || '',
+      favorite: Boolean(restoredFields?.favorite ?? current?.favorite),
+      rating: Number(restoredFields?.rating ?? current?.rating ?? 0),
+      keyAnalysis: restoredFields?.keyAnalysis || current?.keyAnalysis || null,
+      createdAt: restoredFields?.createdAt || current?.createdAt || Date.now(),
       modifiedAt: stat.mtimeMs,
       size: stat.size,
       duration: technical.duration || 0,
@@ -1105,8 +1174,14 @@ async function indexFiles(filePaths, { reportProgress = true, categoryFolders = 
         : Number(current?.metadataVersion || 0),
       technicalCached: technical.technicalCached !== false,
       technicalError: technical.technicalError || '',
-      contentHash: needsProbe ? '' : (current?.contentHash || ''),
-      contentHashKey: needsProbe ? '' : (current?.contentHashKey || '')
+      // 실패 이력을 버리면 백오프가 매번 처음부터 시작해, 못 읽는 파일을 재스캔마다
+      // 다시 붙잡는다. 성공하면 두 값 모두 0 으로 돌아간다.
+      technicalProbeFailedAt: Number(technical.technicalProbeFailedAt || 0),
+      technicalProbeAttempts: Number(technical.technicalProbeAttempts || 0),
+      // 해시는 재프로브 여부가 아니라 파일 자체가 바뀌었는지로 판단한다. 재프로브마다
+      // 지우면 "중복 찾기"를 다시 돌리기 전까지 콘텐츠 기반 재연결이 영영 불가능해진다.
+      contentHash: hashStillValid ? current.contentHash : '',
+      contentHashKey: hashStillValid ? current.contentHashKey : ''
     };
 
     if (current) {
@@ -1118,8 +1193,9 @@ async function indexFiles(filePaths, { reportProgress = true, categoryFolders = 
       db.sounds.push(next);
       existingByPath.set(normalizedFsPath(filePath), next);
       if (relativePath) existingByRelativePath.set(relativePath, next);
-      added += 1;
+      if (!restoredFields) added += 1;
     }
+    if (restoredFields) markSoundRestored(next);
 
     if (reportProgress && (index % 5 === 0 || index === total - 1)) {
       mainWindow?.webContents.send('scan-progress', { current: index + 1, total, fileName: path.basename(filePath) });
@@ -1130,9 +1206,13 @@ async function indexFiles(filePaths, { reportProgress = true, categoryFolders = 
     .sort((a, b) => a.localeCompare(b, 'ko'));
   db.sounds = deduplicateSoundsByPath(db.sounds);
   await saveDb();
-  return { ...librarySnapshot(), scanResult: { added, updated, total } };
+  return { ...librarySnapshot(), scanResult: { added, updated, restored, total } };
 }
 
+// 재연결은 약한 단서일수록 잘못 짚기 쉽다. 그래서 강한 단계부터 순서대로, 각 단계를
+// 모든 missing 사운드에 대해 먼저 끝낸 뒤 다음 단계로 넘어간다. 한 사운드씩 4단계를
+// 다 돌리면, 이름과 크기가 정확히 맞는 사운드가 가져가야 할 파일을 크기·mtime 만
+// 같은 다른 사운드가 먼저 채 간다.
 async function relinkMissingFromFiles(filePaths) {
   const missing = db.sounds.filter((sound) => !fs.existsSync(sound.path));
   const existingByPath = new Map(
@@ -1143,6 +1223,14 @@ async function relinkMissingFromFiles(filePaths) {
   const candidates = new Map();
   const candidateStats = [];
   for (const filePath of filePaths) {
+    // 이미 살아있는 사운드가 쓰고 있는 파일은 후보가 아니다. 제외하지 않으면
+    // 크기와 mtime 이 같은 복사본(같은 원본에서 뽑은 효과음, 한 배치로 렌더링한 SFX)이
+    // 엉뚱한 missing 사운드에 매칭되고, 그 사운드는 병합되어 사라진 뒤 삭제 표식이 된다.
+    if (existingByPath.has(normalizedFsPath(filePath))) continue;
+    // 사용자가 "라이브러리에서만 제거"한 파일도 후보가 아니다. 디스크에는 있지만
+    // db.sounds 에는 없으므로, 거르지 않으면 다른 사운드의 정체를 뒤집어쓰고 되살아난다.
+    const relative = soundRelativePath(filePath);
+    if (relative && unlinkedPaths.has(normalizedRelativePath(relative))) continue;
     const stat = await fsp.stat(filePath).catch(() => null);
     if (!stat) continue;
     candidateStats.push({ filePath, size: stat.size, modifiedAt: stat.mtimeMs });
@@ -1150,77 +1238,98 @@ async function relinkMissingFromFiles(filePaths) {
     if (!candidates.has(key)) candidates.set(key, []);
     candidates.get(key).push(filePath);
   }
-  const idChanges = {};
-  const mergedIds = new Set();
+
+  const claimed = new Set();
+  const unclaimed = (filePath) => !claimed.has(normalizedFsPath(filePath));
   const candidateHashes = new Map();
-  let relinked = 0;
-  for (const sound of missing) {
+
+  // 살아있는 사운드와 크기·mtime 이 겹치는 후보는 그 사운드의 복사본일 가능성이 높다.
+  // 이름을 바꾸거나 옮긴 것이 아니라 새로 생긴 파일이므로, 크기·mtime 만 보는 약한
+  // 단계에서 이런 후보를 쓰면 멀쩡한 사운드의 태그·별점이 엉뚱한 파일로 옮겨간다.
+  // 강한 단계(내용 해시, 같은 이름+크기)는 단서가 확실하므로 그대로 쓴다.
+  const liveSounds = [...existingByPath.values()];
+  const looksLikeCopy = (candidate) => liveSounds.some((live) => matchesStableFileFingerprint(live, {
+    size: candidate.size,
+    modifiedAt: candidate.modifiedAt
+  }));
+  const weakCandidates = candidateStats.filter((candidate) => !looksLikeCopy(candidate));
+
+  // 같은 이름 + 같은 크기. 폴더만 옮긴 경우다.
+  const byNameAndSize = (sound) => {
     const key = `${path.basename(sound.path).normalize('NFC').toLocaleLowerCase('ko')}:${sound.size}`;
-    let matches = candidates.get(key) || [];
-    let discoveredRename = false;
-    if (matches.length !== 1) {
-      const renamedMatches = candidateStats
-        .filter((candidate) => isRenamedSoundMatch(sound, candidate.filePath, {
-          size: candidate.size,
-          mtimeMs: candidate.modifiedAt
-        }))
-        .map((candidate) => candidate.filePath);
-      if (renamedMatches.length === 1) {
-        matches = renamedMatches;
-        discoveredRename = true;
+    return (candidates.get(key) || []).filter(unclaimed);
+  };
+  // 같은 폴더 + 같은 크기·mtime. 이름만 바꾼 경우다.
+  const byRenameInPlace = (sound) => weakCandidates
+    .filter((candidate) => unclaimed(candidate.filePath)
+      && isRenamedSoundMatch(sound, candidate.filePath, {
+        size: candidate.size,
+        mtimeMs: candidate.modifiedAt
+      }))
+    .map((candidate) => candidate.filePath);
+  // 폴더도 이름도 달라졌고 크기·mtime 만 같은 경우. 가장 약한 단서다.
+  const byFingerprint = (sound) => weakCandidates
+    .filter((candidate) => unclaimed(candidate.filePath)
+      && matchesStableFileFingerprint(sound, {
+        size: candidate.size,
+        modifiedAt: candidate.modifiedAt
+      }))
+    .map((candidate) => candidate.filePath);
+  // 내용 해시. 확실하지만 해시를 아는 사운드에만 쓸 수 있다.
+  const byContentHash = async (sound) => {
+    if (!sound.contentHash) return [];
+    const matches = [];
+    for (const candidate of candidateStats.filter((item) => unclaimed(item.filePath)
+      && Number(item.size) === Number(sound.size))) {
+      let contentHash = candidateHashes.get(candidate.filePath);
+      if (contentHash === undefined) {
+        // 읽기 실패와 "해시가 다름"을 섞으면, 일시적인 읽기 오류가 영구 미해결로 보인다.
+        contentHash = await hashFile(candidate.filePath).catch(() => null);
+        candidateHashes.set(candidate.filePath, contentHash);
       }
+      if (contentHash && contentHash === sound.contentHash) matches.push(candidate.filePath);
     }
-    if (matches.length !== 1) {
-      const movedAndRenamedMatches = candidateStats
-        .filter((candidate) => matchesStableFileFingerprint(sound, {
-          size: candidate.size,
-          modifiedAt: candidate.modifiedAt
-        }))
-        .map((candidate) => candidate.filePath);
-      if (movedAndRenamedMatches.length === 1) {
-        matches = movedAndRenamedMatches;
-        discoveredRename = true;
+    return matches;
+  };
+
+  const tiers = [
+    { find: byContentHash, rename: false },
+    { find: byNameAndSize, rename: false },
+    { find: byRenameInPlace, rename: true },
+    { find: byFingerprint, rename: true }
+  ];
+
+  const idChanges = {};
+  let relinked = 0;
+  let pending = [...missing];
+  for (const tier of tiers) {
+    if (!pending.length) break;
+    const stillMissing = [];
+    for (const sound of pending) {
+      const matches = await tier.find(sound);
+      // 후보가 둘 이상이면 무엇을 골라도 절반은 틀린다. 손대지 않고 사용자에게 맡긴다.
+      if (matches.length !== 1) {
+        stillMissing.push(sound);
+        continue;
       }
-    }
-    if (matches.length !== 1 && sound.contentHash) {
-      const contentMatches = [];
-      for (const candidate of candidateStats.filter((item) => Number(item.size) === Number(sound.size))) {
-        let contentHash = candidateHashes.get(candidate.filePath);
-        if (!contentHash) {
-          contentHash = await hashFile(candidate.filePath).catch(() => '');
-          candidateHashes.set(candidate.filePath, contentHash);
-        }
-        if (contentHash === sound.contentHash) contentMatches.push(candidate.filePath);
-      }
-      if (contentMatches.length === 1) matches = contentMatches;
-    }
-    if (matches.length !== 1) continue;
-    const oldId = sound.id;
-    const matchPath = matches[0];
-    const existing = existingByPath.get(normalizedFsPath(matchPath));
-    if (existing && existing !== sound) {
-      existing.tags = [...new Set([...(existing.tags || []), ...(sound.tags || [])])];
-      existing.embeddedTags = [...new Set([...(existing.embeddedTags || []), ...(sound.embeddedTags || [])])];
-      if (!existing.notes && sound.notes) existing.notes = sound.notes;
-      if (!existing.keyAnalysis && sound.keyAnalysis) existing.keyAnalysis = sound.keyAnalysis;
-      existing.favorite = Boolean(existing.favorite || sound.favorite);
-      existing.rating = Math.max(Number(existing.rating || 0), Number(sound.rating || 0));
-      existing.createdAt = Math.min(Number(existing.createdAt || Date.now()), Number(sound.createdAt || Date.now()));
-      idChanges[oldId] = existing.id;
-      mergedIds.add(oldId);
-    } else {
+      const matchPath = matches[0];
+      claimed.add(normalizedFsPath(matchPath));
+      // 후보에서 점유된 경로를 걸렀으므로 matchPath 는 언제나 비어 있다. 예전에는 이
+      // 자리에서 두 레코드를 병합했는데, 진 쪽 id 가 db.sounds 에서 사라지면 다음 저장이
+      // 그것을 삭제로 읽어 그 경로가 영구히 죽었다. 이제는 재연결만 한다.
+      const oldId = sound.id;
       sound.path = matchPath;
       sound.fileName = path.basename(matchPath);
-      if (discoveredRename) sound.title = path.basename(matchPath, path.extname(matchPath));
+      if (tier.rename) sound.title = path.basename(matchPath, path.extname(matchPath));
       sound.relativePath = soundRelativePath(matchPath) || sound.relativePath || '';
       sound.categoryPath = inferCategoryPath(matchPath);
       sound.category = sound.categoryPath.split('/').pop();
       existingByPath.set(normalizedFsPath(matchPath), sound);
       idChanges[oldId] = oldId;
+      relinked += 1;
     }
-    relinked += 1;
+    pending = stillMissing;
   }
-  if (mergedIds.size) db.sounds = db.sounds.filter((sound) => !mergedIds.has(sound.id));
   db.sounds = deduplicateSoundsByPath(db.sounds);
   return { missing: missing.length, relinked, unresolved: missing.length - relinked, idChanges };
 }
@@ -1583,7 +1692,11 @@ function hashFile(filePath) {
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha256');
     const stream = fs.createReadStream(filePath);
-    stream.on('error', reject);
+    stream.on('error', (error) => {
+      // 스트림을 닫지 않으면 읽기 오류가 난 파일마다 열린 핸들이 남는다.
+      stream.destroy();
+      reject(error);
+    });
     stream.on('data', (chunk) => hash.update(chunk));
     stream.on('end', () => resolve(hash.digest('hex')));
   });
@@ -2262,15 +2375,37 @@ ipcMain.handle('library:move-category-batch', (_event, { ids, category }) => wit
   };
 }));
 
-ipcMain.handle('library:remove-batch', (_event, { ids }) => withLocalMutation(async () => {
+// trashFile 이 false 면 원본은 그대로 두고 라이브러리에서만 뺀다. 그 경로는 unlinked
+// 표식으로 남아 자동 스캔이 되돌리지 않고, 앱 안에서 다시 추가할 때만 들어온다.
+// 휴지통으로 보낸 경우는 trashed 표식이 되어, 같은 파일이 돌아오면 메타데이터째 되살린다.
+handleMutation('library:remove-batch', async (_event, { ids, trashFile = true }) => {
   const selected = new Set(ids || []);
   const removing = db.sounds.filter((sound) => selected.has(sound.id));
-  for (const sound of removing) if (fs.existsSync(sound.path)) await shell.trashItem(sound.path);
-  db.sounds = db.sounds.filter((sound) => !selected.has(sound.id));
+  const removed = new Set();
+  const failures = [];
+  for (const sound of removing) {
+    if (!trashFile) {
+      pendingUnlinkIds.add(sound.id);
+      removed.add(sound.id);
+      continue;
+    }
+    try {
+      if (fs.existsSync(sound.path)) await shell.trashItem(sound.path);
+      removed.add(sound.id);
+    } catch (error) {
+      // 휴지통으로 못 보낸 파일까지 라이브러리에서 빼면, 파일은 남았는데 목록에서만
+      // 사라져 사용자가 원인을 알 수 없게 된다. 실패한 것은 그대로 둔다.
+      failures.push({ fileName: sound.fileName, message: error.message });
+    }
+  }
+  db.sounds = db.sounds.filter((sound) => !removed.has(sound.id));
   waveformCache.clear();
   await saveDb();
-  return librarySnapshot();
-}));
+  return {
+    ...librarySnapshot(),
+    removeResult: { requested: selected.size, removed: removed.size, failures }
+  };
+});
 
 ipcMain.handle('library:backup-export', async () => {
   const result = await dialog.showSaveDialog(mainWindow, {
@@ -2343,7 +2478,7 @@ ipcMain.handle('library:collect-metadata', () => withLocalMutation(async () => {
   });
   for (let index = 0; index < existing.length; index += 1) {
     const sound = existing[index];
-    const metadata = await probeAudio(sound.path);
+    const metadata = await probeAudio(sound.path, sound);
     Object.assign(sound, metadata);
     updated += 1;
     if (index % 5 === 0 || index === existing.length - 1) {
@@ -2683,14 +2818,19 @@ handleMutation('preview-volume:set', async (_event, volume) => {
 
 ipcMain.on('shortcuts:capture', (_event, active) => { shortcutCapture = Boolean(active); });
 
-ipcMain.handle('library:remove', (_event, { id }) => withLocalMutation(async () => {
+handleMutation('library:remove', async (_event, { id, trashFile = true }) => {
   const index = db.sounds.findIndex((item) => item.id === id);
   if (index < 0) return librarySnapshot();
-  const [sound] = db.sounds.splice(index, 1);
-  if (fs.existsSync(sound.path)) await shell.trashItem(sound.path);
+  const sound = db.sounds[index];
+  if (trashFile) {
+    if (fs.existsSync(sound.path)) await shell.trashItem(sound.path);
+  } else {
+    pendingUnlinkIds.add(sound.id);
+  }
+  db.sounds.splice(index, 1);
   await saveDb();
   return librarySnapshot();
-}));
+});
 
 ipcMain.handle('library:reveal', async (_event, filePath) => {
   shell.showItemInFolder(filePath);

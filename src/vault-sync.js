@@ -45,10 +45,20 @@ function mergeVaultState(base, editSources) {
       if (record.deleted) {
         // 삭제는 일반 편집보다 항상 우선한다. 다른 Mac의 오래된 스캔이나 이동 기록이
         // 더 늦게 저장되더라도 사용자가 삭제한 항목을 되살리면 안 된다.
+        // 단, 아래의 명시적 복원(restored)이 더 최신이면 그것이 이긴다.
+        if (!current?.deleted && current?.restored && !beats(record, machineId, current, owners.get(id))) continue;
         if (!current?.deleted || beats(record, machineId, current, owners.get(id))) {
-          winners.set(id, { ...(current || {}), ...record, id, deleted: true });
+          winners.set(id, { ...(current || {}), ...record, id, deleted: true, restored: false });
           owners.set(id, machineId);
         }
+        continue;
+      }
+      // 삭제한 파일이 같은 자리로 돌아온 것을 확인하고 되살린 기록만 삭제를 이긴다.
+      // 일반 편집(태그·별점 등)은 여전히 삭제를 이기지 못한다 — 다른 Mac의 뒤늦은
+      // 스캔 결과가 사용자의 삭제를 되돌리면 안 되기 때문이다.
+      if (current?.deleted && record.restored && beats(record, machineId, current, owners.get(id))) {
+        winners.set(id, { ...record, id, deleted: false, restored: true });
+        owners.set(id, machineId);
         continue;
       }
       if (current?.deleted) continue;
@@ -83,14 +93,15 @@ function mergeVaultState(base, editSources) {
 }
 
 // 베이스와 사용자 필드가 완전히 같은 자기 편집 레코드는 병합 결과에 기여하지
-// 않으므로 제거해도 안전하다. 삭제 표식과 베이스에 없는 신규 사운드는 편집
-// 파일이 유일한 저장소이므로 반드시 유지한다.
+// 않으므로 제거해도 안전하다. 삭제 표식, 복원 표식, 베이스에 없는 신규 사운드는
+// 편집 파일이 유일한 저장소이므로 반드시 유지한다.
 function pruneRedundantEdits(ownSounds, baseSounds, fields) {
   const baseById = new Map((baseSounds || []).filter((sound) => sound?.id).map((sound) => [sound.id, sound]));
   const kept = {};
   for (const [id, record] of Object.entries(ownSounds || {})) {
     if (!record || typeof record !== 'object') continue;
-    if (record.deleted) {
+    // 복원 표식을 지우면 베이스의 삭제 표식이 다시 이겨 사운드가 또 사라진다.
+    if (record.deleted || record.restored) {
       kept[id] = record;
       continue;
     }

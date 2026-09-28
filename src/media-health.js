@@ -6,12 +6,32 @@ function hasCompleteTechnicalMetadata(sound) {
     && Number(sound?.metadataVersion) === 1;
 }
 
-function needsTechnicalProbe(sound, stat) {
+// 실패한 프로브를 매번 다시 시도하지 않기 위한 대기 시간. Google Drive 에 아직 내려오지
+// 않은 파일은 몇 번을 시도해도 같은 결과라, 재스캔마다 파일당 ffprobe 3회 + 1초 대기를
+// 반복하면 스캔이 끝나지 않는다. 파일 자체가 바뀌면 아래에서 즉시 다시 시도한다.
+const PROBE_BACKOFF_MS = [
+  5 * 60 * 1000,
+  30 * 60 * 1000,
+  2 * 60 * 60 * 1000,
+  12 * 60 * 60 * 1000,
+  24 * 60 * 60 * 1000
+];
+
+function probeBackoffMs(attempts) {
+  const index = Math.max(0, Math.min(PROBE_BACKOFF_MS.length - 1, Number(attempts || 1) - 1));
+  return PROBE_BACKOFF_MS[index];
+}
+
+function needsTechnicalProbe(sound, stat, now = Date.now()) {
   if (!sound || !stat) return true;
-  return !sound.technicalCached
-    || !hasCompleteTechnicalMetadata(sound)
-    || Number(sound.modifiedAt) !== Number(stat.mtimeMs)
-    || Number(sound.size) !== Number(stat.size);
+  // 파일이 실제로 달라졌으면 백오프와 무관하게 다시 읽는다.
+  if (Number(sound.modifiedAt) !== Number(stat.mtimeMs)) return true;
+  if (Number(sound.size) !== Number(stat.size)) return true;
+  if (sound.technicalCached && hasCompleteTechnicalMetadata(sound)) return false;
+
+  const failedAt = Number(sound.technicalProbeFailedAt || 0);
+  if (!failedAt) return true;
+  return now - failedAt >= probeBackoffMs(sound.technicalProbeAttempts);
 }
 
 function mediaErrorMessage(error, { fileExists = true, waveform = false } = {}) {
@@ -35,7 +55,9 @@ function mediaErrorMessage(error, { fileExists = true, waveform = false } = {}) 
     : '오디오 정보를 읽지 못했습니다. Google Drive 다운로드 상태를 확인해 주세요.';
 }
 
-function failedProbeMetadata(error, fileExists = true) {
+function failedProbeMetadata(error, fileExists = true, previous = null, now = Date.now()) {
+  // 같은 파일에 대한 연속 실패 횟수를 들고 있어야 재시도 간격을 늘릴 수 있다.
+  const attempts = Number(previous?.technicalProbeAttempts || 0) + 1;
   return {
     duration: 0,
     sampleRate: 0,
@@ -46,13 +68,17 @@ function failedProbeMetadata(error, fileExists = true) {
     embeddedTags: [],
     metadataVersion: 0,
     technicalCached: false,
-    technicalError: mediaErrorMessage(error, { fileExists })
+    technicalError: mediaErrorMessage(error, { fileExists }),
+    technicalProbeFailedAt: now,
+    technicalProbeAttempts: attempts
   };
 }
 
 module.exports = {
+  PROBE_BACKOFF_MS,
   failedProbeMetadata,
   hasCompleteTechnicalMetadata,
   mediaErrorMessage,
-  needsTechnicalProbe
+  needsTechnicalProbe,
+  probeBackoffMs
 };

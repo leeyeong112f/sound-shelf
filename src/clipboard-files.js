@@ -44,11 +44,17 @@ function parseFilenamesPlist(plistText) {
 
 // public.file-url은 file:// URL 한 줄이다. 퍼센트 인코딩과 한글 자모 분리가
 // 섞여 있을 수 있어 fileURLToPath에 맡긴다.
+//
+// Finder는 여기에 실제 경로가 아니라 file:///.file/id=6571367.2157376445 같은
+// 파일 참조 URL을 넣는다. 이 경로는 Cocoa만 풀 수 있고 stat조차 되지 않으므로
+// 경로로 쓰지 않는다. Finder가 복사한 것이라면 NSFilenamesPboardType에 진짜
+// 경로가 함께 들어 있다.
 function parseFileUrl(value) {
   const text = String(value || '').trim();
   if (!text.startsWith('file://')) return null;
   try {
-    return fileURLToPath(text);
+    const filePath = fileURLToPath(text);
+    return filePath.startsWith('/.file/id=') ? null : filePath;
   } catch {
     return null;
   }
