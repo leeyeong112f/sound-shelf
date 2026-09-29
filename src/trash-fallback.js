@@ -10,6 +10,14 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 
+// 사용자 휴지통 폴더. Electron 의 app.getPath 에는 'trash' 가 없어(예외를 던진다) 홈에서 직접 만든다.
+// 다른 볼륨의 파일은 rename 이 실패하고 복사로 넘어가므로 부팅 볼륨 휴지통 하나면 된다.
+function userTrashDirectory(homeDirectory) {
+  const home = String(homeDirectory || '').trim();
+  if (!home) throw new Error('홈 폴더를 알 수 없어 휴지통 위치를 정할 수 없습니다.');
+  return path.join(home, '.Trash');
+}
+
 // 휴지통 안에서 겹치지 않는 이름. Finder 처럼 "이름 2.wav", "이름 3.wav" 로 번호를 붙인다.
 function trashDestination(trashDir, sourceName, exists = fs.existsSync) {
   const extension = path.extname(sourceName);
@@ -62,4 +70,4 @@ async function moveToTrash(target, { trashItem, trashDir }) {
   }
 }
 
-module.exports = { moveToTrash, trashDestination };
+module.exports = { moveToTrash, trashDestination, userTrashDirectory };
