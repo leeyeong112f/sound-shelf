@@ -1433,7 +1433,8 @@ async function cleanUpMissingSounds(files) {
   const selection = selectMissingForCleanup(missing.map(({ sound }) => sound), {
     now: Date.now(),
     baselineById: syncBaseline,
-    presentSounds: db.sounds.filter((sound) => !missingIds.has(sound.id))
+    presentSounds: db.sounds.filter((sound) => !missingIds.has(sound.id)),
+    tombstones: [...deletedSoundTombstones.values()]
   });
   if (!vaultStillThere()) return;
   if (selection.blocked) {

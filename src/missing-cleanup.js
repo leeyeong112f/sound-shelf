@@ -18,8 +18,15 @@ const path = require('path');
 //
 // Drive 가 덜 마운트되면 수백 개가 한꺼번에 누락으로 보인다. 대상이 한도를 넘으면 하나도
 // 지우지 않는다.
+//
+// 예외: 같은 경로·크기·수정 시각의 파일이 이미 삭제 표식(다른 id)으로 기록돼 있으면 유예를
+// 두지 않는다. 한 Mac 이 파일을 넣자마자 지우면, 다른 Mac 이 Drive 로 막 받은 그 파일을 먼저
+// 색인해 자기 id 로 레코드를 만들고, 곧 파일이 사라져 "파일 없음"만 남는다. 삭제 표식은 id 로
+// 맞춰지므로 이 중복 레코드를 덮지 못한다. 같은 파일을 누군가 일부러 지운 기록이 있으니
+// 24시간을 기다릴 이유가 없다. 파일이 나중에 정말 돌아오면 색인이 표식을 같은 id 로 되살린다.
 const MISSING_CLEANUP_GRACE_MS = 24 * 60 * 60 * 1000;
 const MISSING_CLEANUP_MAX_BATCH = 20;
+const TOMBSTONE_MTIME_TOLERANCE_MS = 2000;
 
 function nfc(value) {
   return String(value || '').normalize('NFC');
@@ -62,6 +69,43 @@ function lookalikeKey(sound) {
   return `${nfc(fileName).toLocaleLowerCase('ko')}:${size}`;
 }
 
+function nfcRelativePath(value) {
+  return nfc(value).split(/[\\/]+/).filter((part) => part && part !== '.').join('/');
+}
+
+function tombstoneKey(sound) {
+  const relativePath = nfcRelativePath(sound?.relativePath);
+  const size = Number(sound?.size || 0);
+  if (!relativePath || !(size > 0)) return '';
+  return `${relativePath.toLocaleLowerCase('ko')}:${size}`;
+}
+
+// 다른 id 의 삭제 표식이 같은 파일을 가리키는지. 경로·크기가 같고, 수정 시각을 둘 다 알면
+// 그것도 같아야 한다(복사·이동은 mtime 을 보존하므로 같은 파일 실체를 뜻한다).
+function matchesTombstone(sound, tombstones) {
+  const key = tombstoneKey(sound);
+  if (!key) return false;
+  const soundModifiedAt = finiteStamp(sound?.modifiedAt);
+  return (tombstones.get(key) || []).some((tombstone) => {
+    if (tombstone.id && tombstone.id === sound.id) return false;
+    const tombstoneModifiedAt = finiteStamp(tombstone.modifiedAt);
+    if (!soundModifiedAt || !tombstoneModifiedAt) return true;
+    return Math.abs(soundModifiedAt - tombstoneModifiedAt) <= TOMBSTONE_MTIME_TOLERANCE_MS;
+  });
+}
+
+function tombstonesByKey(tombstones) {
+  const map = new Map();
+  for (const tombstone of tombstones || []) {
+    if (!tombstone?.deleted) continue;
+    const key = tombstoneKey(tombstone);
+    if (!key) continue;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(tombstone);
+  }
+  return map;
+}
+
 // 이름·크기가 같은 살아 있는 레코드 중 가장 최근에 만든 시각.
 function lookalikeCreatedAt(presentSounds) {
   const latest = new Map();
@@ -81,26 +125,35 @@ function lookalikeCreatedAt(presentSounds) {
  * @param {number} options.now
  * @param {Map<string, object>} [options.baselineById] id → 병합 베이스라인 레코드(updatedAt 포함)
  * @param {object[]} [options.presentSounds] 파일이 있는 사운드. 이름·크기가 같은 새 레코드를 찾는 데 쓴다.
- * @returns {{ ids: string[], candidates: number, kept: number, deferred: number, blocked: boolean }}
+ * @param {object[]} [options.tombstones] 삭제 표식(deleted: true). 같은 파일을 가리키면 유예 없이 뺀다.
+ * @returns {{ ids: string[], candidates: number, kept: number, deferred: number, duplicates: number, blocked: boolean }}
  *   blocked 이면 ids 는 비어 있다.
  */
 function selectMissingForCleanup(missingSounds, {
   now,
   baselineById = new Map(),
   presentSounds = [],
+  tombstones = [],
   graceMs = MISSING_CLEANUP_GRACE_MS,
   maxBatch = MISSING_CLEANUP_MAX_BATCH
 } = {}) {
   const candidates = [];
   let kept = 0;
   let deferred = 0;
+  let duplicates = 0;
   // 지우는 쪽으로 기울면 안 된다. 현재 시각을 모르면 모두 미룬다.
   const clock = Number.isFinite(now) ? now : -Infinity;
   const lookalikes = lookalikeCreatedAt(presentSounds);
+  const deletedByKey = tombstonesByKey(tombstones);
   for (const sound of missingSounds || []) {
     if (!sound?.id) continue;
     if (hasUserMetadata(sound)) {
       kept += 1;
+      continue;
+    }
+    if (matchesTombstone(sound, deletedByKey)) {
+      duplicates += 1;
+      candidates.push(sound.id);
       continue;
     }
     const touchedAt = Math.max(
@@ -119,6 +172,7 @@ function selectMissingForCleanup(missingSounds, {
     candidates: candidates.length,
     kept,
     deferred,
+    duplicates,
     blocked
   };
 }
