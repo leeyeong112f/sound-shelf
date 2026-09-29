@@ -150,3 +150,92 @@ test('이름과 크기가 같은 파일이 최근 새로 색인됐으면 미룬�
   const otherSize = { ...lookalike, size: 1 };
   assert.deepEqual(selectMissingForCleanup([missing], { now: NOW, presentSounds: [otherSize] }).ids, ['a2838751']);
 });
+
+// 2026-09-29 실제 사례. MacBook 이 "일론머스크 예언.mp3" 를 넣고 3초 뒤 지웠는데(표식 0a26956b),
+// iMac 이 Drive 로 막 받은 그 파일을 14초 뒤 자기 id(0bce7b15)로 색인했고 곧 파일이 사라졌다.
+const DUP_NOW = 1790683500000;
+function trashedTombstone(overrides = {}) {
+  return {
+    id: '0a26956b',
+    relativePath: '일론머스크 예언.mp3',
+    fileName: '일론머스크 예언.mp3',
+    size: 477120,
+    modifiedAt: 1769827220440.7163,
+    updatedAt: 1790683460122,
+    deleted: true,
+    reason: 'trashed',
+    ...overrides
+  };
+}
+function duplicateGhost(overrides = {}) {
+  return ghost({
+    id: '0bce7b15',
+    relativePath: '일론머스크 예언.mp3',
+    fileName: '일론머스크 예언.mp3',
+    title: '일론머스크 예언',
+    size: 477120,
+    modifiedAt: 1769827220440,
+    createdAt: 1790683474070,
+    ...overrides
+  });
+}
+
+test('같은 경로·크기·수정 시각의 삭제 표식이 있으면 유예 없이 정리한다', () => {
+  const result = selectMissingForCleanup([duplicateGhost()], { now: DUP_NOW, tombstones: [trashedTombstone()] });
+  assert.deepEqual(result.ids, ['0bce7b15']);
+  assert.equal(result.duplicates, 1);
+  assert.equal(result.deferred, 0);
+});
+
+test('삭제 표식이 없으면 같은 레코드도 유예 시간을 기다린다', () => {
+  const result = selectMissingForCleanup([duplicateGhost()], { now: DUP_NOW });
+  assert.deepEqual(result.ids, []);
+  assert.equal(result.deferred, 1);
+});
+
+test('표식과 같은 파일이라도 사용자 정보가 있으면 남긴다', () => {
+  const result = selectMissingForCleanup([duplicateGhost({ tags: ['예언'] })], { now: DUP_NOW, tombstones: [trashedTombstone()] });
+  assert.deepEqual(result.ids, []);
+  assert.equal(result.kept, 1);
+});
+
+test('경로·크기·수정 시각 중 하나라도 다르면 표식으로 보지 않는다', () => {
+  const cases = [
+    trashedTombstone({ relativePath: '예능 효과음/일론머스크 예언.mp3' }),
+    trashedTombstone({ size: 477121 }),
+    trashedTombstone({ modifiedAt: 1769827220440 + 5000 })
+  ];
+  for (const tombstone of cases) {
+    const result = selectMissingForCleanup([duplicateGhost()], { now: DUP_NOW, tombstones: [tombstone] });
+    assert.deepEqual(result.ids, [], JSON.stringify(tombstone));
+    assert.equal(result.deferred, 1);
+  }
+});
+
+test('수정 시각을 모르는 쪽이 있으면 경로·크기만으로 맞춘다', () => {
+  const result = selectMissingForCleanup([duplicateGhost({ modifiedAt: undefined })], { now: DUP_NOW, tombstones: [trashedTombstone()] });
+  assert.deepEqual(result.ids, ['0bce7b15']);
+});
+
+test('삭제되지 않은 기록이나 자기 자신의 표식은 중복으로 보지 않는다', () => {
+  const restored = trashedTombstone({ deleted: false, restored: true });
+  assert.deepEqual(selectMissingForCleanup([duplicateGhost()], { now: DUP_NOW, tombstones: [restored] }).ids, []);
+  const self = trashedTombstone({ id: '0bce7b15' });
+  assert.deepEqual(selectMissingForCleanup([duplicateGhost()], { now: DUP_NOW, tombstones: [self] }).ids, []);
+});
+
+test('표식의 NFD 경로와 레코드의 NFC 경로는 같은 파일이다', () => {
+  const tombstone = trashedTombstone({ relativePath: '일론머스크 예언.mp3'.normalize('NFD') });
+  const result = selectMissingForCleanup([duplicateGhost({ relativePath: '일론머스크 예언.mp3'.normalize('NFC') })], { now: DUP_NOW, tombstones: [tombstone] });
+  assert.deepEqual(result.ids, ['0bce7b15']);
+});
+
+test('표식으로 정리하는 항목도 한도에 포함된다', () => {
+  const ghosts = Array.from({ length: MISSING_CLEANUP_MAX_BATCH + 1 }, (_, index) => duplicateGhost({
+    id: `dup-${index}`, relativePath: `dup-${index}.mp3`, fileName: `dup-${index}.mp3`, title: `dup-${index}`
+  }));
+  const tombstones = ghosts.map((sound, index) => trashedTombstone({ id: `t-${index}`, relativePath: sound.relativePath }));
+  const result = selectMissingForCleanup(ghosts, { now: DUP_NOW, tombstones });
+  assert.equal(result.blocked, true);
+  assert.deepEqual(result.ids, []);
+});
