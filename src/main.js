@@ -1,5 +1,6 @@
 const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } = require('electron');
-const { autoUpdater } = require('electron-updater');
+const { Readable } = require('node:stream');
+const { pipeline } = require('node:stream/promises');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
@@ -22,6 +23,7 @@ const {
 const { selectMissingForCleanup } = require('./missing-cleanup');
 const { failedProbeMetadata, mediaErrorMessage, needsTechnicalProbe } = require('./media-health');
 const { clipboardFilePaths } = require('./clipboard-files');
+const SelfUpdate = require('./self-update');
 const { isCurrentKeyAnalysis, keyAnalysisErrorMessage } = require('./key-analysis');
 const { canonicalYouTubeUrl, parseDownloadProgress, safeFileStem, youtubeImportErrorMessage } = require('./youtube-import');
 
@@ -60,8 +62,16 @@ let updateStartupTimer;
 let updateCheckTimer;
 let updateDialogShown = false;
 let automaticUpdaterAvailable = false;
+// 자체 업데이트가 막힌 이유. null 이면 가능하다. configureAutoUpdates 가 채운다.
+let selfUpdateBlocker = '개발 실행 중에는 자동 업데이트를 하지 않습니다.';
+// 압축을 풀어 앱 옆에 준비해 둔 새 번들. 재시작하거나 종료할 때 바꿔 끼운다.
+let stagedUpdate = null;
+let updateApplyScheduled = false;
+let updateDownloadRunning = false;
 const GITHUB_RELEASES_URL = 'https://github.com/leeyeong112f/sound-shelf/releases/latest';
-const GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/leeyeong112f/sound-shelf/releases/latest';
+// 자체 업데이트 시험용. 가짜 릴리스 서버를 가리키면 GitHub 대신 그곳에서 받는다.
+const GITHUB_LATEST_RELEASE_API = process.env.SOUND_SHELF_UPDATE_API
+  || 'https://api.github.com/repos/leeyeong112f/sound-shelf/releases/latest';
 let updateStatus = {
   phase: 'idle',
   currentVersion: '',
@@ -1839,76 +1849,184 @@ async function createWindow() {
   });
 }
 
-function configureAutoUpdates() {
-  const updateConfiguration = path.join(process.resourcesPath, 'app-update.yml');
-  if (!app.isPackaged || !fs.existsSync(updateConfiguration)) return;
-  automaticUpdaterAvailable = true;
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
-  autoUpdater.on('checking-for-update', () => publishUpdateStatus({
-    phase: 'checking',
-    message: 'GitHub에서 최신 버전을 확인하고 있습니다.',
-    progress: 0,
-    automatic: true
-  }));
-  autoUpdater.on('update-available', (info) => publishUpdateStatus({
-    phase: 'downloading',
-    latestVersion: info.version || updateStatus.latestVersion,
-    message: `새 버전 ${info.version || ''}을 다운로드하고 있습니다.`,
-    progress: 0,
-    automatic: true
-  }));
-  autoUpdater.on('update-not-available', (info) => publishUpdateStatus({
-    phase: 'current',
-    latestVersion: info.version || updateStatus.latestVersion || app.getVersion(),
-    message: '현재 최신 버전을 사용하고 있습니다.',
-    progress: 100,
-    automatic: true
-  }));
-  autoUpdater.on('download-progress', (progress) => publishUpdateStatus({
-    phase: 'downloading',
-    message: `새 버전을 다운로드하고 있습니다. ${Math.round(progress.percent || 0)}%`,
-    progress: Math.max(0, Math.min(100, Number(progress.percent) || 0)),
-    automatic: true
-  }));
-  autoUpdater.on('error', (error) => {
-    console.error('Automatic update failed:', error.message);
-    publishUpdateStatus({
-      phase: 'error',
-      message: `자동 업데이트를 완료하지 못했습니다. GitHub 배포 페이지에서 직접 받을 수 있습니다.`,
-      automatic: true
-    });
+// 이 앱은 Apple 인증서 없이 ad-hoc 서명으로 배포한다. Squirrel.Mac(electron-updater)은
+// 서명된 앱만 갱신하므로, GitHub 릴리스의 zip 을 직접 받아 번들을 바꿔 끼운다.
+// 결정 로직은 self-update.js 에 있고, 여기서는 파일을 받고 풀고 교체 스크립트를 띄운다.
+async function configureAutoUpdates() {
+  const bundlePath = SelfUpdate.bundlePathFromExecutable(app.getPath('exe'));
+  const writable = bundlePath
+    ? await fsp.access(path.dirname(bundlePath), fs.constants.W_OK).then(() => true, () => false)
+    : false;
+  selfUpdateBlocker = SelfUpdate.selfUpdateBlocker({
+    platform: process.platform,
+    packaged: app.isPackaged,
+    bundlePath,
+    writable
   });
-  autoUpdater.on('update-downloaded', async (info) => {
-    publishUpdateStatus({
-      phase: 'downloaded',
-      latestVersion: info.version || updateStatus.latestVersion,
-      message: '업데이트 준비가 끝났습니다. 재시작하면 새 버전이 적용됩니다.',
-      progress: 100,
-      automatic: true
-    });
-    if (updateDialogShown) return;
-    updateDialogShown = true;
-    const options = {
-      type: 'info',
-      buttons: ['재시작하고 업데이트', '나중에'],
-      defaultId: 0,
-      cancelId: 1,
-      title: 'Sound Shelf 업데이트 준비 완료',
-      message: `새 버전 ${info.version}을 다운로드했습니다.`,
-      detail: '지금 재시작하면 업데이트가 적용됩니다. 나중에 선택하면 앱을 종료할 때 자동으로 적용됩니다.'
-    };
-    const result = mainWindow && !mainWindow.isDestroyed()
-      ? await dialog.showMessageBox(mainWindow, options)
-      : await dialog.showMessageBox(options);
-    if (result.response === 0) autoUpdater.quitAndInstall(false, true);
-    else updateDialogShown = false;
-  });
-  const checkForUpdates = () => autoUpdater.checkForUpdates().catch((error) => {
+  automaticUpdaterAvailable = !selfUpdateBlocker;
+  publishUpdateStatus({});
+  if (!app.isPackaged) return;
+  if (automaticUpdaterAvailable) await removeUpdateLeftovers(bundlePath);
+  const checkForUpdates = () => checkForApplicationUpdate({ automatic: true }).catch((error) => {
     console.error('Could not check for updates:', error.message);
   });
   updateStartupTimer = setTimeout(checkForUpdates, 12000);
   updateCheckTimer = setInterval(checkForUpdates, 4 * 60 * 60 * 1000);
+}
+
+// 지난 교체가 중간에 끊겼을 때 앱 옆에 남는 준비 폴더와 이전 번들을 지운다.
+async function removeUpdateLeftovers(bundlePath) {
+  const parent = path.dirname(bundlePath);
+  const bundleName = path.basename(bundlePath);
+  const entries = await fsp.readdir(parent).catch(() => []);
+  for (const name of entries) {
+    if (!SelfUpdate.isUpdateLeftover(name, bundleName)) continue;
+    await fsp.rm(path.join(parent, name), { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+function fetchRelease(url, { signal } = {}) {
+  return fetch(url, {
+    headers: { 'User-Agent': 'Sound-Shelf-Updater' },
+    signal: signal || AbortSignal.timeout(15000)
+  });
+}
+
+// 파일을 받으면서 sha512 를 같이 계산한다. 진행률은 퍼센트가 바뀔 때만 알린다.
+async function downloadToFile(url, destination, expectedSize, onProgress) {
+  const response = await fetchRelease(url, { signal: AbortSignal.timeout(30 * 60 * 1000) });
+  if (!response.ok || !response.body) throw new Error(`다운로드 응답 ${response.status}`);
+  const total = Number(response.headers.get('content-length')) || expectedSize || 0;
+  const hash = crypto.createHash('sha512');
+  let received = 0;
+  let lastPercent = -1;
+  const source = Readable.fromWeb(response.body);
+  source.on('data', (chunk) => {
+    hash.update(chunk);
+    received += chunk.length;
+    const percent = total ? Math.min(99, Math.floor((received / total) * 100)) : 0;
+    if (percent !== lastPercent) {
+      lastPercent = percent;
+      onProgress(percent);
+    }
+  });
+  await pipeline(source, fs.createWriteStream(destination));
+  return hash.digest('base64');
+}
+
+async function bundleVersion(bundlePath) {
+  const { stdout } = await execFileAsync('/usr/libexec/PlistBuddy', [
+    '-c', 'Print CFBundleShortVersionString', path.join(bundlePath, 'Contents', 'Info.plist')
+  ]);
+  return stdout.trim();
+}
+
+// zip 을 받아 체크섬을 맞춰 보고, 앱 옆 준비 폴더에 풀어 둔다. 교체는 하지 않는다.
+async function downloadAndStageUpdate(release) {
+  const bundlePath = SelfUpdate.bundlePathFromExecutable(app.getPath('exe'));
+  const stagingDir = SelfUpdate.stagingDirectory(bundlePath, release.version);
+  const downloadDir = path.join(app.getPath('userData'), 'updates');
+  const zipPath = path.join(downloadDir, release.zip.name);
+  const progress = (percent, message) => publishUpdateStatus({
+    phase: 'downloading',
+    latestVersion: release.version,
+    message,
+    progress: percent
+  });
+  updateDownloadRunning = true;
+  try {
+    progress(0, `새 버전 ${release.version}을 다운로드하고 있습니다. 0%`);
+    let expectedChecksum = null;
+    if (release.manifest) {
+      const response = await fetchRelease(release.manifest.url);
+      if (!response.ok) throw new Error(`릴리스 정보 응답 ${response.status}`);
+      const manifest = SelfUpdate.parseUpdateManifest(await response.text());
+      expectedChecksum = SelfUpdate.manifestChecksum(manifest, release.zip.name);
+    }
+    await fsp.rm(downloadDir, { recursive: true, force: true });
+    await fsp.mkdir(downloadDir, { recursive: true });
+    const checksum = await downloadToFile(release.zip.url, zipPath, release.zip.size, (percent) => {
+      progress(percent, `새 버전 ${release.version}을 다운로드하고 있습니다. ${percent}%`);
+    });
+    if (expectedChecksum && checksum !== expectedChecksum) {
+      throw new Error('내려받은 파일이 릴리스 정보의 체크섬과 다릅니다.');
+    }
+    progress(100, '내려받은 앱의 압축을 풀고 있습니다.');
+    await fsp.rm(stagingDir, { recursive: true, force: true });
+    await fsp.mkdir(stagingDir, { recursive: true });
+    await execFileAsync('/usr/bin/ditto', ['-x', '-k', zipPath, stagingDir]);
+    const bundleName = path.basename(bundlePath);
+    const extracted = (await fsp.readdir(stagingDir)).filter((name) => name.endsWith('.app'));
+    const newBundleName = extracted.includes(bundleName) ? bundleName : extracted[0];
+    if (!newBundleName) throw new Error('내려받은 파일 안에 앱 번들이 없습니다.');
+    const newBundle = path.join(stagingDir, newBundleName);
+    const version = await bundleVersion(newBundle).catch(() => '');
+    if (version !== release.version) {
+      throw new Error(`내려받은 앱 버전(${version || '?'})이 릴리스 버전(${release.version})과 다릅니다.`);
+    }
+    // 인터넷에서 받은 파일 표식이 남으면 무서명 앱은 첫 실행에서 막힌다.
+    await execFileAsync('/usr/bin/xattr', ['-dr', 'com.apple.quarantine', newBundle]).catch(() => {});
+    await fsp.rm(downloadDir, { recursive: true, force: true });
+    stagedUpdate = { version: release.version, bundlePath: newBundle, stagingDir };
+    publishUpdateStatus({
+      phase: 'downloaded',
+      latestVersion: release.version,
+      message: '업데이트 준비가 끝났습니다. 재시작하면 새 버전이 적용됩니다.',
+      progress: 100
+    });
+  } catch (error) {
+    await fsp.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+    await fsp.rm(downloadDir, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  } finally {
+    updateDownloadRunning = false;
+  }
+}
+
+// 준비된 번들로 바꿔 끼우는 스크립트를 앱 밖에서 띄운다. 앱 프로세스가 끝난 뒤 실행된다.
+function scheduleBundleSwap({ relaunch }) {
+  if (!stagedUpdate || updateApplyScheduled) return false;
+  const bundlePath = SelfUpdate.bundlePathFromExecutable(app.getPath('exe'));
+  if (!bundlePath) return false;
+  const args = SelfUpdate.swapScriptArguments({
+    pid: process.pid,
+    bundlePath,
+    stagedBundlePath: stagedUpdate.bundlePath,
+    relaunch
+  });
+  const child = spawn('/bin/sh', ['-c', SelfUpdate.SWAP_SCRIPT, ...args], { detached: true, stdio: 'ignore' });
+  child.unref();
+  updateApplyScheduled = true;
+  return true;
+}
+
+function installStagedUpdate() {
+  if (!stagedUpdate) throw new Error('아직 설치할 업데이트가 준비되지 않았습니다.');
+  if (!scheduleBundleSwap({ relaunch: true }) && !updateApplyScheduled) {
+    throw new Error('업데이트 교체를 시작하지 못했습니다.');
+  }
+  publishUpdateStatus({ phase: 'installing', message: '앱을 재시작해 업데이트를 적용합니다.' });
+  setTimeout(() => app.quit(), 120);
+  return currentUpdateStatus();
+}
+
+async function offerUpdateRestart(version) {
+  if (updateDialogShown || !stagedUpdate) return;
+  updateDialogShown = true;
+  const options = {
+    type: 'info',
+    buttons: ['재시작하고 업데이트', '나중에'],
+    defaultId: 0,
+    cancelId: 1,
+    title: 'Sound Shelf 업데이트 준비 완료',
+    message: `새 버전 ${version}을 다운로드했습니다.`,
+    detail: '지금 재시작하면 업데이트가 적용됩니다. 나중에 선택하면 앱을 종료할 때 자동으로 적용됩니다.'
+  };
+  const result = mainWindow && !mainWindow.isDestroyed()
+    ? await dialog.showMessageBox(mainWindow, options)
+    : await dialog.showMessageBox(options);
+  if (result.response === 0) installStagedUpdate();
+  else updateDialogShown = false;
 }
 
 function compareVersions(first, second) {
@@ -1960,13 +2078,12 @@ async function latestGitHubRelease() {
   if (response.status === 404) return null;
   if (!response.ok) throw new Error(`GitHub 응답 ${response.status}`);
   const release = await response.json();
-  return {
-    version: String(release.tag_name || release.name || '').replace(/^v/i, ''),
-    url: release.html_url || GITHUB_RELEASES_URL
-  };
+  const picked = SelfUpdate.pickReleaseAssets(release, { arch: process.arch });
+  return { ...picked, url: picked.url || GITHUB_RELEASES_URL };
 }
 
-async function checkForApplicationUpdate() {
+async function checkForApplicationUpdate({ automatic = false } = {}) {
+  if (updateDownloadRunning) return currentUpdateStatus();
   publishUpdateStatus({
     phase: 'checking',
     message: 'GitHub에서 최신 버전을 확인하고 있습니다.',
@@ -1992,27 +2109,33 @@ async function checkForApplicationUpdate() {
         progress: 100
       });
     }
-    if (!automaticUpdaterAvailable) {
+    if (stagedUpdate?.version === release.version) {
+      const status = publishUpdateStatus({
+        ...patch,
+        phase: 'downloaded',
+        message: '업데이트 준비가 끝났습니다. 재시작하면 새 버전이 적용됩니다.',
+        progress: 100
+      });
+      if (automatic) await offerUpdateRestart(release.version);
+      return status;
+    }
+    if (!automaticUpdaterAvailable || !release.zip) {
+      const reason = release.zip ? selfUpdateBlocker : '릴리스에 설치용 zip 파일이 없습니다.';
       return publishUpdateStatus({
         ...patch,
         phase: 'manual-available',
-        message: `새 버전 ${release.version}이 있습니다. GitHub에서 내려받아 설치할 수 있습니다.`,
+        message: `새 버전 ${release.version}이 있습니다. ${reason} GitHub에서 내려받아 설치할 수 있습니다.`,
         progress: 0
       });
     }
-    publishUpdateStatus({
-      ...patch,
-      phase: 'downloading',
-      message: `새 버전 ${release.version}을 다운로드할 준비를 하고 있습니다.`,
-      progress: 0
-    });
-    await autoUpdater.checkForUpdates();
+    await downloadAndStageUpdate(release);
+    if (automatic) await offerUpdateRestart(release.version);
     return currentUpdateStatus();
   } catch (error) {
-    console.error('Manual update check failed:', error.message);
+    console.error('Update check failed:', error.message);
     return publishUpdateStatus({
       phase: 'error',
-      message: `업데이트를 확인하지 못했습니다: ${error.message}`,
+      message: `업데이트를 완료하지 못했습니다: ${error.message}`,
       progress: 0
     });
   }
@@ -2022,7 +2145,7 @@ if (singleInstanceLock) app.whenReady().then(async () => {
   // Show the window immediately; the vault scan (potentially slow on cloud
   // storage like Google Drive) runs afterwards and pushes 'library-updated'.
   await createWindow();
-  configureAutoUpdates();
+  configureAutoUpdates().catch((error) => console.error('Update setup failed:', error));
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -2049,6 +2172,8 @@ let quitFlushDone = false;
 app.on('before-quit', (event) => {
   clearTimeout(updateStartupTimer);
   clearInterval(updateCheckTimer);
+  // "나중에"를 골랐거나 그냥 종료해도 준비된 업데이트는 이때 적용한다. 재실행은 하지 않는다.
+  try { scheduleBundleSwap({ relaunch: false }); } catch (error) { console.error('Update swap failed:', error); }
   stopSyncPolling();
   clearTimeout(watcherTimer);
   // 15분짜리 유튜브 다운로드가 돌고 있으면 앱을 꺼도 백그라운드에 남는다.
@@ -2084,14 +2209,7 @@ ipcMain.handle('update:status', () => currentUpdateStatus());
 
 ipcMain.handle('update:check', () => checkForApplicationUpdate());
 
-ipcMain.handle('update:install', () => {
-  if (!automaticUpdaterAvailable || updateStatus.phase !== 'downloaded') {
-    throw new Error('아직 설치할 업데이트가 준비되지 않았습니다.');
-  }
-  publishUpdateStatus({ phase: 'installing', message: '앱을 재시작해 업데이트를 적용합니다.' });
-  setTimeout(() => autoUpdater.quitAndInstall(false, true), 120);
-  return currentUpdateStatus();
-});
+ipcMain.handle('update:install', () => installStagedUpdate());
 
 ipcMain.handle('update:open-release', async () => {
   // releaseUrl 은 GitHub API 응답에서 그대로 받은 값이다. 스킴을 확인하지 않으면
