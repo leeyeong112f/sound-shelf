@@ -24,7 +24,7 @@ const { selectMissingForCleanup } = require('./missing-cleanup');
 const { failedProbeMetadata, mediaErrorMessage, needsTechnicalProbe } = require('./media-health');
 const { clipboardFilePaths } = require('./clipboard-files');
 const SelfUpdate = require('./self-update');
-const { moveToTrash } = require('./trash-fallback');
+const { moveToTrash, userTrashDirectory } = require('./trash-fallback');
 const { isCurrentKeyAnalysis, keyAnalysisErrorMessage } = require('./key-analysis');
 const { canonicalYouTubeUrl, parseDownloadProgress, safeFileStem, youtubeImportErrorMessage } = require('./youtube-import');
 
@@ -189,7 +189,10 @@ async function whilePathsChange(work) {
 // Google Drive 에 동기화된 파일은 macOS 휴지통 API 가 권한 오류로 거부한다. ~/.Trash 로
 // 직접 옮기는 폴백까지 시도한다. 자세한 사정은 trash-fallback.js 참고.
 function trashPath(target) {
-  return moveToTrash(target, { trashItem: (item) => shell.trashItem(item), trashDir: app.getPath('trash') });
+  return moveToTrash(target, {
+    trashItem: (item) => shell.trashItem(item),
+    trashDir: userTrashDirectory(app.getPath('home'))
+  });
 }
 
 // 앱을 끄거나 타임아웃이 걸렸을 때 정리해야 할, 오래 도는 자식 프로세스들.

@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { moveToTrash, trashDestination } = require('../src/trash-fallback');
+const { moveToTrash, trashDestination, userTrashDirectory } = require('../src/trash-fallback');
 
 const denied = async () => { throw new Error('연결할 수 있는 권한이 없기 때문에 휴지통으로 이동할 수 없습니다.'); };
 
@@ -13,6 +13,11 @@ function scratch() {
   fs.mkdirSync(trashDir);
   return { root, trashDir };
 }
+
+test('휴지통 폴더는 홈의 .Trash 다', () => {
+  assert.equal(userTrashDirectory('/Users/me'), '/Users/me/.Trash');
+  assert.throws(() => userTrashDirectory(''), /홈 폴더/);
+});
 
 test('휴지통에 같은 이름이 있으면 번호를 붙인다', () => {
   const taken = new Set(['/T/a.wav', '/T/a 2.wav']);
