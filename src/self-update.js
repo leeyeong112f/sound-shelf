@@ -103,15 +103,42 @@ function isUpdateLeftover(name, bundleName) {
 
 // 앱이 끝난 뒤 번들을 바꿔 끼우고(필요하면) 다시 여는 스크립트. 앱 프로세스 안에서
 // 바꾸면 종료 직전에 뜨는 헬퍼 프로세스가 새 번들의 바이너리를 잡을 수 있어 밖에서 한다.
-// 인자: pid, 현재 번들, 준비된 새 번들, 재실행 여부(1/0).
+//
+// 앱은 종료 중 Node 정리 단계에서 볼트(Google Drive)의 파일 작업 하나가 응답하지 않으면
+// 한참, 때로는 영영 끝나지 않는다(2026-09-29 관찰). 저장은 종료 시작 3초 안에 끝나므로
+// 유예가 지나면 앱을 직접 끝내고 교체를 진행한다.
+//
+// 인자: pid, 현재 번들, 준비된 새 번들, 재실행 여부(1/0), 로그 파일(비우면 로그 없음),
+//       종료 유예 초(생략 시 60).
 const SWAP_SCRIPT = `
-pid="$1"; app="$2"; staged="$3"; relaunch="$4"
-tries=0
+pid="$1"; app="$2"; staged="$3"; relaunch="$4"; log="$5"; grace="\${6:-60}"
+if [ -n "$log" ]; then
+  exec >>"$log" 2>&1
+  echo "== $(date '+%Y-%m-%d %H:%M:%S') swap start pid=$pid relaunch=$relaunch grace=$grace"
+  echo "   app=$app"
+  echo "   staged=$staged"
+fi
+waited=0
 while kill -0 "$pid" 2>/dev/null; do
-  tries=$((tries + 1))
-  [ "$tries" -ge 300 ] && exit 1
+  if [ "$waited" -ge "$((grace * 5))" ]; then
+    echo "app still running after \${grace}s, sending TERM"
+    kill -TERM "$pid" 2>/dev/null
+    sleep 5
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "app ignored TERM, sending KILL"
+      kill -KILL "$pid" 2>/dev/null
+      sleep 2
+    fi
+    break
+  fi
+  waited=$((waited + 1))
   sleep 0.2
 done
+if kill -0 "$pid" 2>/dev/null; then
+  echo "app did not exit, giving up"
+  exit 1
+fi
+[ -n "$log" ] && echo "app exited after $((waited / 5))s, swapping" && set -x
 previous="$app${PREVIOUS_SUFFIX}"
 rm -rf "$previous"
 mv "$app" "$previous" || exit 1
@@ -122,11 +149,12 @@ fi
 rm -rf "$previous"
 rmdir "$(dirname "$staged")" 2>/dev/null
 if [ "$relaunch" = "1" ]; then open "$app"; fi
+echo "swap done"
 exit 0
 `;
 
-function swapScriptArguments({ pid, bundlePath, stagedBundlePath, relaunch }) {
-  return ['sh', String(pid), bundlePath, stagedBundlePath, relaunch ? '1' : '0'];
+function swapScriptArguments({ pid, bundlePath, stagedBundlePath, relaunch, logFile = '', graceSeconds = 60 }) {
+  return ['sh', String(pid), bundlePath, stagedBundlePath, relaunch ? '1' : '0', logFile, String(graceSeconds)];
 }
 
 module.exports = {
