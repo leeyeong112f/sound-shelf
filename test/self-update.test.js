@@ -130,9 +130,11 @@ test('준비 폴더와 이전 번들 경로를 앱 옆에 둔다', () => {
 test('교체 스크립트 인자는 pid, 현재 번들, 새 번들, 재실행 순서다', () => {
   assert.deepEqual(
     swapScriptArguments({ pid: 42, bundlePath: '/A/S.app', stagedBundlePath: '/A/.sound-shelf-update-1/S.app', relaunch: true }),
-    ['sh', '42', '/A/S.app', '/A/.sound-shelf-update-1/S.app', '1']
+    ['sh', '42', '/A/S.app', '/A/.sound-shelf-update-1/S.app', '1', '', '60']
   );
   assert.equal(swapScriptArguments({ pid: 1, bundlePath: '/a', stagedBundlePath: '/b', relaunch: false })[4], '0');
+  assert.equal(swapScriptArguments({ pid: 1, bundlePath: '/a', stagedBundlePath: '/b', relaunch: false, logFile: '/L/x.log' })[5], '/L/x.log');
+  assert.equal(swapScriptArguments({ pid: 1, bundlePath: '/a', stagedBundlePath: '/b', relaunch: false, graceSeconds: 2 })[6], '2');
 });
 
 function makeBundle(dir, version) {
@@ -156,11 +158,32 @@ test('교체 스크립트는 앱이 끝난 뒤 번들을 바꿔 끼우고 흔적
   makeBundle(staged, '0.2.0');
   // 앱 프로세스 역할: 잠시 살아 있다가 끝난다.
   const fake = spawn('/bin/sleep', ['0.6'], { stdio: 'ignore' });
-  const code = await runSwap(swapScriptArguments({ pid: fake.pid, bundlePath: bundle, stagedBundlePath: staged, relaunch: false }));
+  const logFile = path.join(root, 'self-update.log');
+  const code = await runSwap(swapScriptArguments({ pid: fake.pid, bundlePath: bundle, stagedBundlePath: staged, relaunch: false, logFile }));
   assert.equal(code, 0);
+  assert.match(fs.readFileSync(logFile, 'utf8'), /swap start[\s\S]*swap done/);
   assert.match(fs.readFileSync(path.join(bundle, 'Contents', 'Info.plist'), 'utf8'), /0\.2\.0/);
   assert.equal(fs.existsSync(previousBundlePath(bundle)), false);
   assert.equal(fs.existsSync(staging), false);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('앱이 유예 시간 안에 끝나지 않으면 직접 끝내고 교체한다', { skip: process.platform !== 'darwin' }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sound-shelf-swap-'));
+  const bundle = path.join(root, 'Sound Shelf.app');
+  const staged = path.join(stagingDirectory(bundle, '0.2.0'), 'Sound Shelf.app');
+  makeBundle(bundle, '0.1.0');
+  makeBundle(staged, '0.2.0');
+  // 종료 중 멈춘 앱 역할: 신호를 받지 않으면 오래 살아 있다.
+  const stuck = spawn('/bin/sleep', ['60'], { stdio: 'ignore' });
+  const logFile = path.join(root, 'self-update.log');
+  const started = Date.now();
+  const code = await runSwap(swapScriptArguments({ pid: stuck.pid, bundlePath: bundle, stagedBundlePath: staged, relaunch: false, logFile, graceSeconds: 1 }));
+  assert.equal(code, 0);
+  assert.ok(Date.now() - started < 15000);
+  assert.equal(stuck.exitCode === null && stuck.signalCode === null, false);
+  assert.match(fs.readFileSync(path.join(bundle, 'Contents', 'Info.plist'), 'utf8'), /0\.2\.0/);
+  assert.match(fs.readFileSync(logFile, 'utf8'), /sending TERM[\s\S]*swap done/);
   fs.rmSync(root, { recursive: true, force: true });
 });
 

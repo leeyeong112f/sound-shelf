@@ -24,6 +24,7 @@ const { selectMissingForCleanup } = require('./missing-cleanup');
 const { failedProbeMetadata, mediaErrorMessage, needsTechnicalProbe } = require('./media-health');
 const { clipboardFilePaths } = require('./clipboard-files');
 const SelfUpdate = require('./self-update');
+const { moveToTrash } = require('./trash-fallback');
 const { isCurrentKeyAnalysis, keyAnalysisErrorMessage } = require('./key-analysis');
 const { canonicalYouTubeUrl, parseDownloadProgress, safeFileStem, youtubeImportErrorMessage } = require('./youtube-import');
 
@@ -183,6 +184,12 @@ async function whilePathsChange(work) {
   } finally {
     pathChangesInFlight -= 1;
   }
+}
+
+// Google Drive 에 동기화된 파일은 macOS 휴지통 API 가 권한 오류로 거부한다. ~/.Trash 로
+// 직접 옮기는 폴백까지 시도한다. 자세한 사정은 trash-fallback.js 참고.
+function trashPath(target) {
+  return moveToTrash(target, { trashItem: (item) => shell.trashItem(item), trashDir: app.getPath('trash') });
 }
 
 // 앱을 끄거나 타임아웃이 걸렸을 때 정리해야 할, 오래 도는 자식 프로세스들.
@@ -1969,6 +1976,7 @@ async function downloadAndStageUpdate(release) {
     await execFileAsync('/usr/bin/xattr', ['-dr', 'com.apple.quarantine', newBundle]).catch(() => {});
     await fsp.rm(downloadDir, { recursive: true, force: true });
     stagedUpdate = { version: release.version, bundlePath: newBundle, stagingDir };
+    logUpdate(`staged ${release.version} at ${newBundle}`);
     publishUpdateStatus({
       phase: 'downloaded',
       latestVersion: release.version,
@@ -1984,20 +1992,38 @@ async function downloadAndStageUpdate(release) {
   }
 }
 
+// 교체 과정은 앱이 끝난 뒤 밖에서 일어나 콘솔로는 볼 수 없다. 로그 파일에 남긴다.
+function updateLogPath() {
+  const logFile = path.join(app.getPath('logs'), 'self-update.log');
+  try { fs.mkdirSync(path.dirname(logFile), { recursive: true }); } catch { /* 로그는 없어도 된다 */ }
+  return logFile;
+}
+
+function logUpdate(message) {
+  try { fs.appendFileSync(updateLogPath(), `${new Date().toISOString()} ${message}\n`); } catch { /* 로그는 없어도 된다 */ }
+}
+
 // 준비된 번들로 바꿔 끼우는 스크립트를 앱 밖에서 띄운다. 앱 프로세스가 끝난 뒤 실행된다.
 function scheduleBundleSwap({ relaunch }) {
-  if (!stagedUpdate || updateApplyScheduled) return false;
+  if (!stagedUpdate || updateApplyScheduled) {
+    if (stagedUpdate) logUpdate(`swap already scheduled (relaunch=${relaunch})`);
+    return false;
+  }
   const bundlePath = SelfUpdate.bundlePathFromExecutable(app.getPath('exe'));
   if (!bundlePath) return false;
   const args = SelfUpdate.swapScriptArguments({
     pid: process.pid,
     bundlePath,
     stagedBundlePath: stagedUpdate.bundlePath,
-    relaunch
+    relaunch,
+    logFile: updateLogPath()
   });
+  logUpdate(`scheduling swap relaunch=${relaunch} pid=${process.pid} staged=${stagedUpdate.bundlePath}`);
   const child = spawn('/bin/sh', ['-c', SelfUpdate.SWAP_SCRIPT, ...args], { detached: true, stdio: 'ignore' });
+  child.on('error', (error) => logUpdate(`swap spawn error: ${error.message}`));
   child.unref();
   updateApplyScheduled = true;
+  logUpdate(`swap child pid=${child.pid}`);
   return true;
 }
 
@@ -2170,6 +2196,7 @@ app.on('window-all-closed', () => {
 });
 
 let quitFlushDone = false;
+let exitingForUpdate = false;
 app.on('before-quit', (event) => {
   clearTimeout(updateStartupTimer);
   clearInterval(updateCheckTimer);
@@ -2202,6 +2229,15 @@ app.on('before-quit', (event) => {
     return;
   }
   vaultStorage?.close();
+  // 업데이트 교체가 예약돼 있으면 Node 정리 단계를 기다리지 않고 바로 끝낸다. 볼트(Google
+  // Drive)의 파일 작업 하나가 응답하지 않으면 정리가 끝나지 않아 교체가 미뤄진다. 저장은
+  // 위에서 이미 마쳤다.
+  if (updateApplyScheduled && !exitingForUpdate) {
+    exitingForUpdate = true;
+    event.preventDefault();
+    logUpdate('exiting immediately so the swap can proceed');
+    setTimeout(() => process.exit(0), 150);
+  }
 });
 
 ipcMain.handle('library:get', () => librarySnapshot());
@@ -2613,7 +2649,7 @@ handleMutation('library:remove-batch', async (_event, { ids, trashFile = true })
       continue;
     }
     try {
-      if (fs.existsSync(sound.path)) await shell.trashItem(sound.path);
+      if (fs.existsSync(sound.path)) await trashPath(sound.path);
       removed.add(sound.id);
     } catch (error) {
       // 휴지통으로 못 보낸 파일까지 라이브러리에서 빼면, 파일은 남았는데 목록에서만
@@ -2934,7 +2970,7 @@ handleMutation('category:trash', async (_event, category) => {
   if (!normalized || normalized === '미분류') throw new Error('미분류 루트는 삭제할 수 없습니다.');
   const folder = categoryFolderPath(normalized);
   if (!folder || !fs.existsSync(folder)) throw new Error('삭제할 폴더를 찾을 수 없습니다.');
-  await shell.trashItem(folder);
+  await trashPath(folder);
   db.sounds = db.sounds.filter((sound) => {
     const soundCategory = sound.categoryPath || sound.category;
     return soundCategory !== normalized && !soundCategory?.startsWith(`${normalized}/`);
@@ -2952,7 +2988,7 @@ handleMutation('category:trash-batch', async (_event, categories) => {
   if (!targets.length) throw new Error('삭제할 폴더가 없습니다.');
   for (const category of targets) {
     const folder = categoryFolderPath(category);
-    if (folder && fs.existsSync(folder)) await shell.trashItem(folder);
+    if (folder && fs.existsSync(folder)) await trashPath(folder);
     db.sounds = db.sounds.filter((sound) => {
       const soundCategory = sound.categoryPath || sound.category;
       return soundCategory !== category && !soundCategory?.startsWith(`${category}/`);
@@ -3048,7 +3084,7 @@ handleMutation('library:remove', async (_event, { id, trashFile = true }) => {
   if (index < 0) return librarySnapshot();
   const sound = db.sounds[index];
   if (trashFile) {
-    if (fs.existsSync(sound.path)) await shell.trashItem(sound.path);
+    if (fs.existsSync(sound.path)) await trashPath(sound.path);
   } else {
     pendingUnlinkIds.add(sound.id);
   }
