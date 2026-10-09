@@ -45,6 +45,7 @@ const state = {
   shortcuts: { ...DEFAULT_SHORTCUTS },
   view: 'library',
   previewVolume: 0.8,
+  resolveAutoRelink: true,
   collapsedCategories: new Set(),
   categoryKeyboardMode: false,
   categoryKeyboardPath: null,
@@ -283,6 +284,8 @@ function setLibrary(snapshot, { preserveListPosition = null } = {}) {
   state.watchedFolders = snapshot.watchedFolders || [];
   state.shortcuts = { ...DEFAULT_SHORTCUTS, ...(snapshot.shortcuts || {}) };
   state.previewVolume = Number.isFinite(Number(snapshot.previewVolume)) ? Number(snapshot.previewVolume) : 0.8;
+  state.resolveAutoRelink = snapshot.resolveAutoRelink !== false;
+  $('#resolveAutoRelinkToggle').checked = state.resolveAutoRelink;
   state.performance = snapshot.performance || state.performance;
   state.vault = snapshot.vault || null;
   player.volume = state.previewVolume;
@@ -2768,6 +2771,15 @@ $('#relinkMissingBtn').addEventListener('click', async () => {
   setLibrary(snapshot);
   const result = snapshot.relinkResult;
   showToast(`누락 ${result.missing}개 중 ${result.relinked}개 재연결 · ${result.unresolved}개 미해결`, 6000);
+});
+$('#relinkResolveBtn').addEventListener('click', async () => {
+  showToast('DaVinci Resolve 미디어 풀에서 오프라인 클립을 찾는 중…', 30000);
+  const result = await window.soundLibrary.relinkResolveClips();
+  showToast(result.message, result.ok ? 6000 : 8000);
+});
+$('#resolveAutoRelinkToggle').addEventListener('change', async (event) => {
+  state.resolveAutoRelink = event.target.checked;
+  await window.soundLibrary.setResolveAutoRelink(state.resolveAutoRelink);
 });
 $('#findDuplicatesBtn').addEventListener('click', async () => {
   showToast('같은 크기의 파일을 해시로 검사하는 중…', 60000);

@@ -54,6 +54,8 @@ contextBridge.exposeInMainWorld('soundLibrary', {
   importYouTube: (payload) => ipcRenderer.invoke('youtube:import', payload),
   reveal: (filePath) => ipcRenderer.invoke('library:reveal', filePath),
   insertIntoResolve: (sound) => ipcRenderer.invoke('resolve:insert', sound),
+  relinkResolveClips: () => ipcRenderer.invoke('resolve:relink'),
+  setResolveAutoRelink: (enabled) => ipcRenderer.invoke('resolve:set-auto-relink', enabled),
   startDrag: (filePath) => ipcRenderer.send('library:start-drag', filePath),
   onDragError: (callback) => ipcRenderer.on('drag-error', (_event, message) => callback(message)),
   onScanProgress: (callback) => ipcRenderer.on('scan-progress', (_event, payload) => callback(payload)),
