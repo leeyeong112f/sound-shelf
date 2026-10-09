@@ -27,6 +27,7 @@ const SelfUpdate = require('./self-update');
 const { moveToTrash, userTrashDirectory } = require('./trash-fallback');
 const { isCurrentKeyAnalysis, keyAnalysisErrorMessage } = require('./key-analysis');
 const { canonicalYouTubeUrl, parseDownloadProgress, safeFileStem, youtubeImportErrorMessage } = require('./youtube-import');
+const { describeResolveRelink, planResolveRelinks } = require('./resolve-relink');
 
 const execFileAsync = promisify(execFile);
 const AUDIO_EXTENSIONS = new Set([
@@ -51,7 +52,7 @@ const DEFAULT_SHORTCUTS = {
 
 let mainWindow;
 let dbPath;
-let db = { version: 1, sounds: [], categories: [], categoryOrder: [], settings: { watchedFolders: [], shortcuts: { ...DEFAULT_SHORTCUTS }, previewVolume: 0.8, machineId: '' } };
+let db = { version: 1, sounds: [], categories: [], categoryOrder: [], settings: { watchedFolders: [], shortcuts: { ...DEFAULT_SHORTCUTS }, previewVolume: 0.8, resolveAutoRelink: true, machineId: '' } };
 let vaultStorage = null;
 let activeVault = null;
 let saveTimer;
@@ -183,6 +184,8 @@ async function whilePathsChange(work) {
     return await work();
   } finally {
     pathChangesInFlight -= 1;
+    // 경로가 바뀌었으니 Resolve 미디어 풀의 클립도 옛 경로를 가리키고 있을 것이다.
+    scheduleResolveRelink();
   }
 }
 
@@ -255,6 +258,8 @@ function cleanDb(candidate) {
       previewVolume: Number.isFinite(Number(candidate?.settings?.previewVolume))
         ? Math.max(0, Math.min(1, Number(candidate.settings.previewVolume)))
         : 0.8,
+      // 이 Mac 의 Resolve 를 상대하므로 볼트에 동기화하지 않는 로컬 설정이다. 꺼 둔 것만 기억한다.
+      resolveAutoRelink: candidate?.settings?.resolveAutoRelink !== false,
       currentVaultRoot: candidate?.settings?.currentVaultRoot || candidate?.settings?.watchedFolders?.[0] || '',
       currentVaultId: candidate?.settings?.currentVaultId || '',
       // 이 Mac만의 ID. 볼트에 저장하면 동기화되어 두 Mac이 같은 ID를 갖게 되므로
@@ -936,6 +941,7 @@ function librarySnapshot() {
     watchedFolders: db.settings.watchedFolders,
     shortcuts: db.settings.shortcuts,
     previewVolume: db.settings.previewVolume,
+    resolveAutoRelink: db.settings.resolveAutoRelink !== false,
     vault: vaultSnapshot(),
     libraryRecovery,
     vaultActivationError,
@@ -1385,6 +1391,8 @@ async function relinkMissingFromFiles(filePaths) {
     pending = stillMissing;
   }
   db.sounds = deduplicateSoundsByPath(db.sounds);
+  // Finder 나 다른 Mac 이 옮긴 파일을 여기서 따라잡았다면 Resolve 클립도 같은 처지다.
+  if (relinked > 0) scheduleResolveRelink();
   return { missing: missing.length, relinked, unresolved: missing.length - relinked, idChanges };
 }
 
@@ -3484,6 +3492,139 @@ ipcMain.handle('resolve:insert', async (_event, payload) => {
     }
     return { ok: false, message: `Resolve 연결에 실패했습니다: ${error.message}` };
   }
+});
+
+// ---- DaVinci Resolve 오프라인 클립 재연결 ----
+// Sound Shelf 가 파일을 옮기면 Resolve 미디어 풀의 클립은 옛 경로를 가리켜 오프라인이 된다.
+// 열려 있는 Resolve 프로젝트에서 오프라인 클립을 찾아 라이브러리의 현재 파일로 되돌린다.
+// 짝짓기는 resolve-relink.js, Resolve 쪽 호출은 resolve_relink.py 가 맡는다.
+const RESOLVE_RELINK_DELAY_MS = 2500;
+let resolveRelinkTimer = null;
+let resolveRelinkInFlight = null;
+let resolveRelinkDirty = false;
+
+async function runResolveScript(scriptFile, args, { input = null, timeout = 30000 } = {}) {
+  const script = await fsp.readFile(path.join(__dirname, scriptFile), 'utf8');
+  return new Promise((resolve, reject) => {
+    const child = spawn(findPython(), ['-c', script, ...args], { windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error('Resolve 응답 시간이 초과되었습니다.'));
+    }, timeout);
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    // 스크립트가 일찍 끝나면 stdin 쓰기가 EPIPE 로 실패한다. 결과는 stdout 으로 판단한다.
+    child.stdin.on('error', () => {});
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on('close', () => {
+      clearTimeout(timer);
+      const line = stdout.trim().split('\n').filter(Boolean).pop();
+      if (!line) {
+        reject(new Error(stderr.trim().split('\n').filter(Boolean).pop() || 'Resolve 스크립트가 응답하지 않았습니다.'));
+        return;
+      }
+      try {
+        resolve(JSON.parse(line));
+      } catch {
+        reject(new Error(line));
+      }
+    });
+    child.stdin.end(input === null ? undefined : input);
+  });
+}
+
+// Resolve 가 꺼져 있을 때마다 python 을 띄워 2초씩 연결을 기다릴 이유가 없다.
+function resolveIsRunning() {
+  return new Promise((resolve) => {
+    execFile('/usr/bin/pgrep', ['-x', 'Resolve'], (error) => resolve(!error));
+  });
+}
+
+async function relinkResolveClipsNow() {
+  const scan = await runResolveScript('resolve_relink.py', ['scan']);
+  if (!scan.ok) return { ok: false, message: scan.message };
+  const plan = planResolveRelinks(scan.clips, db.sounds, { exists: (filePath) => fs.existsSync(filePath) });
+  let relinked = [];
+  let failed = [];
+  if (plan.relinks.length) {
+    const applied = await runResolveScript('resolve_relink.py', ['apply'], {
+      input: JSON.stringify({ relinks: plan.relinks })
+    });
+    if (!applied.ok) return { ok: false, message: applied.message };
+    relinked = applied.relinked || [];
+    failed = applied.failed || [];
+  }
+  const summary = {
+    ok: true,
+    project: scan.project,
+    scanned: scan.clips.length,
+    relinked: relinked.length,
+    failed: failed.length,
+    ambiguous: plan.ambiguous.length,
+    unmatched: plan.unmatched.length,
+    skipped: plan.skipped.length
+  };
+  return { ...summary, message: describeResolveRelink(summary) };
+}
+
+// 수동 버튼과 자동 실행이 겹치면 한 번만 돈다. 두 python 이 같은 클립을 동시에 건드릴 이유가 없다.
+function relinkResolveClips() {
+  if (!resolveRelinkInFlight) {
+    resolveRelinkInFlight = relinkResolveClipsNow().finally(() => { resolveRelinkInFlight = null; });
+  }
+  return resolveRelinkInFlight;
+}
+
+// 경로가 바뀐 직후마다 호출된다. 폴더 이동 하나가 수백 개의 사운드 경로를 바꾸므로 잠시 모았다가
+// 한 번만 Resolve 를 훑는다.
+function scheduleResolveRelink() {
+  if (db.settings.resolveAutoRelink === false) return;
+  if (resolveRelinkTimer) clearTimeout(resolveRelinkTimer);
+  resolveRelinkTimer = setTimeout(() => {
+    resolveRelinkTimer = null;
+    runAutoResolveRelink();
+  }, RESOLVE_RELINK_DELAY_MS);
+}
+
+async function runAutoResolveRelink() {
+  if (resolveRelinkInFlight) {
+    // 지금 도는 스캔은 방금 바뀐 경로를 못 봤을 수 있다. 끝나면 한 번 더 돈다.
+    resolveRelinkDirty = true;
+    return;
+  }
+  try {
+    if (!(await resolveIsRunning())) return;
+    const result = await relinkResolveClips();
+    if (result.ok && result.relinked > 0 && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('library-notice', result.message);
+    }
+  } catch (error) {
+    console.warn('Resolve auto relink failed:', error.message);
+  } finally {
+    if (resolveRelinkDirty) {
+      resolveRelinkDirty = false;
+      scheduleResolveRelink();
+    }
+  }
+}
+
+ipcMain.handle('resolve:relink', async () => {
+  try {
+    return await relinkResolveClips();
+  } catch (error) {
+    return { ok: false, message: `Resolve 연결에 실패했습니다: ${error.message}` };
+  }
+});
+
+handleMutation('resolve:set-auto-relink', async (_event, enabled) => {
+  db.settings.resolveAutoRelink = Boolean(enabled);
+  queueSave();
+  return db.settings.resolveAutoRelink;
 });
 
 function startNativeDrag(event, filePaths) {
