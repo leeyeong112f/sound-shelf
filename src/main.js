@@ -28,11 +28,16 @@ const { moveToTrash, userTrashDirectory } = require('./trash-fallback');
 const { isCurrentKeyAnalysis, keyAnalysisErrorMessage } = require('./key-analysis');
 const { canonicalYouTubeUrl, parseDownloadProgress, safeFileStem, youtubeImportErrorMessage } = require('./youtube-import');
 const { describeResolveRelink, planResolveRelinks } = require('./resolve-relink');
+const { VIDEO_EXTENSIONS, audioFileNameFor, describeImportReport, isVideoFile, planAudioExtraction } = require('./video-audio');
 
 const execFileAsync = promisify(execFile);
 const AUDIO_EXTENSIONS = new Set([
   '.wav', '.wave', '.aif', '.aiff', '.mp3', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.caf'
 ]);
+// 파일 선택 창. 영상은 오디오만 꺼내 등록한다(video-audio.js).
+const IMPORT_FILE_FILTERS = [
+  { name: 'Audio · Video', extensions: [...AUDIO_EXTENSIONS, ...VIDEO_EXTENSIONS].map((ext) => ext.slice(1)) }
+];
 const DEFAULT_SHORTCUTS = {
   search: 'Meta+S',
   categorySearch: 'Meta+Shift+S',
@@ -1655,6 +1660,56 @@ function normalizedShortcutFromInput(input) {
   return parts.join('+');
 }
 
+// ---- 영상 파일에서 오디오 가져오기 ----
+// mp4·mov 같은 영상 파일을 넣으면 오디오 트랙만 꺼내 새 파일로 등록한다. 원본 영상은 그대로 둔다.
+// 꺼낼 수 없거나 지원하지 않는 파일은 report.skipped 에 이유와 함께 모아 사용자에게 알린다.
+// 예전에는 이런 파일을 아무 말 없이 건너뛰어 "넣었는데 안 들어간다"로 보였다.
+function newImportReport() {
+  return { extracted: [], skipped: [] };
+}
+
+function skipImport(report, filePath, reason) {
+  report?.skipped.push({ name: path.basename(String(filePath)), reason });
+}
+
+function withImportReport(snapshot, report) {
+  if (!snapshot || !report || (!report.extracted.length && !report.skipped.length)) return snapshot;
+  return { ...snapshot, importReport: { ...report, message: describeImportReport(report) } };
+}
+
+async function extractVideoAudio(videoPath, folder, report) {
+  let streams;
+  try {
+    const { stdout } = await execFileAsync(findMediaTool('ffprobe'), [
+      '-v', 'error', '-show_entries', 'stream=index,codec_type,codec_name', '-of', 'json', videoPath
+    ], { maxBuffer: 1024 * 1024, timeout: 30000 });
+    streams = JSON.parse(stdout).streams || [];
+  } catch (error) {
+    console.warn('Video probe failed:', videoPath, error.message);
+    skipImport(report, videoPath, 'failed');
+    return null;
+  }
+  const plan = planAudioExtraction(streams);
+  if (!plan.ok) {
+    skipImport(report, videoPath, plan.reason);
+    return null;
+  }
+  await fsp.mkdir(folder, { recursive: true });
+  const destination = uniqueDestination(folder, audioFileNameFor(videoPath, plan.extension));
+  try {
+    await execFileAsync(findMediaTool('ffmpeg'), [
+      '-v', 'error', '-nostdin', '-i', videoPath, '-map', `0:${plan.streamIndex}`, '-vn', ...plan.codecArgs, destination
+    ], { maxBuffer: 1024 * 1024, timeout: 120000 });
+  } catch (error) {
+    console.warn('Video audio extraction failed:', videoPath, error.message);
+    await fsp.unlink(destination).catch(() => {});
+    skipImport(report, videoPath, 'failed');
+    return null;
+  }
+  report?.extracted.push(destination);
+  return destination;
+}
+
 function uniqueDestination(folder, fileName) {
   const parsed = path.parse(fileName);
   let candidate = path.join(folder, fileName);
@@ -2275,7 +2330,7 @@ ipcMain.handle('library:add-files', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: '볼트로 이동할 사운드 파일 선택',
     properties: ['openFile', 'multiSelections'],
-    filters: [{ name: 'Audio', extensions: [...AUDIO_EXTENSIONS].map((ext) => ext.slice(1)) }]
+    filters: IMPORT_FILE_FILTERS
   });
   if (result.canceled) return null;
   if (result.filePaths.some(isTemporaryClipPath)) {
@@ -2286,20 +2341,26 @@ ipcMain.handle('library:add-files', async () => {
   // 다이얼로그 대기는 밖에 두고, 파일 이동과 인덱싱만 보호한다.
   return withLocalMutation(async () => {
     const moved = [];
+    const report = newImportReport();
     for (const filePath of result.filePaths) {
-      if (relativePathInside(root, filePath) !== null) moved.push(filePath);
+      if (isVideoFile(filePath)) {
+        const folder = relativePathInside(root, filePath) !== null ? path.dirname(filePath) : root;
+        const extracted = await extractVideoAudio(filePath, folder, report);
+        if (extracted) moved.push(extracted);
+      } else if (relativePathInside(root, filePath) !== null) moved.push(filePath);
       else {
         const destination = uniqueDestination(root, path.basename(filePath));
         await moveFile(filePath, destination);
         moved.push(destination);
       }
     }
-    return indexFiles(moved, { allowRestore: true });
+    return withImportReport(await indexFiles(moved, { allowRestore: true }), report);
   });
 });
 
 async function addPathsToLibrary(paths) {
   const files = [];
+  const report = newImportReport();
   const root = activeVaultRoot();
   if (!root) throw new Error('먼저 사운드 볼트를 열어 주세요.');
   const uniquePaths = [...new Set(paths || [])];
@@ -2326,10 +2387,14 @@ async function addPathsToLibrary(paths) {
         await moveFile(itemPath, destination);
         files.push(destination);
       }
-    }
+    } else if (stat?.isFile() && isVideoFile(itemPath)) {
+      const folder = relativePathInside(root, itemPath) !== null ? path.dirname(itemPath) : root;
+      const extracted = await extractVideoAudio(itemPath, folder, report);
+      if (extracted) files.push(extracted);
+    } else if (stat?.isFile()) skipImport(report, itemPath, 'unsupported');
   }
   refreshFolderWatchers();
-  return indexFiles([...new Set(files)], { allowRestore: true });
+  return withImportReport(await indexFiles([...new Set(files)], { allowRestore: true }), report);
 }
 
 handleMutation('library:add-paths', async (_event, paths) => addPathsToLibrary(paths));
@@ -2361,7 +2426,7 @@ handleMutation('library:paste-clipboard-files', async (_event, { category = null
   for (const itemPath of paths) {
     const stat = await fsp.stat(itemPath).catch(() => null);
     if (!stat) continue;
-    if (stat.isDirectory() || AUDIO_EXTENSIONS.has(path.extname(itemPath).toLowerCase())) usable.push(itemPath);
+    if (stat.isDirectory() || AUDIO_EXTENSIONS.has(path.extname(itemPath).toLowerCase()) || isVideoFile(itemPath)) usable.push(itemPath);
   }
   if (!usable.length) return { ok: false, reason: 'unsupported', total: paths.length };
   const snapshot = category
@@ -3023,14 +3088,24 @@ ipcMain.handle('category:add-files', async (_event, category) => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: `“${category}” 폴더에 파일 추가`,
     properties: ['openFile', 'multiSelections'],
-    filters: [{ name: 'Audio', extensions: [...AUDIO_EXTENSIONS].map((ext) => ext.slice(1)) }]
+    filters: IMPORT_FILE_FILTERS
   });
   if (result.canceled) return null;
   // 다이얼로그 대기는 밖에 두고, 파일 이동과 인덱싱만 보호한다.
   return withLocalMutation(async () => {
     const moved = [];
-    for (const filePath of result.filePaths) moved.push(await moveFileIntoCategory(filePath, category));
-    return indexFiles(moved, { allowRestore: true });
+    const report = newImportReport();
+    for (const filePath of result.filePaths) {
+      if (!isVideoFile(filePath)) {
+        moved.push(await moveFileIntoCategory(filePath, category));
+        continue;
+      }
+      const folder = categoryFolderPath(category);
+      if (!folder) throw new Error('대상 카테고리 폴더를 찾을 수 없습니다.');
+      const extracted = await extractVideoAudio(filePath, folder, report);
+      if (extracted) moved.push(extracted);
+    }
+    return withImportReport(await indexFiles(moved, { allowRestore: true }), report);
   });
 });
 
@@ -3040,6 +3115,7 @@ async function dropPathsIntoCategory(category, paths) {
   if (!targetFolder) throw new Error('대상 폴더를 찾을 수 없습니다.');
   let snapshot = null;
   const movedFiles = [];
+  const report = newImportReport();
   let needsRescan = false;
   const uniquePaths = [...new Set(paths || [])];
   if (uniquePaths.some(isTemporaryClipPath)) {
@@ -3059,7 +3135,15 @@ async function dropPathsIntoCategory(category, paths) {
       }
       continue;
     }
-    if (!stat.isFile() || !AUDIO_EXTENSIONS.has(path.extname(itemPath).toLowerCase())) continue;
+    if (stat.isFile() && isVideoFile(itemPath)) {
+      const extracted = await extractVideoAudio(itemPath, targetFolder, report);
+      if (extracted) movedFiles.push(extracted);
+      continue;
+    }
+    if (!stat.isFile() || !AUDIO_EXTENSIONS.has(path.extname(itemPath).toLowerCase())) {
+      if (stat.isFile()) skipImport(report, itemPath, 'unsupported');
+      continue;
+    }
     const existing = db.sounds.find((sound) => normalizedFsPath(sound.path) === normalizedFsPath(itemPath));
     if (existing) snapshot = await moveSoundToFolder(existing, targetFolder, targetCategory);
     else if (isTrashPath(itemPath)) {
@@ -3071,7 +3155,7 @@ async function dropPathsIntoCategory(category, paths) {
   if (movedFiles.length) snapshot = await indexFiles(movedFiles, { allowRestore: true });
   if (needsRescan) snapshot = await rescanWatchedFolders({ reportProgress: false, allowRestore: true });
   if (!snapshot) snapshot = await rescanWatchedFolders({ reportProgress: false });
-  return snapshot;
+  return withImportReport(snapshot, report);
 }
 
 handleMutation('category:drop-paths', async (_event, { category, paths }) => dropPathsIntoCategory(category, paths));
