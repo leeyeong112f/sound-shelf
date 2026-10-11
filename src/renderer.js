@@ -285,6 +285,8 @@ function setLibrary(snapshot, { preserveListPosition = null } = {}) {
   state.shortcuts = { ...DEFAULT_SHORTCUTS, ...(snapshot.shortcuts || {}) };
   state.previewVolume = Number.isFinite(Number(snapshot.previewVolume)) ? Number(snapshot.previewVolume) : 0.8;
   state.resolveAutoRelink = snapshot.resolveAutoRelink !== false;
+  // 영상에서 오디오를 꺼냈거나 건너뛴 파일이 있으면 알린다. 이동 완료 토스트와 겹치지 않게 알림 칸을 쓴다.
+  if (snapshot.importReport?.message) showToast(snapshot.importReport.message, 9000, '#noticeToast');
   $('#resolveAutoRelinkToggle').checked = state.resolveAutoRelink;
   state.performance = snapshot.performance || state.performance;
   state.vault = snapshot.vault || null;
@@ -3099,7 +3101,7 @@ async function pasteClipboardFiles() {
   try {
     const result = await window.soundLibrary.pasteClipboardFiles({ category: where });
     if (result?.reason === 'unsupported') {
-      showToast('복사한 항목 중에 오디오 파일이 없습니다.', 4000);
+      showToast('복사한 항목 중에 오디오나 영상 파일이 없습니다.', 4000);
       return;
     }
     if (!result?.ok) return;
