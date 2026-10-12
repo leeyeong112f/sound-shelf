@@ -190,7 +190,7 @@ function showToast(message, duration = 3000, selector = '#scanToast') {
 
 function parseSearchQuery(value) {
   const tagTerms = [];
-  const lowered = String(value || '').trim().toLocaleLowerCase('ko');
+  const lowered = String(value || '').normalize('NFKC').trim().toLocaleLowerCase('ko');
   const textOnly = lowered.replace(/#([^#\s]+)/g, (_match, tag) => {
     const cleaned = normalizedTagKey(tag.replace(/[,;]+$/g, ''));
     if (cleaned) tagTerms.push(cleaned);
@@ -244,9 +244,11 @@ function filteredSounds() {
     if (state.fileFilter === 'available' && sound.missing) return false;
     if (state.fileFilter === 'untagged' && (sound.tags || []).length > 0) return false;
     if (!textTerms.length && !tagTerms.length) return true;
+    // 파일 이름에서 온 제목은 NFD(자모 분리) 한글일 수 있다. 입력창의 NFC 와 그대로 비교하면
+    // "샤킨" 같은 검색이 빈 결과가 된다. 양쪽을 같은 형태로 맞춘다.
     const haystack = [sound.title, sound.fileName, sound.category, sound.categoryPath, sound.notes,
       ...(sound.embeddedTags || []), ...Object.values(sound.embeddedMetadata || {})]
-      .join(' ').toLocaleLowerCase('ko');
+      .join(' ').normalize('NFKC').toLocaleLowerCase('ko');
     const tags = (sound.tags || []).map(normalizedTagKey);
     const matchesText = textTerms.every((term) => haystack.includes(term));
     const matchesAnyTag = !tagTerms.length

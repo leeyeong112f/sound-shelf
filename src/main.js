@@ -11,8 +11,10 @@ const { promisify } = require('node:util');
 const os = require('node:os');
 const { VaultStorage, normalizedRelativePath, relativePathInside, writeJsonAtomic } = require('./vault-storage');
 const { mergeVaultState, pruneRedundantEdits, reconcileOwnTombstones } = require('./vault-sync');
-const { matchesRenameFingerprint, matchesStableFileFingerprint } = require('./file-identity');
+const { matchesRenameFingerprint, matchesRenamedByIdentity, matchesStableFileFingerprint, normalizedRelativeParent, relatedFileNames } = require('./file-identity');
+const { chooseSurvivor, findDuplicateRecords, mergedSoundFields } = require('./duplicate-identity');
 const {
+  MERGED,
   MISSING,
   TRASHED,
   UNLINKED,
@@ -113,6 +115,8 @@ let unlinkedPaths = new Set();
 const pendingUnlinkIds = new Set();
 // 이번 저장에서 "누락 자동 정리"로 표식을 남겨야 할 id. collectLocalEdits 가 읽고 비운다.
 const pendingMissingIds = new Set();
+// 이번 저장에서 "중복 레코드 합침"으로 표식을 남겨야 할 id(진 쪽). collectLocalEdits 가 읽고 비운다.
+const pendingMergedIds = new Set();
 // 누락 자동 정리를 한도 초과로 건너뛴 알림은 같은 개수에 대해 세션당 한 번만 띄운다.
 // 창에 포커스가 올 때마다 전체 재스캔이 돌기 때문이다.
 let lastMissingCleanupNotice = 0;
@@ -530,6 +534,17 @@ function hydrateMergedSounds(mergedSounds, root) {
     ));
 }
 
+// 병합이 같은 id 의 여러 경로 중 이 Mac 에 파일이 있는 것을 고르게 한다(vault-sync.js withExistingPath).
+function vaultFileExists(root) {
+  return (relativePath) => {
+    try {
+      return fs.existsSync(path.join(root, ...String(relativePath || '').split('/')));
+    } catch {
+      return false;
+    }
+  };
+}
+
 function applyMergedState(merged, diskOwnSounds = null) {
   const before = editSignature(db.sounds.map(portableSound).filter(Boolean));
   const beforeOrder = JSON.stringify(db.categoryOrder || []);
@@ -589,7 +604,8 @@ async function activateVaultNow(rootPath, { legacySounds = [], legacyCategoryOrd
   }
   const merged = mergeVaultState(
     { sounds: portableMetadata.sounds, folderOrder: savedFolderOrder },
-    editSources
+    editSources,
+    { fileExists: vaultFileExists(root) }
   );
   // 내 편집 파일의 내용을 메모리로 되살린다. 이걸 하지 않으면 다음 saveDb에서
   // 내 과거 편집이 담긴 파일을 빈 내용으로 덮어써 유실된다.
@@ -777,7 +793,9 @@ function collectLocalEdits() {
     if (current.has(id) || baseline.deleted) continue;
     // "항목만 삭제"는 파일을 그대로 두므로 자동 스캔이 되돌리면 안 된다. 원본을 휴지통으로
     // 보낸 삭제는 같은 파일이 돌아오면 되살려야 하므로 둘을 구분해 기록한다.
-    const reason = pendingUnlinkIds.has(id) ? UNLINKED : pendingMissingIds.has(id) ? MISSING : TRASHED;
+    const reason = pendingUnlinkIds.has(id) ? UNLINKED
+      : pendingMissingIds.has(id) ? MISSING
+        : pendingMergedIds.has(id) ? MERGED : TRASHED;
     ownEdits.sounds[id] = { ...baseline, id, updatedAt: now, deleted: true, restored: false, reason };
     // 누락 정리 표식에는 이 Mac 이 본 마지막 편집 시각을 남긴다. 파일을 가진 Mac 이 되살릴 때
     // 자기 기록이 이보다 새로우면(아직 안 올라간 태그 등) 그 값을 쓴다(restoredSoundFields).
@@ -785,6 +803,7 @@ function collectLocalEdits() {
   }
   pendingUnlinkIds.clear();
   pendingMissingIds.clear();
+  pendingMergedIds.clear();
 
   const order = [...new Set(db.categoryOrder || [])];
   if (JSON.stringify(order) !== JSON.stringify(ownEdits.folderOrder?.order || null)) {
@@ -1153,6 +1172,7 @@ async function indexFiles(filePaths, { reportProgress = true, categoryFolders = 
   }
   const tombstones = [...deletedSoundTombstones.values()];
   const restoredIds = new Set();
+  const claimedMissingIds = new Set();
   let added = 0;
   let updated = 0;
   let restored = 0;
@@ -1188,6 +1208,29 @@ async function indexFiles(filePaths, { reportProgress = true, categoryFolders = 
         discoveredRename = true;
       }
     }
+    let probed = null;
+    if (!current && relativePath) {
+      // Google Drive 가 다른 Mac 에서 바꾼 이름을 내려줄 때 mtime 을 바꾸는 경우가 있다(2026-10-11).
+      // 그러면 위 지문 판정이 어긋난다. 같은 폴더에서 꼬리만 다른 같은 크기의 누락 사운드가 있으면
+      // 파일을 먼저 읽어 길이·샘플레이트·채널·코덱으로 같은 파일인지 본다. 새 파일은 어차피 읽는다.
+      const fileName = path.basename(filePath);
+      const parent = normalizedRelativeParent(relativePath);
+      const lookalikes = missingSounds.filter((sound) => Number(sound.size) === stat.size
+        && !claimedMissingIds.has(sound.id)
+        && normalizedRelativeParent(sound.relativePath) === parent
+        && relatedFileNames(sound.fileName || path.basename(sound.path), fileName)
+        && !fs.existsSync(sound.path));
+      if (lookalikes.length) {
+        probed = await probeAudio(filePath, null);
+        const candidate = { relativePath, fileName, size: stat.size, ...probed };
+        const identityMatches = lookalikes.filter((sound) => matchesRenamedByIdentity(sound, candidate));
+        if (identityMatches.length === 1) {
+          current = identityMatches[0];
+          discoveredRename = true;
+        }
+      }
+    }
+    if (discoveredRename && current) claimedMissingIds.add(current.id);
     if (!current && relativePath) {
       // 휴지통으로 보냈던 파일이 같은 자리로 돌아왔다면 사용자가 되돌린 것이다.
       // 태그·별점·메모·Key 를 같은 id 로 되살린다.
@@ -1207,7 +1250,7 @@ async function indexFiles(filePaths, { reportProgress = true, categoryFolders = 
     const needsProbe = needsTechnicalProbe(current, stat);
     const hashStillValid = Boolean(current?.contentHash)
       && current.contentHashKey === `${stat.size}:${stat.mtimeMs}`;
-    const technical = needsProbe ? await probeAudio(filePath, current) : current;
+    const technical = probed || (needsProbe ? await probeAudio(filePath, current) : current);
     const categoryPath = current?.categoryPath || inferCategoryPath(filePath);
     const next = {
       id,
@@ -1426,6 +1469,27 @@ async function rescanWatchedFolders({ reportProgress = true, allowRestore = fals
 // 표식으로 편집 파일에 남아 다른 Mac 에서도 사라진다.
 //
 // 전체 재스캔에서만 부른다. 부분 재스캔은 볼트 일부만 훑으므로 판정 근거로 쓰지 않는다.
+// 파일 없는 레코드와 같은 파일을 가리키는 살아 있는 레코드를 하나로 합친다. 판정은 duplicate-identity.js.
+// 더 먼저 만든 id 가 남고, 경로·기술 정보는 파일이 있는 쪽을, 별점·태그·메모는 둘을 합친 것을 쓴다.
+// 진 쪽 id 는 merged 표식으로 다른 Mac 에서도 사라진다.
+function consolidateDuplicateRecords(missingSounds, missingIds) {
+  const resolved = new Set();
+  if (pathChangesInFlight > 0) return resolved;
+  const live = db.sounds.filter((sound) => !missingIds.has(sound.id) && fs.existsSync(sound.path));
+  const { pairs, ambiguous } = findDuplicateRecords(missingSounds, live);
+  if (ambiguous) console.info(`Duplicate consolidation: ${ambiguous} missing record(s) matched more than one file; left alone.`);
+  for (const { missing, live: liveSound } of pairs) {
+    const { survivor, loser } = chooseSurvivor(missing, liveSound);
+    const next = { ...liveSound, ...mergedSoundFields(survivor, loser, liveSound) };
+    db.sounds = db.sounds.filter((sound) => sound.id !== missing.id && sound.id !== liveSound.id);
+    db.sounds.push(next);
+    pendingMergedIds.add(loser.id);
+    resolved.add(missing.id);
+    console.info(`Duplicate consolidation: ${missing.relativePath} + ${liveSound.relativePath} -> ${next.id} (${next.relativePath})`);
+  }
+  return resolved;
+}
+
 async function cleanUpMissingSounds(files) {
   // 볼트가 열리지 않았으면 saveDbNow 가 편집 파일을 쓰지 않아 표식이 남지 않는다.
   if (!vaultStorage || !activeVault) return;
@@ -1438,7 +1502,7 @@ async function cleanUpMissingSounds(files) {
     && fs.existsSync(startedStorage.manifestPath);
   // 볼트가 보이지 않거나 오디오를 하나도 찾지 못했으면 Drive 가 아직 준비되지 않은 것이다.
   if (!vaultStillThere() || !files.length) return;
-  const missing = [];
+  let missing = [];
   for (const sound of db.sounds) {
     if (!sound.relativePath || fs.existsSync(sound.path)) continue;
     // existsSync 는 권한 오류나 I/O 오류도 false 로 돌려준다. 없다는 확답만 믿는다.
@@ -1452,7 +1516,21 @@ async function cleanUpMissingSounds(files) {
     lastMissingCleanupNotice = 0;
     return;
   }
-  const missingIds = new Set(missing.map(({ sound }) => sound.id));
+  let missingIds = new Set(missing.map(({ sound }) => sound.id));
+  // 같은 파일을 가리키는 살아 있는 레코드가 있으면 지우는 대신 합친다. 별점·태그가 있어도 합친다.
+  const consolidated = consolidateDuplicateRecords(missing.map(({ sound }) => sound), missingIds);
+  if (consolidated.size) {
+    missing = missing.filter(({ sound }) => !consolidated.has(sound.id));
+    missingIds = new Set(missing.map(({ sound }) => sound.id));
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('library-notice',
+        `같은 파일을 가리키던 기록 ${consolidated.size}개를 하나로 합쳤습니다. 별점·태그는 합쳐서 남겼습니다.`);
+    }
+    if (!missing.length) {
+      lastMissingCleanupNotice = 0;
+      return;
+    }
+  }
   const selection = selectMissingForCleanup(missing.map(({ sound }) => sound), {
     now: Date.now(),
     baselineById: syncBaseline,
@@ -1575,7 +1653,8 @@ async function pollRemoteEdits() {
   lastEditStamps = fingerprint;
   const merged = mergeVaultState(
     { sounds: portableMetadata.sounds, folderOrder: savedFolderOrder },
-    editSources
+    editSources,
+    { fileExists: vaultFileExists(activeVault.root) }
   );
   const diskOwnSounds = editSources.find((source) => source.machineId === db.settings.machineId)?.sounds || {};
   const changed = applyMergedState(merged, diskOwnSounds);
@@ -2548,7 +2627,8 @@ ipcMain.handle('vault:compact', () => withLocalMutation(async () => {
     ]);
     const merged = mergeVaultState(
       { sounds: portableMetadata.sounds, folderOrder: savedFolderOrder },
-      editSources
+      editSources,
+      { fileExists: vaultFileExists(activeVault.root) }
     );
     // 병합 결과를 새 베이스로 굳힌다. 이 두 줄이 이 앱에서 공유 파일을 쓰는
     // 유일한 순간이며, 위의 확인·직렬화 가드가 그 전제다.

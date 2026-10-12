@@ -16,6 +16,9 @@ const { matchesStableFileFingerprint } = require('./file-identity');
 const TRASHED = 'trashed';
 const UNLINKED = 'unlinked';
 const MISSING = 'missing';
+// merged 는 같은 파일을 가리키던 두 레코드를 하나로 합치며 진 쪽에 남긴 표식이다(duplicate-identity.js).
+// 파일은 살아남은 레코드가 계속 가리키므로 되살림 판정은 trashed 와 같다.
+const MERGED = 'merged';
 
 function tombstoneReason(tombstone) {
   return tombstone?.reason === UNLINKED ? UNLINKED : TRASHED;
@@ -97,6 +100,7 @@ function unlinkedRelativePaths(tombstones) {
 }
 
 module.exports = {
+  MERGED,
   MISSING,
   TRASHED,
   UNLINKED,
