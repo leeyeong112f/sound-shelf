@@ -16,14 +16,47 @@ function beats(candidate, candidateMachine, current, currentMachine) {
   return String(candidateMachine || '') > String(currentMachine || '');
 }
 
-function mergeVaultState(base, editSources) {
+// 같은 id 를 두 Mac 이 다른 경로로 기록했을 때, 어느 경로에 파일이 실제로 있는지는 시각보다 믿을
+// 만한 단서다. 한 Mac 이 이름 변경을 알아보고 새 경로를 적었는데 다른 Mac 이 몇 초 뒤 옛 경로를
+// 다시 저장하면(2026-10-11), 시각만 보는 병합은 파일이 없는 경로를 고른다. 태그·별점은 지금처럼
+// 최신 기록을 쓰되, 경로는 이 Mac 에 파일이 있는 후보 중 가장 최신 것을 쓴다.
+function withExistingPath(winner, candidates, fileExists) {
+  if (!winner || winner.deleted || typeof fileExists !== 'function') return winner;
+  if (!winner.relativePath || fileExists(winner.relativePath)) return winner;
+  const alternatives = (candidates || [])
+    .filter((candidate) => candidate && !candidate.deleted && candidate.relativePath
+      && candidate.relativePath !== winner.relativePath)
+    .sort((a, b) => stampOf(b) - stampOf(a));
+  const present = alternatives.find((candidate) => fileExists(candidate.relativePath));
+  if (!present) return winner;
+  const stem = (name) => String(name || '').normalize('NFC').replace(/\.[^.]+$/, '');
+  // 제목이 옛 파일 이름에서 나온 기본값이면 새 파일 이름을 따르고, 직접 붙인 제목은 지킨다.
+  const defaultTitle = String(winner.title || '').normalize('NFC') === stem(winner.fileName || winner.relativePath.split('/').pop());
+  const fileName = present.fileName || present.relativePath.split('/').pop();
+  return {
+    ...winner,
+    relativePath: present.relativePath,
+    fileName,
+    title: defaultTitle ? stem(fileName) : winner.title,
+    modifiedAt: present.modifiedAt ?? winner.modifiedAt,
+    size: present.size ?? winner.size
+  };
+}
+
+function mergeVaultState(base, editSources, { fileExists = null } = {}) {
   const winners = new Map();
   const owners = new Map();
+  const candidates = new Map();
+  const remember = (id, record) => {
+    if (!candidates.has(id)) candidates.set(id, []);
+    candidates.get(id).push(record);
+  };
 
   for (const sound of base?.sounds || []) {
     if (!sound?.id) continue;
     winners.set(sound.id, { ...sound, updatedAt: 0 });
     owners.set(sound.id, '');
+    remember(sound.id, { ...sound, updatedAt: 0 });
   }
 
   let folderOrder = { updatedAt: 0, order: base?.folderOrder || [] };
@@ -41,6 +74,7 @@ function mergeVaultState(base, editSources) {
       // updatedAt 이 없거나 잘못된 레코드는 무효로 본다. 이게 없으면 동률(0 대 0)
       // 판정에서 machineId 비교가 걸려 잘못된 레코드가 베이스를 이겨버린다.
       if (stampOf(record) <= 0) continue;
+      remember(id, record);
       const current = winners.get(id);
       if (record.deleted) {
         // 삭제는 일반 편집보다 항상 우선한다. 다른 Mac의 오래된 스캔이나 이동 기록이
@@ -86,7 +120,7 @@ function mergeVaultState(base, editSources) {
     }
   }
 
-  const records = [...winners.values()];
+  const records = [...winners.values()].map((record) => withExistingPath(record, candidates.get(record.id), fileExists));
   return {
     sounds: records.filter((record) => !record.deleted),
     deletedSounds: records.filter((record) => record.deleted),

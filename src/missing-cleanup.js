@@ -98,6 +98,9 @@ function tombstonesByKey(tombstones) {
   const map = new Map();
   for (const tombstone of tombstones || []) {
     if (!tombstone?.deleted) continue;
+    // 중복 레코드를 합치며 남긴 표식은 살아남은 레코드의 파일을 가리킨다. 그 파일이 잠시 안 보일 때
+    // 유예 없이 지우는 근거가 되면 안 된다.
+    if (tombstone.reason === 'merged') continue;
     const key = tombstoneKey(tombstone);
     if (!key) continue;
     if (!map.has(key)) map.set(key, []);

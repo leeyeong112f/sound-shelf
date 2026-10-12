@@ -319,3 +319,64 @@ test('이긴 삭제 표식의 reason 과 liveUpdatedAt 만 남는다', () => {
     assert.deepStrictEqual(deleted.tags, ['휴지통']);
   }
 });
+
+// ---- 경로는 파일이 실제로 있는 후보를 택한다 (2026-10-11 pop (뽁) 사례) ----
+test('최신 기록의 경로에 파일이 없고 다른 기록의 경로에 있으면 그 경로를 쓴다', () => {
+  const base = { sounds: [sound('a', { relativePath: '예능/또잇.wav', fileName: '또잇.wav', title: '또잇', rating: 4 })], folderOrder: [] };
+  const edits = [
+    { machineId: 'macbook', sounds: { a: { ...sound('a', { relativePath: '예능/또잇 2.wav', fileName: '또잇 2.wav', title: '또잇 2', rating: 4 }), updatedAt: 100 } } },
+    { machineId: 'imac', sounds: { a: { ...sound('a', { relativePath: '예능/또잇.wav', fileName: '또잇.wav', title: '또잇', rating: 4 }), updatedAt: 200 } } }
+  ];
+  const present = new Set(['예능/또잇 2.wav']);
+  const result = mergeVaultState(base, edits, { fileExists: (relativePath) => present.has(relativePath) });
+  assert.strictEqual(result.sounds.length, 1);
+  assert.strictEqual(result.sounds[0].relativePath, '예능/또잇 2.wav');
+  assert.strictEqual(result.sounds[0].fileName, '또잇 2.wav');
+  assert.strictEqual(result.sounds[0].title, '또잇 2');
+  assert.strictEqual(result.sounds[0].rating, 4);
+  assert.strictEqual(result.sounds[0].updatedAt, 200);
+});
+
+test('직접 붙인 제목은 경로를 바꿔도 지킨다', () => {
+  const base = { sounds: [sound('a', { relativePath: '예능/또잇.wav', fileName: '또잇.wav', title: '또잇 (놀람)' })], folderOrder: [] };
+  const edits = [{ machineId: 'macbook', sounds: { a: { ...sound('a', { relativePath: '예능/또잇 2.wav', fileName: '또잇 2.wav', title: '또잇 (놀람)' }), updatedAt: 100 } } }];
+  const result = mergeVaultState(
+    { sounds: base.sounds, folderOrder: [] },
+    [...edits, { machineId: 'imac', sounds: { a: { ...base.sounds[0], updatedAt: 200 } } }],
+    { fileExists: (relativePath) => relativePath === '예능/또잇 2.wav' }
+  );
+  assert.strictEqual(result.sounds[0].relativePath, '예능/또잇 2.wav');
+  assert.strictEqual(result.sounds[0].title, '또잇 (놀람)');
+});
+
+test('파일이 있는 후보가 여럿이면 그중 최신 것을 쓴다', () => {
+  const base = { sounds: [sound('a', { relativePath: '옛/a.wav' })], folderOrder: [] };
+  const edits = [
+    { machineId: 'm1', sounds: { a: { ...sound('a', { relativePath: '하나/a.wav' }), updatedAt: 100 } } },
+    { machineId: 'm2', sounds: { a: { ...sound('a', { relativePath: '둘/a.wav' }), updatedAt: 150 } } },
+    { machineId: 'm3', sounds: { a: { ...sound('a', { relativePath: '없음/a.wav' }), updatedAt: 300 } } }
+  ];
+  const result = mergeVaultState(base, edits, { fileExists: (relativePath) => relativePath !== '없음/a.wav' && relativePath !== '옛/a.wav' });
+  assert.strictEqual(result.sounds[0].relativePath, '둘/a.wav');
+});
+
+test('어느 경로에도 파일이 없거나 fileExists 가 없으면 지금처럼 최신 기록을 쓴다', () => {
+  const base = { sounds: [sound('a', { relativePath: '옛/a.wav' })], folderOrder: [] };
+  const edits = [
+    { machineId: 'm1', sounds: { a: { ...sound('a', { relativePath: '하나/a.wav' }), updatedAt: 100 } } },
+    { machineId: 'm2', sounds: { a: { ...sound('a', { relativePath: '둘/a.wav' }), updatedAt: 200 } } }
+  ];
+  assert.strictEqual(mergeVaultState(base, edits, { fileExists: () => false }).sounds[0].relativePath, '둘/a.wav');
+  assert.strictEqual(mergeVaultState(base, edits).sounds[0].relativePath, '둘/a.wav');
+});
+
+test('삭제 표식은 경로 대체 대상이 아니다', () => {
+  const base = { sounds: [sound('a', { relativePath: '옛/a.wav' })], folderOrder: [] };
+  const edits = [
+    { machineId: 'm1', sounds: { a: { ...sound('a', { relativePath: '하나/a.wav' }), updatedAt: 100 } } },
+    { machineId: 'm2', sounds: { a: { ...sound('a', { relativePath: '옛/a.wav' }), updatedAt: 200, deleted: true } } }
+  ];
+  const result = mergeVaultState(base, edits, { fileExists: (relativePath) => relativePath === '하나/a.wav' });
+  assert.strictEqual(result.sounds.length, 0);
+  assert.strictEqual(result.deletedSounds[0].relativePath, '옛/a.wav');
+});

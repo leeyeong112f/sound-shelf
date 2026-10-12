@@ -239,3 +239,11 @@ test('표식으로 정리하는 항목도 한도에 포함된다', () => {
   assert.equal(result.blocked, true);
   assert.deepEqual(result.ids, []);
 });
+
+test('합치며 남긴 merged 표식은 같은 파일 판정의 근거가 아니다', () => {
+  const sound = ghost({ id: 'live-copy', size: 100, modifiedAt: 5000, relativePath: 'a/x.wav', fileName: 'x.wav', title: 'x', createdAt: NOW });
+  const merged = { id: 'loser', deleted: true, reason: 'merged', relativePath: 'a/x.wav', size: 100, modifiedAt: 5000 };
+  const trashed = { ...merged, id: 'loser2', reason: 'trashed' };
+  assert.deepEqual(selectMissingForCleanup([sound], { now: NOW, tombstones: [merged] }).ids, []);
+  assert.deepEqual(selectMissingForCleanup([sound], { now: NOW, tombstones: [trashed] }).ids, ['live-copy']);
+});

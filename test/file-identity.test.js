@@ -80,3 +80,49 @@ test('크기가 다르면 mtime 이 같아도 다른 파일이다', () => {
   const b = { size: 384156, modifiedAt: 1784354560988 };
   assert.equal(matchesStableFileFingerprint(a, b), false);
 });
+
+// ---- 수정 시각 없이 같은 파일 알아보기 (2026-10-11 iMac 사례) ----
+const { matchesRenamedByIdentity, matchesTechnicalIdentity, relatedFileNames } = require('../src/file-identity');
+
+test('복사·충돌 꼬리 하나만 다른 이름은 같은 이름으로 본다', () => {
+  assert.equal(relatedFileNames('또잇.wav', '또잇 2.wav'), true);
+  assert.equal(relatedFileNames('뽁 2.wav', '뽁 2 2.wav'), true);
+  assert.equal(relatedFileNames('hit.mp3', 'hit (1).mp3'), true);
+  assert.equal(relatedFileNames('hit.mp3', 'hit copy.mp3'), true);
+  assert.equal(relatedFileNames('hit.mp3', 'hit 복사본.mp3'), true);
+  assert.equal(relatedFileNames('Hit.MP3', 'hit 2.mp3'), true);
+  assert.equal(relatedFileNames('또잇.wav', '또잇.wav'), true);
+});
+
+test('다른 렌더일 수 있는 이름은 같은 이름으로 보지 않는다', () => {
+  assert.equal(relatedFileNames('hit 2.wav', 'hit 3.wav'), false);
+  assert.equal(relatedFileNames('hit.wav', 'hit 2 2.wav'), false);
+  assert.equal(relatedFileNames('a.wav', 'b.wav'), false);
+  assert.equal(relatedFileNames('a.wav', 'a.mp3'), false);
+  assert.equal(relatedFileNames('', 'a.wav'), false);
+});
+
+test('크기와 기술 정보가 모두 같아야 같은 파일이다', () => {
+  const sound = { size: 333180, duration: 1.73, sampleRate: 48000, channels: 2, codec: 'pcm_s24le' };
+  assert.equal(matchesTechnicalIdentity(sound, { ...sound }), true);
+  assert.equal(matchesTechnicalIdentity(sound, { ...sound, duration: 1.735 }), true);
+  assert.equal(matchesTechnicalIdentity(sound, { ...sound, duration: 1.9 }), false);
+  assert.equal(matchesTechnicalIdentity(sound, { ...sound, size: 333181 }), false);
+  assert.equal(matchesTechnicalIdentity(sound, { ...sound, sampleRate: 44100 }), false);
+  assert.equal(matchesTechnicalIdentity(sound, { ...sound, channels: 1 }), false);
+  assert.equal(matchesTechnicalIdentity(sound, { ...sound, codec: 'pcm_s16le' }), false);
+  // 모르는 값은 비교에서 빼되, 아는 값이 하나도 없으면 성질 비교가 아니다.
+  assert.equal(matchesTechnicalIdentity(sound, { size: 333180, duration: 1.73 }), true);
+  assert.equal(matchesTechnicalIdentity({ size: 10 }, { size: 10 }), false);
+});
+
+test('같은 폴더에서 꼬리만 달라진 같은 성질의 파일은 이름 변경이다', () => {
+  const sound = { relativePath: '예능 효과음/pop (뽁)/또잇.wav', fileName: '또잇.wav', size: 333180, duration: 1.73, sampleRate: 48000, channels: 2, codec: 'pcm_s24le' };
+  const renamed = { relativePath: '예능 효과음/pop (뽁)/또잇 2.wav', fileName: '또잇 2.wav', size: 333180, duration: 1.73, sampleRate: 48000, channels: 2, codec: 'pcm_s24le' };
+  assert.equal(matchesRenamedByIdentity(sound, renamed), true);
+  assert.equal(matchesRenamedByIdentity(sound, { ...renamed, relativePath: '다른 폴더/또잇 2.wav' }), false);
+  assert.equal(matchesRenamedByIdentity(sound, { ...renamed, fileName: '또익 2.wav', relativePath: '예능 효과음/pop (뽁)/또익 2.wav' }), false);
+  assert.equal(matchesRenamedByIdentity(sound, { ...renamed, duration: 2.5 }), false);
+  // 루트 파일끼리도 본다.
+  assert.equal(matchesRenamedByIdentity({ ...sound, relativePath: '샤킨.mp3', fileName: '샤킨.mp3' }, { ...renamed, relativePath: '샤킨 2.mp3', fileName: '샤킨 2.mp3' }), true);
+});
