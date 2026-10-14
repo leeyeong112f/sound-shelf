@@ -3364,6 +3364,11 @@ function renderPickBanner() {
     banner.className = 'pick-banner';
     banner.innerHTML = '<span class="pick-label"></span><span class="pick-hint">소리를 \'넣기\' 하거나 이름을 더블클릭하세요</span><button class="pick-cancel" type="button">취소</button>';
     banner.querySelector('.pick-cancel').addEventListener('click', async () => {
+      if (state.pick?.local) {                      // 프리셋 화면의 '소리 고르기' 취소 → 화면으로 돌아감
+        mp.choosing = null;
+        setPickMode(null);
+        return openMotionPresets();
+      }
       await window.soundLibrary.cancelPick();
       setPickMode(null);
     });
@@ -3374,17 +3379,372 @@ function renderPickBanner() {
 
 function setPickMode(pick) {
   state.pick = pick;
+  document.body.classList.toggle('picking', Boolean(pick));
   renderPickBanner();
   render();
 }
 
 async function chooseForMotionStudio(sound) {
   if (!state.pick) return;
+  if (state.pick.local) return chooseForMotionPreset(sound);
   showToast(`${state.pick.label} 에 넣는 중…`, 15000);
   const result = await window.soundLibrary.choosePick(sound.id);
   setPickMode(null);
   showToast(result.message, result.ok ? 3000 : 7000);
 }
 
-window.soundLibrary.onPickMode((pick) => setPickMode(pick));
-window.soundLibrary.getPickMode().then((pick) => { if (pick) setPickMode(pick); }).catch(() => {});
+// 플러그인의 "Open in Sound Shelf"(slot=preset) 는 Motion 프리셋 화면으로, In/Out 고르기는 본 창 고르기 모드로
+function receivePickMode(pick) {
+  if (!pick) return;
+  if (pick.slot === 'preset') {
+    if (state.pick && !state.pick.local) setPickMode(null);
+    return openMotionPresets({ request: pick });
+  }
+  if (mp.open) closeMotionPresets();
+  setPickMode(pick);
+}
+window.soundLibrary.onPickMode((pick) => receivePickMode(pick));
+window.soundLibrary.getPickMode().then((pick) => receivePickMode(pick)).catch(() => {});
+
+// ---- Motion 프리셋 화면(모션 + 효과음) ----
+// 프리셋 목록에서 고르고, In/Out 효과음·볼륨·맞출 순간을 조절한다. 파형을 클릭하면 "효과음 안의 맞출 지점(hit)"이 바뀌고
+// ±1프레임으로 미세 조정한다. 바꾼 값은 곧바로 프리셋 파일에 저장된다. Resolve 의 Motion Studio 에서 "Open in Sound Shelf" 로
+// 열었을 때는 '적용' 으로 모션 + 효과음을 그 클립에 넣는다(플러그인이 오디오를 깔고 비디오와 Link).
+const MP_ALIGN_NAMES = ['자동', '시작', '가장 빠른 순간', '도착'];
+const mp = { open: false, presets: [], file: null, request: null, saveTimers: {}, audio: new Audio(), stopAt: null, durations: {}, choosing: null };
+mp.audio.addEventListener('timeupdate', () => { if (mp.stopAt !== null && mp.audio.currentTime >= mp.stopAt) { mp.audio.pause(); mp.stopAt = null; } });
+
+const mpFps = () => mp.request?.fps || 30;
+const mpCurrent = () => mp.presets.find((item) => item.file === mp.file) || null;
+const mpSlotKey = (slot) => (slot === 'In' ? 'in' : 'out');
+const mpFormatTime = (seconds) => `${(Number(seconds) || 0).toFixed(3)}s · ${Math.round((Number(seconds) || 0) * mpFps())}f`;
+
+async function openMotionPresets({ request = null } = {}) {
+  if (request) mp.request = request;
+  mp.open = true;
+  $('#motionPresetDialog').classList.remove('hidden');
+  try {
+    mp.presets = await window.soundLibrary.listMotionPresets();
+  } catch (error) {
+    mp.presets = [];
+    showToast(`Motion 프리셋을 읽지 못했습니다: ${error.message}`, 6000);
+  }
+  if (!mpCurrent()) {
+    const wanted = mp.request?.preset || '';
+    mp.file = (mp.presets.find((item) => wanted && (`${item.category}/${item.name}` === wanted || item.file === wanted)) || mp.presets[0])?.file || null;
+  }
+  renderMotionPresets();
+}
+
+function closeMotionPresets() {
+  mp.open = false;
+  mp.audio.pause();
+  $('#motionPresetDialog').classList.add('hidden');
+}
+
+function renderMotionPresets() {
+  const mode = $('#mpMode');
+  mode.textContent = mp.request?.slot === 'preset'
+    ? `Resolve 에서 열림 · 적용하면 이 클립에 모션 + 효과음이 들어갑니다 (${mpFps()}fps)`
+    : '편집만 가능 · 적용은 Resolve 의 Motion Studio 에서 "Open in Sound Shelf" 로 여세요';
+  const listEl = $('#mpList');
+  if (!mp.presets.length) {
+    listEl.innerHTML = '<p class="mp-cat">프리셋 없음</p><p style="padding:0 6px;font-size:12px;opacity:.7">Resolve 의 Motion Studio 에서 Save Preset 으로 먼저 저장하세요.</p>';
+    $('#mpEditor').innerHTML = '';
+    return;
+  }
+  let lastCategory = null;
+  listEl.innerHTML = mp.presets.map((preset) => {
+    const header = preset.category !== lastCategory ? `<div class="mp-cat">${escapeHtml(preset.category.toUpperCase())}</div>` : '';
+    lastCategory = preset.category;
+    const sounds = [preset.in.soundTitle && `In ♪ ${preset.in.soundTitle}`, preset.out.soundTitle && `Out ♪ ${preset.out.soundTitle}`].filter(Boolean).join(' · ') || '효과음 없음';
+    return `${header}<button type="button" class="mp-item ${preset.file === mp.file ? 'active' : ''}" data-file="${escapeHtml(preset.file)}">${escapeHtml(preset.name)}<small>${escapeHtml(sounds)}</small></button>`;
+  }).join('');
+  renderMotionPresetEditor();
+}
+
+function renderMotionPresetEditor() {
+  const preset = mpCurrent();
+  const editor = $('#mpEditor');
+  if (!preset) { editor.innerHTML = ''; return; }
+  const canApply = mp.request?.slot === 'preset';
+  editor.innerHTML = `
+    <div class="mp-title"><h3>${escapeHtml(preset.name)}</h3>
+      <button type="button" class="subtle-button" data-mp="save-as">다른 이름으로 저장</button>
+      <button type="button" class="primary-button" data-mp="apply" ${canApply ? '' : 'disabled title="Resolve 에서 Open in Sound Shelf 로 열었을 때만 적용할 수 있습니다"'}>적용</button></div>
+    ${['In', 'Out'].map((slot) => motionSlotHtml(slot, preset[mpSlotKey(slot)])).join('')}`;
+  for (const slot of ['In', 'Out']) drawMotionWave(slot);
+}
+
+function motionSlotHtml(slot, info) {
+  const motion = info.family === 'none' ? '모션 없음' : `${info.family} · ${info.variant}`;
+  const sound = info.sound
+    ? `${escapeHtml(info.soundTitle)}${info.missing ? ' <span style="color:var(--danger)">(파일 없음)</span>' : ''}`
+    : '<span style="opacity:.6">효과음 없음</span>';
+  const alignOptions = MP_ALIGN_NAMES.map((name, index) => {
+    const label = index === 0 ? `자동 (${MP_ALIGN_NAMES[mpAutoAlign(info.family)]})` : name;
+    return `<option value="${index}" ${info.align === index ? 'selected' : ''}>${label}</option>`;
+  }).join('');
+  const has = Boolean(info.sound) && !info.missing;
+  return `<div class="mp-slot" data-slot="${slot}">
+    <div class="mp-slot-head"><strong>${slot} · ${escapeHtml(motion)}</strong>
+      <button type="button" class="subtle-button mp-small" data-mp="choose">소리 고르기</button>
+      ${info.sound ? '<button type="button" class="subtle-button mp-small" data-mp="clear">빼기</button>' : ''}</div>
+    <div class="mp-sound">♪ ${sound}</div>
+    ${has ? `<div class="mp-wave-wrap" data-mp-wave><canvas class="mp-wave"></canvas><div class="mp-wave-empty hidden"></div></div>
+    <div class="mp-controls">
+      <span>맞출 지점</span><span class="mp-hit">${mpFormatTime(info.hit)}</span>
+      <button type="button" class="subtle-button mp-small" data-mp="nudge" data-step="-1">◀ 1f</button>
+      <button type="button" class="subtle-button mp-small" data-mp="nudge" data-step="1">1f ▶</button>
+      <button type="button" class="subtle-button mp-small" data-mp="listen">▶ 지점 듣기</button>
+      <button type="button" class="subtle-button mp-small" data-mp="play">▶ 전체</button>
+    </div>
+    <div class="mp-controls" style="margin-top:8px">
+      <label>모션의 <select data-mp-field="align">${alignOptions}</select> 에 맞춤</label>
+      <label>볼륨 <input type="range" min="-40" max="12" step="0.5" value="${info.volume}" data-mp-field="volume"><span data-mp-vol>${info.volume.toFixed(1)} dB</span></label>
+      <label>미세 이동 <input type="number" min="-2" max="2" step="${(1 / mpFps()).toFixed(4)}" value="${info.offset}" data-mp-field="offset"> 초</label>
+    </div>` : ''}
+  </div>`;
+}
+
+// Motion Studio 의 autoSoundAlign 과 같은 규칙: 자동일 때 실제로 쓰이는 순간(1 시작 2 가장 빠름 3 도착)
+function mpAutoAlign(family) {
+  if (['droprise', 'zoom', 'flip'].includes(family)) return 3;
+  if (['slide', 'spin', 'reference'].includes(family)) return 2;
+  return 1;
+}
+
+async function motionDuration(info) {
+  if (info.soundDuration > 0) return info.soundDuration;
+  if (mp.durations[info.soundPath]) return mp.durations[info.soundPath];
+  const probe = new Audio(fileUrl(info.soundPath));
+  const duration = await new Promise((resolve) => {
+    probe.addEventListener('loadedmetadata', () => resolve(probe.duration), { once: true });
+    probe.addEventListener('error', () => resolve(0), { once: true });
+  });
+  mp.durations[info.soundPath] = Number.isFinite(duration) ? duration : 0;
+  return mp.durations[info.soundPath];
+}
+
+async function drawMotionWave(slot) {
+  const preset = mpCurrent();
+  const wrap = document.querySelector(`#mpEditor .mp-slot[data-slot="${slot}"] [data-mp-wave]`);
+  if (!preset || !wrap) return;
+  const info = preset[mpSlotKey(slot)];
+  const canvas = wrap.querySelector('canvas');
+  const empty = wrap.querySelector('.mp-wave-empty');
+  const duration = await motionDuration(info);
+  let peaks = [];
+  if (info.soundId) {
+    if (!state.waveforms.has(info.soundId)) {
+      try { state.waveforms.set(info.soundId, await window.soundLibrary.getWaveform(info.soundId)); } catch { /* 파형 없이 진행 */ }
+    }
+    const waveform = state.waveforms.get(info.soundId);
+    if (waveform?.left?.length) {
+      const normalized = normalizeWaveform(waveform);
+      peaks = normalized.left.map((left, index) => Math.max(left, normalized.right?.[index] || 0));
+    }
+  }
+  if (!wrap.isConnected) return;
+  const rect = wrap.getBoundingClientRect();
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = Math.round(rect.width * ratio);
+  canvas.height = Math.round(rect.height * ratio);
+  const context = canvas.getContext('2d');
+  context.scale(ratio, ratio);
+  context.clearRect(0, 0, rect.width, rect.height);
+  const center = rect.height / 2;
+  if (peaks.length) {
+    const bars = resamplePeaks(peaks, Math.max(60, Math.floor(rect.width / 2)));
+    const step = rect.width / bars.length;
+    context.fillStyle = '#6ce0d5';
+    bars.forEach((peak, index) => {
+      const height = Math.max(1, peak * rect.height * 0.45);
+      context.fillRect(index * step, center - height, Math.max(1, step * 0.6), height * 2);
+    });
+  } else {
+    empty.textContent = info.soundId ? '파형을 만들 수 없습니다 — 클릭은 그대로 됩니다' : 'Sound Shelf 라이브러리 밖의 소리라 파형이 없습니다 — 클릭은 그대로 됩니다';
+    empty.classList.remove('hidden');
+  }
+  if (duration > 0) {
+    // 1프레임 눈금(너무 촘촘하면 생략)
+    const frame = 1 / mpFps();
+    if (rect.width / (duration / frame) >= 5) {
+      context.fillStyle = '#ffffff18';
+      for (let t = 0; t <= duration; t += frame) context.fillRect(Math.round((t / duration) * rect.width), rect.height - 6, 1, 6);
+    }
+    const x = Math.min(rect.width - 1, Math.max(0, (info.hit / duration) * rect.width));
+    context.fillStyle = getComputedStyle(document.body).getPropertyValue('--accent').trim() || '#a8ff3e';
+    context.fillRect(x - 1, 0, 2, rect.height);
+    context.beginPath();
+    context.moveTo(x - 6, 0); context.lineTo(x + 6, 0); context.lineTo(x, 8); context.closePath(); context.fill();
+  }
+  wrap.dataset.duration = String(duration || 0);
+}
+
+/// 값 바꾸기: 화면은 바로, 파일 저장은 잠깐 모아서(드래그·슬라이더 중 과도한 쓰기 방지)
+function setMotionSlot(slot, changes, { redraw = true } = {}) {
+  const preset = mpCurrent();
+  if (!preset) return;
+  const info = preset[mpSlotKey(slot)];
+  Object.assign(info, changes);
+  if ('align' in changes) info.effectiveAlign = info.align > 0 ? info.align : mpAutoAlign(info.family);
+  const slotEl = document.querySelector(`#mpEditor .mp-slot[data-slot="${slot}"]`);
+  if (slotEl && 'hit' in changes) slotEl.querySelector('.mp-hit').textContent = mpFormatTime(info.hit);
+  if (slotEl && 'volume' in changes) slotEl.querySelector('[data-mp-vol]').textContent = `${Number(info.volume).toFixed(1)} dB`;
+  if (redraw) drawMotionWave(slot);
+  const key = `${preset.file}|${slot}`;
+  const pending = { ...(mp.saveTimers[key]?.settings || {}), ...changes };
+  clearTimeout(mp.saveTimers[key]?.timer);
+  const file = preset.file;
+  mp.saveTimers[key] = { settings: pending, timer: setTimeout(() => saveMotionSlot(file, slot), 350) };
+}
+
+async function saveMotionSlot(file, slot) {
+  const key = `${file}|${slot}`;
+  const pending = mp.saveTimers[key];
+  if (!pending) return;
+  delete mp.saveTimers[key];
+  clearTimeout(pending.timer);
+  try {
+    await window.soundLibrary.updateMotionPreset({ file, slot, settings: pending.settings });
+  } catch (error) {
+    showToast(`프리셋 저장 실패: ${error.message}`, 6000);
+  }
+}
+
+async function flushMotionSaves() {
+  await Promise.all(Object.keys(mp.saveTimers).map((key) => {
+    const [file, slot] = key.split('|');
+    return saveMotionSlot(file, slot);
+  }));
+}
+
+function playMotionSound(info, from, to) {
+  mp.audio.pause();
+  mp.audio.src = fileUrl(info.soundPath);
+  mp.audio.volume = Math.max(0, Math.min(1, 10 ** (Number(info.volume || 0) / 20) * (state.previewVolume ?? 0.8)));
+  mp.audio.currentTime = Math.max(0, from);
+  mp.stopAt = to;
+  mp.audio.play().catch(() => showToast('효과음을 재생할 수 없습니다.', 4000));
+}
+
+function motionHitFromEvent(wrap, event) {
+  const rect = wrap.getBoundingClientRect();
+  const duration = Number(wrap.dataset.duration) || 0;
+  const fraction = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+  return Math.min(duration, fraction * duration);
+}
+
+function snapMotionHit(seconds) {
+  const frame = 1 / mpFps();
+  return Math.max(0, Math.round(Math.round(seconds / frame) * frame * 1000) / 1000);
+}
+
+let mpWaveDrag = null;
+$('#mpEditor').addEventListener('pointerdown', (event) => {
+  const wrap = event.target.closest('[data-mp-wave]');
+  if (!wrap || !Number(wrap.dataset.duration)) return;
+  const slot = wrap.closest('.mp-slot').dataset.slot;
+  mpWaveDrag = { wrap, slot };
+  wrap.setPointerCapture(event.pointerId);
+  setMotionSlot(slot, { hit: snapMotionHit(motionHitFromEvent(wrap, event)) });
+});
+$('#mpEditor').addEventListener('pointermove', (event) => {
+  if (!mpWaveDrag) return;
+  setMotionSlot(mpWaveDrag.slot, { hit: snapMotionHit(motionHitFromEvent(mpWaveDrag.wrap, event)) });
+});
+$('#mpEditor').addEventListener('pointerup', () => {
+  if (!mpWaveDrag) return;
+  const info = mpCurrent()?.[mpSlotKey(mpWaveDrag.slot)];
+  mpWaveDrag = null;
+  if (info) playMotionSound(info, info.hit - 0.15, info.hit + 0.6);   // 놓으면 지점 주변을 바로 들려줌
+});
+
+$('#mpEditor').addEventListener('input', (event) => {
+  const field = event.target.dataset.mpField;
+  if (!field) return;
+  const slot = event.target.closest('.mp-slot').dataset.slot;
+  const value = Number(event.target.value);
+  if (!Number.isFinite(value)) return;
+  if (field === 'volume') setMotionSlot(slot, { volume: value }, { redraw: false });
+  if (field === 'offset') setMotionSlot(slot, { offset: Math.max(-2, Math.min(2, value)) }, { redraw: false });
+  if (field === 'align') {
+    setMotionSlot(slot, { align: value }, { redraw: false });
+  }
+});
+
+$('#mpEditor').addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-mp]');
+  if (!button) return;
+  const preset = mpCurrent();
+  if (!preset) return;
+  const slot = button.closest('.mp-slot')?.dataset.slot;
+  const info = slot ? preset[mpSlotKey(slot)] : null;
+  const action = button.dataset.mp;
+  if (action === 'nudge') {
+    setMotionSlot(slot, { hit: snapMotionHit(info.hit + Number(button.dataset.step) / mpFps()) });
+    playMotionSound(info, info.hit - 0.15, info.hit + 0.6);
+  } else if (action === 'listen') {
+    playMotionSound(info, info.hit - 0.4, info.hit + 0.8);
+  } else if (action === 'play') {
+    playMotionSound(info, 0, null);
+  } else if (action === 'clear') {
+    await flushMotionSaves();
+    try {
+      const updated = await window.soundLibrary.updateMotionPreset({ file: preset.file, slot, settings: {}, clearSound: true });
+      mp.presets[mp.presets.indexOf(preset)] = updated;
+      renderMotionPresets();
+    } catch (error) { showToast(`프리셋 저장 실패: ${error.message}`, 6000); }
+  } else if (action === 'choose') {
+    // 본 창 목록에서 소리를 고른다(이 화면은 잠시 닫았다가 고르면 다시 열림)
+    await flushMotionSaves();
+    mp.choosing = { file: preset.file, slot };
+    closeMotionPresets();
+    setPickMode({ label: `${preset.name} · ${slot} 효과음`, slot: slot.toLowerCase(), local: true });
+  } else if (action === 'save-as') {
+    await flushMotionSaves();
+    const name = await openInputDialog({ title: '다른 이름으로 저장', description: `"${preset.category}" 카테고리에 새 이름으로 복사합니다.`, value: `${preset.name} 2` });
+    if (!name) return;
+    try {
+      const created = await window.soundLibrary.saveMotionPresetAs({ file: preset.file, category: preset.category, name });
+      mp.file = created.file;
+      await openMotionPresets();
+      showToast(`"${created.name}" 으로 저장했습니다.`);
+    } catch (error) { showToast(error.message, 6000); }
+  } else if (action === 'apply') {
+    await flushMotionSaves();
+    const result = await window.soundLibrary.applyMotionPreset(preset.file);
+    showToast(result.message, result.ok ? 4000 : 7000);
+    if (result.ok) { mp.request = null; closeMotionPresets(); }
+  }
+});
+
+$('#mpList').addEventListener('click', async (event) => {
+  const item = event.target.closest('.mp-item');
+  if (!item) return;
+  await flushMotionSaves();
+  mp.audio.pause();
+  mp.file = item.dataset.file;
+  renderMotionPresets();
+});
+$('#mpClose').addEventListener('click', async () => {
+  await flushMotionSaves();
+  closeMotionPresets();
+});
+$('#motionPresetsBtn').addEventListener('click', () => openMotionPresets());
+
+/// 프리셋 화면의 '소리 고르기' 에서 고른 소리를 그 프리셋 슬롯에 넣고 화면을 다시 연다
+async function chooseForMotionPreset(sound) {
+  const target = mp.choosing;
+  mp.choosing = null;
+  setPickMode(null);
+  if (!target) return;
+  try {
+    await window.soundLibrary.updateMotionPreset({ file: target.file, slot: target.slot, settings: { hit: 0 }, soundId: sound.id });
+    mp.file = target.file;
+  } catch (error) {
+    showToast(`프리셋 저장 실패: ${error.message}`, 6000);
+  }
+  await openMotionPresets();
+}
