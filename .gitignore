@@ -1,5 +1,6 @@
 node_modules/
 outputs/
+outputs.noindex/
 work/
 __pycache__/
 *.pyc

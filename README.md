@@ -37,7 +37,7 @@ pip3 install numpy
 npm run build:mac
 ```
 
-완성된 앱은 `outputs` 폴더에 생성됩니다. 이 폴더와 개인 사운드 파일은 GitHub 저장소에 포함되지 않습니다.
+완성된 앱은 `outputs.noindex` 폴더에 생성됩니다(`.noindex` = Launchpad·Spotlight 에 같은 이름 앱이 두 개 뜨지 않게). 이 폴더와 개인 사운드 파일은 GitHub 저장소에 포함되지 않습니다.
 
 ## 현재 기능
 
