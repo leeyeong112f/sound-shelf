@@ -28,6 +28,7 @@ const { clipboardFilePaths } = require('./clipboard-files');
 const SelfUpdate = require('./self-update');
 const { moveToTrash, userTrashDirectory } = require('./trash-fallback');
 const { isCurrentKeyAnalysis, keyAnalysisErrorMessage } = require('./key-analysis');
+const { findPickArgument, loadPickRequest, placeScriptPath, writePickReply } = require('./motionstudio-pick');
 const { canonicalYouTubeUrl, parseDownloadProgress, safeFileStem, youtubeImportErrorMessage } = require('./youtube-import');
 const { describeResolveRelink, planResolveRelinks } = require('./resolve-relink');
 const { VIDEO_EXTENSIONS, audioFileNameFor, describeImportReport, isVideoFile, planAudioExtraction } = require('./video-audio');
@@ -134,12 +135,39 @@ let performanceStats = { storage: '볼트 + 로컬 SQLite 캐시', loadMs: 0, fi
 const singleInstanceLock = app.requestSingleInstanceLock();
 
 if (!singleInstanceLock) app.quit();
-else app.on('second-instance', () => {
+else app.on('second-instance', (_event, argv) => {
   if (!mainWindow) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
+  beginMotionStudioPick(argv);
 });
+
+// ---- Motion Studio(Resolve OFX) 효과음 고르기 모드 ----
+// 플러그인의 "Pick in Sound Shelf" 가 --pick-request <요청 파일> 로 띄운다(이미 떠 있으면 second-instance).
+// 이 모드에서 소리를 고르면 응답 파일을 쓰고, Motion Studio 배치 스크립트(고정 경로)로 타임라인에 깐다.
+let motionStudioPick = null;
+
+function publicPick() {
+  return motionStudioPick ? { label: motionStudioPick.label, slot: motionStudioPick.slot } : null;
+}
+
+function beginMotionStudioPick(argv) {
+  const file = findPickArgument(argv);
+  if (!file) return;
+  try {
+    motionStudioPick = loadPickRequest(file);
+  } catch (error) {
+    mainWindow?.webContents.send('library-notice', error.message);
+    return;
+  }
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+  app.focus({ steal: true });
+  mainWindow.webContents.send('pick:mode', publicPick());
+}
 
 // Sound Shelf never needs a secondary browser window. In particular, deny
 // Chromium's built-in audio document viewer if a file URL is accidentally
@@ -2317,6 +2345,7 @@ if (singleInstanceLock) app.whenReady().then(async () => {
   // Show the window immediately; the vault scan (potentially slow on cloud
   // storage like Google Drive) runs afterwards and pushes 'library-updated'.
   await createWindow();
+  beginMotionStudioPick(process.argv);
   configureAutoUpdates().catch((error) => console.error('Update setup failed:', error));
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -3658,6 +3687,40 @@ ipcMain.handle('resolve:insert', async (_event, payload) => {
   }
 });
 
+ipcMain.handle('pick:get', () => publicPick());
+ipcMain.handle('pick:cancel', () => {
+  motionStudioPick = null;
+  return null;
+});
+// 렌더러는 사운드 id 만 보낸다(경로는 라이브러리에서 찾음). 실행하는 스크립트는 고정 경로뿐이다.
+ipcMain.handle('pick:choose', async (_event, payload) => {
+  const request = motionStudioPick;
+  if (!request) return { ok: false, message: 'Motion Studio 고르기 모드가 아닙니다.' };
+  const sound = db.sounds.find((item) => item.id === payload?.id);
+  if (!sound?.path || !fs.existsSync(sound.path)) return { ok: false, message: '원본 사운드 파일을 찾을 수 없습니다.' };
+  try {
+    await writePickReply(request, sound);
+  } catch (error) {
+    return { ok: false, message: `Motion Studio 에 넘기지 못했습니다: ${error.message}` };
+  }
+  motionStudioPick = null;
+  const slotName = request.slot === 'in' ? 'In' : 'Out';
+  let result = { ok: true, message: `Motion Studio ${slotName} 효과음: ${sound.title}` };
+  const script = placeScriptPath();
+  if (fs.existsSync(script)) {
+    try {
+      const placed = await runResolveScript(script, ['--place-request', request.file, sound.path], { timeout: 30000 });
+      result = { ok: Boolean(placed?.ok), message: `Motion Studio ${slotName}: ${placed?.message || ''}` };
+    } catch (error) {
+      result = { ok: false, message: `Motion Studio 에는 넣었지만 타임라인 배치는 실패했습니다: ${error.message}` };
+    }
+  } else {
+    result.message += ' (Motion Studio Sounds 스크립트가 없어 타임라인 배치는 건너뜀)';
+  }
+  execFile('open', ['-a', 'DaVinci Resolve'], () => {});   // 고른 뒤 Resolve 로 돌아감
+  return result;
+});
+
 // ---- DaVinci Resolve 오프라인 클립 재연결 ----
 // Sound Shelf 가 파일을 옮기면 Resolve 미디어 풀의 클립은 옛 경로를 가리켜 오프라인이 된다.
 // 열려 있는 Resolve 프로젝트에서 오프라인 클립을 찾아 라이브러리의 현재 파일로 되돌린다.
@@ -3668,7 +3731,8 @@ let resolveRelinkInFlight = null;
 let resolveRelinkDirty = false;
 
 async function runResolveScript(scriptFile, args, { input = null, timeout = 30000 } = {}) {
-  const script = await fsp.readFile(path.join(__dirname, scriptFile), 'utf8');
+  // 상대 경로 = 앱 안의 스크립트, 절대 경로 = Motion Studio 배치 스크립트(고정 경로)
+  const script = await fsp.readFile(path.resolve(__dirname, scriptFile), 'utf8');
   return new Promise((resolve, reject) => {
     const child = spawn(findPython(), ['-c', script, ...args], { windowsHide: true });
     let stdout = '';

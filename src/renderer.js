@@ -23,6 +23,7 @@ const SHORTCUT_LABELS = {
 };
 
 const state = {
+  pick: null,   // Motion Studio 효과음 고르기 모드({ label, slot }) — 켜져 있으면 사운드 행에 '넣기' 버튼
   sounds: [],
   loading: true,
   categories: [],
@@ -507,7 +508,7 @@ function renderVirtualRows() {
       <span class="category-pill" title="${escapeHtml(sound.categoryPath || sound.category || '미분류')}">${escapeHtml(sound.category || '미분류')}</span>
       <span class="dim">${formatDuration(sound.duration)}</span><span class="dim">${escapeHtml((sound.codec || sound.fileName.split('.').pop()).toUpperCase())}</span><span class="dim">${sound.channels || '—'}</span>
       <div class="rating-stars">${ratingMarkup(sound)}</div><div class="tags">${tags || '<span class="dim">—</span>'}</div>
-      <div class="row-actions"><button class="favorite ${sound.favorite ? 'on' : ''}" data-action="favorite" title="즐겨찾기">★</button><button class="more-button" data-action="inspect" title="사운드 정보 수정">⋯</button></div>
+      <div class="row-actions">${state.pick && !sound.missing ? '<button class="pick-button" data-action="pick" title="이 소리를 Motion Studio 에 넣기">넣기</button>' : ''}<button class="favorite ${sound.favorite ? 'on' : ''}" data-action="favorite" title="즐겨찾기">★</button><button class="more-button" data-action="inspect" title="사운드 정보 수정">⋯</button></div>
     </div>`;
   }).join('');
   list.innerHTML = `<div class="virtual-spacer"><div class="virtual-window">${rows}</div></div>`;
@@ -2051,6 +2052,7 @@ list.addEventListener('click', async (event) => {
   const sound = state.sounds.find((item) => item.id === row.dataset.id);
   const action = event.target.closest('[data-action]')?.dataset.action;
   state.selectedId = sound.id;
+  if (action === 'pick') return chooseForMotionStudio(sound);
   if (action === 'play') {
     renderDetailPanel();
     return toggleSelectedPlayback();
@@ -2189,6 +2191,7 @@ list.addEventListener('dblclick', async (event) => {
   event.preventDefault();
   const sound = state.sounds.find((item) => item.id === row.dataset.id);
   if (!sound || sound.missing) return;
+  if (state.pick) return chooseForMotionStudio(sound);   // 고르기 모드: 더블클릭 = Motion Studio 에 넣기
   showToast('DaVinci Resolve 타임헤드에 삽입 중…', 15000);
   const result = await window.soundLibrary.insertIntoResolve({ id: sound.id });
   showToast(result.message, result.ok ? 2200 : 6000);
@@ -3348,3 +3351,40 @@ window.soundLibrary.getUpdateStatus().then((status) => {
   state.updateStatus = status;
   renderUpdateSettings();
 }).catch((error) => console.error('Could not read update status:', error));
+
+// ---- Motion Studio 효과음 고르기 모드 ----
+// Resolve 의 Motion Studio 에서 "Pick in Sound Shelf" 를 누르면 이 모드로 앞에 뜬다.
+// 행의 '넣기' 또는 이름 더블클릭 → 그 소리가 Motion Studio 설정·프리셋·타임라인에 들어가고 Resolve 로 돌아간다.
+function renderPickBanner() {
+  let banner = document.querySelector('#pickBanner');
+  if (!state.pick) { banner?.remove(); return; }
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'pickBanner';
+    banner.className = 'pick-banner';
+    banner.innerHTML = '<span class="pick-label"></span><span class="pick-hint">소리를 \'넣기\' 하거나 이름을 더블클릭하세요</span><button class="pick-cancel" type="button">취소</button>';
+    banner.querySelector('.pick-cancel').addEventListener('click', async () => {
+      await window.soundLibrary.cancelPick();
+      setPickMode(null);
+    });
+    document.querySelector('.main-pane')?.prepend(banner);
+  }
+  banner.querySelector('.pick-label').textContent = state.pick.label;
+}
+
+function setPickMode(pick) {
+  state.pick = pick;
+  renderPickBanner();
+  render();
+}
+
+async function chooseForMotionStudio(sound) {
+  if (!state.pick) return;
+  showToast(`${state.pick.label} 에 넣는 중…`, 15000);
+  const result = await window.soundLibrary.choosePick(sound.id);
+  setPickMode(null);
+  showToast(result.message, result.ok ? 3000 : 7000);
+}
+
+window.soundLibrary.onPickMode((pick) => setPickMode(pick));
+window.soundLibrary.getPickMode().then((pick) => { if (pick) setPickMode(pick); }).catch(() => {});
