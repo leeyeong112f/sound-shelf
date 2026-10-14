@@ -106,4 +106,12 @@ npm run build:mac
 
 Sound Shelf에서 파일이나 폴더를 옮기면 Resolve 미디어 풀의 클립은 옛 경로를 가리켜 오프라인(미싱 클립)이 됩니다. 같은 스크립팅 연결로, 경로가 바뀐 뒤 몇 초 안에 열려 있는 Resolve 프로젝트의 오프라인 클립을 찾아 같은 이름의 현재 파일이 있는 폴더로 `RelinkClips`를 호출합니다. 같은 이름의 파일이 여러 폴더에 있으면 옛 상위 폴더 이름이 같은 쪽을 고르고, 그래도 하나로 좁혀지지 않으면 건드리지 않습니다. Resolve에서 Unlink한 클립도 파일이 라이브러리에 있으면 같은 방법으로 되돌립니다. 이름을 바꾼 파일은 이 방법으로 찾을 수 없으므로 Resolve에서 직접 다시 연결해야 합니다. Resolve가 꺼져 있을 때 옮긴 파일은 설정의 “오프라인 클립 지금 재연결”로 처리하고, 자동 실행은 같은 곳에서 끌 수 있습니다.
 
+### Motion Studio 효과음 고르기
+
+DaVinci Resolve 의 Motion Studio(OFX 플러그인, `~/Developer/MotionStudio`) 인스펙터에서 **Pick in Sound Shelf** 를 누르면 Sound Shelf 가 '고르기 모드'로 앞에 뜹니다(위에 초록 띠). 사운드 행의 **넣기** 또는 이름 더블클릭 → 그 소리가 Motion Studio 의 In/Out Sound 와 불러온 프리셋에 들어가고, 그 클립의 In/Out 시점에 `Motion SFX` 오디오 트랙으로 바로 깔린 뒤 Resolve 로 돌아갑니다. **취소**를 누르면 평소 모드로 돌아갑니다.
+
+- 연결: 플러그인이 `~/Library/Application Support/MotionStudio/pick/request-*.txt` 를 쓰고 `open -n -a "Sound Shelf" --args --pick-request <파일>` 로 띄움(이미 떠 있으면 second-instance). 응답은 같은 폴더의 `reply-*.txt`
+- 타임라인 배치는 Motion Studio 가 설치한 고정 경로 스크립트(`Fusion/Scripts/Utility/Motion Studio Sounds.py --place-request`)만 실행합니다. 요청·응답 경로가 고르기 폴더 밖이면 거부합니다(`src/motionstudio-pick.js`)
+- 위의 외부 스크립팅(Local) 설정이 필요합니다
+
 태그·별점·메모·Key 결과와 폴더 순서는 볼트 안의 `.sound-shelf`에 저장됩니다. 절대 경로 대신 볼트 기준 상대 경로를 사용하므로 마스터 폴더를 옮겨도 같은 볼트로 다시 연결할 수 있습니다. 파형과 SQLite 검색 캐시는 Electron 사용자 데이터 폴더에 저장되며 삭제해도 자동으로 재생성됩니다. `sound-library.json`은 기존 버전 복구와 앱 설정 호환용으로 유지됩니다.
