@@ -28,7 +28,7 @@ const { clipboardFilePaths } = require('./clipboard-files');
 const SelfUpdate = require('./self-update');
 const { moveToTrash, userTrashDirectory } = require('./trash-fallback');
 const { isCurrentKeyAnalysis, keyAnalysisErrorMessage } = require('./key-analysis');
-const { findPickArgument, loadPickRequest, placeScriptPath, writePickReply } = require('./motionstudio-pick');
+const { findPickArgument, loadPickRequest, writePickReply, listPresets, readPreset, updatePresetKeys, soundValues, savePresetAs, writePresetReply } = require('./motionstudio-pick');
 const { canonicalYouTubeUrl, parseDownloadProgress, safeFileStem, youtubeImportErrorMessage } = require('./youtube-import');
 const { describeResolveRelink, planResolveRelinks } = require('./resolve-relink');
 const { VIDEO_EXTENSIONS, audioFileNameFor, describeImportReport, isVideoFile, planAudioExtraction } = require('./video-audio');
@@ -136,7 +136,8 @@ const singleInstanceLock = app.requestSingleInstanceLock();
 
 if (!singleInstanceLock) app.quit();
 else app.on('second-instance', (_event, argv) => {
-  if (!mainWindow) return;
+  // 종료 중이면 창 객체는 남아 있어도 이미 파괴됐다(이걸 건드리면 "Object has been destroyed" 로 메인 프로세스 오류)
+  if (!mainWindow || mainWindow.isDestroyed()) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
@@ -149,7 +150,7 @@ else app.on('second-instance', (_event, argv) => {
 let motionStudioPick = null;
 
 function publicPick() {
-  return motionStudioPick ? { label: motionStudioPick.label, slot: motionStudioPick.slot } : null;
+  return motionStudioPick ? { label: motionStudioPick.label, slot: motionStudioPick.slot, fps: motionStudioPick.fps, preset: motionStudioPick.preset } : null;
 }
 
 function beginMotionStudioPick(argv) {
@@ -161,7 +162,7 @@ function beginMotionStudioPick(argv) {
     mainWindow?.webContents.send('library-notice', error.message);
     return;
   }
-  if (!mainWindow) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
@@ -3692,10 +3693,10 @@ ipcMain.handle('pick:cancel', () => {
   motionStudioPick = null;
   return null;
 });
-// 렌더러는 사운드 id 만 보낸다(경로는 라이브러리에서 찾음). 실행하는 스크립트는 고정 경로뿐이다.
+// 렌더러는 사운드 id 만 보낸다(경로는 라이브러리에서 찾음). 타임라인 배치(맞출 지점·Link)는 Motion Studio 플러그인이 한다.
 ipcMain.handle('pick:choose', async (_event, payload) => {
   const request = motionStudioPick;
-  if (!request) return { ok: false, message: 'Motion Studio 고르기 모드가 아닙니다.' };
+  if (!request || request.slot === 'preset') return { ok: false, message: 'Motion Studio 효과음 고르기 모드가 아닙니다.' };
   const sound = db.sounds.find((item) => item.id === payload?.id);
   if (!sound?.path || !fs.existsSync(sound.path)) return { ok: false, message: '원본 사운드 파일을 찾을 수 없습니다.' };
   try {
@@ -3704,21 +3705,44 @@ ipcMain.handle('pick:choose', async (_event, payload) => {
     return { ok: false, message: `Motion Studio 에 넘기지 못했습니다: ${error.message}` };
   }
   motionStudioPick = null;
-  const slotName = request.slot === 'in' ? 'In' : 'Out';
-  let result = { ok: true, message: `Motion Studio ${slotName} 효과음: ${sound.title}` };
-  const script = placeScriptPath();
-  if (fs.existsSync(script)) {
-    try {
-      const placed = await runResolveScript(script, ['--place-request', request.file, sound.path], { timeout: 30000 });
-      result = { ok: Boolean(placed?.ok), message: `Motion Studio ${slotName}: ${placed?.message || ''}` };
-    } catch (error) {
-      result = { ok: false, message: `Motion Studio 에는 넣었지만 타임라인 배치는 실패했습니다: ${error.message}` };
-    }
-  } else {
-    result.message += ' (Motion Studio Sounds 스크립트가 없어 타임라인 배치는 건너뜀)';
+  execFile('open', ['-a', 'DaVinci Resolve'], () => {});   // 고른 뒤 Resolve 로 돌아감(뷰어에서 반영·배치)
+  return { ok: true, message: `Motion Studio ${request.slot === 'in' ? 'In' : 'Out'} 효과음: ${sound.title} — Resolve 에서 반영됩니다.` };
+});
+
+// ---- Motion 프리셋(모션 + 효과음): 목록·효과음 편집·다른 이름으로 저장·적용 ----
+function withSoundInfo(preset) {
+  for (const slot of ['in', 'out']) {
+    const sound = preset[slot].soundPath ? db.sounds.find((item) => item.path === preset[slot].soundPath) : null;
+    preset[slot].soundId = sound?.id || null;
+    preset[slot].soundTitle = sound?.title || (preset[slot].sound ? path.basename(preset[slot].sound) : '');
+    preset[slot].soundDuration = Number(sound?.duration || 0);
+    preset[slot].missing = Boolean(preset[slot].sound) && !fs.existsSync(preset[slot].soundPath);
   }
-  execFile('open', ['-a', 'DaVinci Resolve'], () => {});   // 고른 뒤 Resolve 로 돌아감
-  return result;
+  return preset;
+}
+ipcMain.handle('presets:list', () => listPresets().map(withSoundInfo));
+ipcMain.handle('presets:update', async (_event, payload) => {
+  const slot = payload?.slot === 'Out' ? 'Out' : 'In';
+  const settings = { ...(payload?.settings || {}) };
+  delete settings.sound;                                   // 경로는 렌더러에서 받지 않는다
+  if (payload?.clearSound) settings.sound = '';
+  if (payload?.soundId) {
+    const sound = db.sounds.find((item) => item.id === payload.soundId);
+    if (!sound?.path) throw new Error('라이브러리에서 소리를 찾을 수 없습니다.');
+    settings.sound = sound.path;
+    if (!('hit' in settings)) settings.hit = 0;
+  }
+  return withSoundInfo(await updatePresetKeys(String(payload?.file || ''), soundValues(slot, settings)));
+});
+ipcMain.handle('presets:save-as', async (_event, payload) => withSoundInfo(await savePresetAs(String(payload?.file || ''), payload?.category, payload?.name)));
+ipcMain.handle('presets:apply', async (_event, payload) => {
+  const request = motionStudioPick;
+  if (!request || request.slot !== 'preset') return { ok: false, message: 'Resolve 의 Motion Studio 에서 "Open in Sound Shelf" 로 열었을 때만 적용할 수 있습니다.' };
+  const preset = readPreset(String(payload?.file || ''));
+  await writePresetReply(request, preset.file);
+  motionStudioPick = null;
+  execFile('open', ['-a', 'DaVinci Resolve'], () => {});
+  return { ok: true, message: `"${preset.name}" 을(를) Motion Studio 에 보냈습니다 — Resolve 에서 모션과 효과음이 들어갑니다.` };
 });
 
 // ---- DaVinci Resolve 오프라인 클립 재연결 ----

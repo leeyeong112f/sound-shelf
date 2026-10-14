@@ -35,6 +35,7 @@
         <div class="sidebar-bottom">
           <button id="addFolderBtn" class="primary-button">볼트 열기</button>
           <button id="addFilesBtn" class="subtle-button">파일을 볼트로 이동</button>
+          <button id="motionPresetsBtn" class="subtle-button" title="Motion Studio 프리셋(모션 + 효과음) 편집">🎬 Motion 프리셋</button>
           <button id="settingsBtn" class="subtle-button">⚙ 설정</button>
         </div>
       </aside>
@@ -175,6 +176,12 @@
       </aside>
     </div>
 
+    <div id="motionPresetDialog" class="dialog-backdrop hidden">
+      <div class="mp-dialog">
+        <header class="mp-head"><h2>Motion 프리셋</h2><span id="mpMode" class="mp-mode"></span><button type="button" id="mpClose" class="subtle-button">닫기</button></header>
+        <div class="mp-body"><aside id="mpList" class="mp-list"></aside><section id="mpEditor" class="mp-editor"></section></div>
+      </div>
+    </div>
     <div id="inputDialog" class="dialog-backdrop hidden">
       <form id="inputDialogForm" class="input-dialog">
         <h2 id="inputDialogTitle">입력</h2>

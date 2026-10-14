@@ -347,5 +347,35 @@ h1 { margin: 4px 0 2px; font-size: 28px; letter-spacing: -.03em; }
 .pick-banner .pick-label { font-weight: 800; color: var(--accent); }
 .pick-banner .pick-hint { flex: 1; opacity: 0.8; font-size: 12px; }
 .pick-banner .pick-cancel { padding: 4px 12px; border-radius: 6px; }
-.pick-button { padding: 2px 10px; margin-right: 6px; border-radius: 6px; background: var(--accent); color: #121416; font-weight: 800; border: 0; cursor: pointer; }
+.pick-button { padding: 3px 10px; border-radius: 6px; background: var(--accent); color: #121416; font-weight: 800; border: 0; cursor: pointer; white-space: nowrap; flex: none; }
+/* 고르기 모드: 마지막 열(★ ⋯)에 '넣기' 가 들어가도록 넓힌다 */
+body.picking .sound-table-head, body.picking .sound-row { grid-template-columns: 44px minmax(165px, 1.25fr) minmax(130px, .9fr) minmax(88px, .62fr) 52px 62px 38px 90px minmax(65px, .5fr) 108px; }
 .pick-button:hover { filter: brightness(1.1); }
+
+/* Motion 프리셋 화면(모션 + 효과음, 맞출 지점) */
+.mp-dialog { width: min(1100px, 94vw); height: min(720px, 90vh); display: grid; grid-template-rows: auto 1fr; background: var(--panel); border: 1px solid #30353f; border-radius: 14px; overflow: hidden; }
+.mp-head { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #262a31; }
+.mp-head h2 { margin: 0; font-size: 16px; }
+.mp-mode { flex: 1; color: var(--accent); font-size: 12px; font-weight: 700; }
+.mp-body { display: grid; grid-template-columns: 300px 1fr; min-height: 0; }
+.mp-list { overflow: auto; border-right: 1px solid #262a31; padding: 8px; }
+.mp-cat { margin: 10px 6px 4px; font-size: 10px; letter-spacing: .08em; color: #6f7580; font-weight: 800; }
+.mp-item { display: block; width: 100%; text-align: left; padding: 8px 10px; border-radius: 8px; border: 0; background: transparent; color: inherit; cursor: pointer; }
+.mp-item:hover { background: #22262d; }
+.mp-item.active { background: color-mix(in srgb, var(--accent) 14%, var(--panel-2)); outline: 1px solid var(--accent); }
+.mp-item small { display: block; opacity: .65; font-size: 11px; margin-top: 2px; }
+.mp-editor { overflow: auto; padding: 16px 20px; }
+.mp-title { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.mp-title h3 { margin: 0; flex: 1; font-size: 18px; }
+.mp-slot { border: 1px solid #2c3139; border-radius: 12px; padding: 12px 14px; margin-bottom: 14px; background: var(--panel-2); }
+.mp-slot-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.mp-slot-head strong { flex: 1; }
+.mp-sound { font-size: 13px; opacity: .9; }
+.mp-wave-wrap { position: relative; height: 84px; margin: 8px 0; border-radius: 8px; background: #121418; cursor: crosshair; }
+.mp-wave { width: 100%; height: 100%; display: block; }
+.mp-wave-empty { position: absolute; inset: 0; display: grid; place-items: center; font-size: 12px; opacity: .55; }
+.mp-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; font-size: 12px; }
+.mp-controls label { display: flex; align-items: center; gap: 6px; }
+.mp-controls input[type=number] { width: 70px; }
+.mp-hit { font-variant-numeric: tabular-nums; color: var(--accent); font-weight: 700; min-width: 92px; }
+.mp-small { padding: 4px 9px; border-radius: 6px; }
