@@ -10,7 +10,20 @@
   <body>
     <div class="app-shell">
       <aside class="sidebar">
-        <div class="brand"><span class="brand-mark">S</span><span>Sound Shelf</span></div>
+        <div class="brand">
+          <svg class="brand-mark" viewBox="0 0 28 28" fill="none" role="img" aria-label="Sound Shelf">
+            <defs>
+              <linearGradient id="brandFrame" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#43474a" /><stop offset="1" stop-color="#232629" /></linearGradient>
+              <linearGradient id="brandGlyph" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e4fd20" /><stop offset=".55" stop-color="#b5f007" /><stop offset="1" stop-color="#82d105" /></linearGradient>
+              <radialGradient id="brandGlow"><stop offset="0" stop-color="#b5f007" stop-opacity=".4" /><stop offset="1" stop-color="#b5f007" stop-opacity="0" /></radialGradient>
+            </defs>
+            <rect x=".5" y=".5" width="27" height="27" rx="7.5" fill="url(#brandFrame)" />
+            <rect x="2.4" y="2.4" width="23.2" height="23.2" rx="5.6" fill="#0b0d0b" />
+            <ellipse cx="14" cy="14" rx="11" ry="9" fill="url(#brandGlow)" />
+            <text x="14" y="20.4" text-anchor="middle" font-size="16.5" font-weight="900" fill="url(#brandGlyph)">S</text>
+          </svg>
+          <span>Sound Shelf</span>
+        </div>
         <nav>
           <button class="nav-item active" data-filter="all"><span>▦</span> 모든 사운드 <b id="allCount">0</b></button>
           <button class="nav-item" data-filter="favorites"><span>★</span> 즐겨찾기 <b id="favoriteCount">0</b></button>
