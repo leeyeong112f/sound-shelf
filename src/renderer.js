@@ -721,7 +721,7 @@ function drawMiniWaveform(id) {
   const combined = normalized.left.map((left, index) => Math.max(left, normalized.right?.[index] || 0));
   const peaks = resamplePeaks(combined, Math.max(44, Math.floor(rect.width / 1.45)));
   const step = rect.width / peaks.length;
-  context.strokeStyle = '#6ce0d5';
+  context.strokeStyle = '#cdcdcd';
   context.lineWidth = Math.max(0.4, Math.min(0.75, step * 0.22));
   context.lineCap = 'round';
   const center = rect.height / 2;
@@ -773,7 +773,7 @@ function normalizeWaveform(waveform) {
 function drawChannel(context, peaks, width, center, amplitude) {
   if (!peaks?.length) return;
   const step = width / peaks.length;
-  context.strokeStyle = '#4fb7ae';
+  context.strokeStyle = '#a7a7a7';
   context.lineWidth = Math.max(0.45, Math.min(0.85, step * 0.24));
   context.lineCap = 'round';
   peaks.forEach((peak, index) => {
@@ -797,7 +797,7 @@ function drawDetailWaveform() {
   const context = detailCanvas.getContext('2d');
   context.scale(ratio, ratio);
   context.clearRect(0, 0, rect.width, rect.height);
-  context.strokeStyle = '#292e31';
+  context.strokeStyle = '#2d2d2d';
   context.lineWidth = 1;
   context.beginPath();
   context.moveTo(0, rect.height / 2);
@@ -3557,7 +3557,7 @@ async function drawMotionWave(slot) {
   if (peaks.length) {
     const bars = resamplePeaks(peaks, Math.max(60, Math.floor(rect.width / 2)));
     const step = rect.width / bars.length;
-    context.fillStyle = '#6ce0d5';
+    context.fillStyle = '#cdcdcd';
     bars.forEach((peak, index) => {
       const height = Math.max(1, peak * rect.height * 0.45);
       context.fillRect(index * step, center - height, Math.max(1, step * 0.6), height * 2);
@@ -3574,7 +3574,7 @@ async function drawMotionWave(slot) {
       for (let t = 0; t <= duration; t += frame) context.fillRect(Math.round((t / duration) * rect.width), rect.height - 6, 1, 6);
     }
     const x = Math.min(rect.width - 1, Math.max(0, (info.hit / duration) * rect.width));
-    context.fillStyle = getComputedStyle(document.body).getPropertyValue('--accent').trim() || '#a8ff3e';
+    context.fillStyle = getComputedStyle(document.body).getPropertyValue('--accent').trim() || '#e7e7e7';
     context.fillRect(x - 1, 0, 2, rect.height);
     context.beginPath();
     context.moveTo(x - 6, 0); context.lineTo(x + 6, 0); context.lineTo(x, 8); context.closePath(); context.fill();
