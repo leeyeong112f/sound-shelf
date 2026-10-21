@@ -32,6 +32,13 @@ const { findPickArgument, loadPickRequest, writePickReply, listPresets, readPres
 const { canonicalYouTubeUrl, parseDownloadProgress, safeFileStem, youtubeImportErrorMessage } = require('./youtube-import');
 const { describeResolveRelink, planResolveRelinks } = require('./resolve-relink');
 const { VIDEO_EXTENSIONS, audioFileNameFor, describeImportReport, isVideoFile, planAudioExtraction } = require('./video-audio');
+const {
+  PackIndex, addEntry: addPackEntry, applyEdits: applyPackEdits, entryOf: packEntryOf, nearestPackFile, publicPackInfo,
+  readPackFile, replaceEntry: replacePackEntry, templateEntry: packTemplateEntry, writePackFile,
+  ROLES: PACK_ROLES, INTENSITIES: PACK_INTENSITIES, SYNC_MEETS: PACK_SYNC_MEETS, writeCatalogue
+} = require('./pack-metadata');
+const { analyzeEnvelope, measurementToEntryFields, parseEbur128 } = require('./audio-analysis');
+const { buildPrompt: buildSuggestPrompt, extractJsonObject, findClaude, sanitizeSuggestion, suggestArgs } = require('./claude-suggest');
 
 const execFileAsync = promisify(execFile);
 const AUDIO_EXTENSIONS = new Set([
@@ -125,6 +132,8 @@ let lastMissingCleanupNotice = 0;
 // 활성화 큐 밖에서 돌기 때문에, 이 사이에 누락 자동 정리가 돌면 방금 옮긴 사운드를 사라진
 // 것으로 본다. 경로를 바꾸는 작업은 whilePathsChange 로 감싸고, 정리는 이 값이 0 일 때만 한다.
 let pathChangesInFlight = 0;
+// 팩이 함께 배포한 sounds.json(용도·싱크·레벨). 파일이 원본이라 볼트 동기화 기록에는 넣지 않는다.
+const packIndex = new PackIndex();
 let lastEditStamps = '';
 // 기동 시 라이브러리 파손을 복구했거나 볼트를 열지 못했을 때 설정 화면에 알리기 위한 상태.
 let libraryRecovery = null;
@@ -944,7 +953,16 @@ function handleMutation(channel, handler) {
 }
 
 function publicSound(sound) {
-  return { ...sound, missing: !fs.existsSync(sound.path) };
+  return { ...sound, missing: !fs.existsSync(sound.path), pack: publicPackInfo(packIndex.lookup(sound.path), activeVaultRoot()) };
+}
+
+async function refreshPackIndex() {
+  try {
+    const roots = db.settings.watchedFolders.map((folder) => path.resolve(folder)).filter((folder) => fs.existsSync(folder));
+    await packIndex.refresh(roots, db.sounds.map((sound) => sound.path).filter(Boolean));
+  } catch (error) {
+    console.error('Pack metadata refresh failed:', error);
+  }
 }
 
 function vaultSnapshot() {
@@ -1490,6 +1508,7 @@ async function rescanWatchedFolders({ reportProgress = true, allowRestore = fals
   db.categories = [...new Set([...categoryGroups.flat(), ...db.sounds.map((sound) => sound.categoryPath)].filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, 'ko'));
   await saveDb();
+  await refreshPackIndex();
   return { ...librarySnapshot(), idChanges: relinkResult.idChanges, relinkResult };
 }
 
@@ -1608,6 +1627,7 @@ async function rescanChangedFolders(folders, { reportProgress = false } = {}) {
   db.categories = [...new Set([...categoryGroups.flat(), ...db.sounds.map((sound) => sound.categoryPath)].filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, 'ko'));
   await saveDb();
+  await refreshPackIndex();
   return { ...librarySnapshot(), idChanges: relinkResult.idChanges, relinkResult, partialScan: true };
 }
 
@@ -2416,6 +2436,158 @@ app.on('before-quit', (event) => {
 });
 
 ipcMain.handle('library:get', () => librarySnapshot());
+
+// 팩 sounds.json 의 설명·용도·피할 곳·팩 태그를 고친다. 팩 파일 자체를 다시 쓰고(들여쓰기 유지),
+// 그 사이 다른 곳에서 바뀐 파일은 덮어쓰지 않는다.
+ipcMain.handle('pack:update', async (_event, { id, edits } = {}) => {
+  const sound = db.sounds.find((candidate) => candidate.id === id);
+  if (!sound) throw new Error('사운드를 찾지 못했습니다.');
+  const entry = packIndex.lookup(sound.path);
+  if (!entry) throw new Error('이 사운드는 팩 sounds.json 에 없습니다.');
+  const read = await readPackFile(entry.packFile);
+  const next = applyPackEdits(read.json, { index: entry.index, file: entry.file }, edits);
+  await writePackFile(entry.packFile, next, { originalText: read.text, expectedMtimeMs: read.mtimeMs });
+  await refreshPackIndex();
+  return publicSound(sound);
+});
+
+ipcMain.handle('pack:vocab', () => ({
+  roles: PACK_ROLES, intensities: PACK_INTENSITIES, syncMeets: PACK_SYNC_MEETS, claudeAvailable: Boolean(findClaude())
+}));
+
+// 폼의 '측정': 들리는 구간·최대 지점·온셋·맞출 지점 제안·레벨. 긴 파일은 앞 2분만 본다.
+async function measureSoundFile(filePath) {
+  const sampleRate = 16000;
+  const { stdout } = await execFileAsync(findMediaTool('ffmpeg'), [
+    '-v', 'error', '-t', '120', '-i', filePath, '-map', '0:a:0', '-ac', '1', '-ar', String(sampleRate), '-f', 'f32le', 'pipe:1'
+  ], { encoding: null, maxBuffer: 1024 * 1024 * 64, timeout: 60000 });
+  const samples = new Float32Array(stdout.buffer, stdout.byteOffset, Math.floor(stdout.length / 4));
+  const analysis = analyzeEnvelope(samples, sampleRate);
+  // 400ms 보다 짧은 소리도 순간 음량이 나오게 뒤에 무음을 덧붙인다.
+  const loudnessRun = await execFileAsync(findMediaTool('ffmpeg'), [
+    '-nostats', '-t', '300', '-i', filePath, '-af',
+    'apad=pad_dur=0.5,ebur128=peak=true:metadata=1,ametadata=print:key=lavfi.r128.M:file=-', '-f', 'null', '-'
+  ], { maxBuffer: 1024 * 1024 * 64, timeout: 120000 }).catch((error) => ({ stdout: error.stdout || '', stderr: error.stderr || '' }));
+  const loudness = parseEbur128(`${loudnessRun.stdout || ''}\n${loudnessRun.stderr || ''}`);
+  return { analysis, loudness, ...measurementToEntryFields({ analysis, loudness }) };
+}
+
+ipcMain.handle('pack:measure', async (_event, { id } = {}) => {
+  const sound = db.sounds.find((candidate) => candidate.id === id);
+  if (!sound || !fs.existsSync(sound.path)) throw new Error('원본 파일을 찾을 수 없습니다.');
+  return measureSoundFile(sound.path);
+});
+
+// 폼의 '자동 추천': 측정 → 파형·스펙트로그램 그림 → claude -p. 결과는 제안일 뿐 저장하지 않는다.
+let suggestRunning = null;
+ipcMain.handle('pack:suggest', async (_event, { id, entry, model = 'sonnet' } = {}) => {
+  const sound = db.sounds.find((candidate) => candidate.id === id);
+  if (!sound || !fs.existsSync(sound.path)) throw new Error('원본 파일을 찾을 수 없습니다.');
+  const claude = findClaude();
+  if (!claude) throw new Error('claude 명령을 찾지 못했습니다. Claude Code 를 설치하고 로그인해 주세요.');
+  if (suggestRunning) throw new Error('다른 자동 추천이 진행 중입니다. 끝난 뒤 다시 눌러 주세요.');
+  const started = Date.now();
+  const workDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sound-shelf-suggest-'));
+  try {
+    const measured = await measureSoundFile(sound.path);
+    const wavePng = path.join(workDir, 'waveform.png');
+    const spectrumPng = path.join(workDir, 'spectrogram.png');
+    await execFileAsync(findMediaTool('ffmpeg'), ['-v', 'error', '-t', '30', '-i', sound.path, '-filter_complex',
+      'aformat=channel_layouts=mono,showwavespic=s=1200x240:colors=white', '-frames:v', '1', wavePng], { timeout: 60000 });
+    await execFileAsync(findMediaTool('ffmpeg'), ['-v', 'error', '-t', '30', '-i', sound.path, '-lavfi',
+      'aformat=channel_layouts=mono,showspectrumpic=s=1200x400:legend=1:scale=log:fscale=log', '-frames:v', '1', spectrumPng], { timeout: 60000 });
+    const root = activeVaultRoot();
+    const relativePath = root ? path.relative(root, sound.path) : sound.fileName;
+    const measurement = {
+      duration: measured.analysis.duration, audible_start: measured.analysis.audibleStart, audible_end: measured.analysis.audibleEnd,
+      peak_at: measured.analysis.peakAt, onsets: measured.analysis.onsets.slice(0, 12),
+      loudest_moment_lufs: measured.loudness.momentaryMax, true_peak_dbtp: measured.loudness.truePeak, channels: sound.channels
+    };
+    const prompt = buildSuggestPrompt({ relativePath, entry, measurement, wavePng, spectrumPng });
+    const run = new Promise((resolve, reject) => {
+      const child = spawn(claude, suggestArgs(prompt, model), { cwd: workDir, env: mediaToolEnvironment(), stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = '';
+      let err = '';
+      const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error('자동 추천이 4분 안에 끝나지 않았습니다.')); }, 240000);
+      child.stdout.on('data', (chunk) => { out += chunk; });
+      child.stderr.on('data', (chunk) => { err += chunk; });
+      child.on('error', (error) => { clearTimeout(timer); reject(error); });
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        if (code === 0) resolve(out);
+        else reject(new Error(`claude 가 실패했습니다 (${code}): ${(err || out).trim().split('\n').slice(-2).join(' ')}`));
+      });
+    });
+    suggestRunning = run;
+    const suggestion = sanitizeSuggestion(extractJsonObject(await run));
+    return { suggestion, measured, model, seconds: Math.round((Date.now() - started) / 1000) };
+  } finally {
+    suggestRunning = null;
+    await fsp.rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+function packRelativeLabel(packFile) {
+  const root = activeVaultRoot();
+  const relative = root ? path.relative(path.resolve(root).normalize('NFC'), packFile.normalize('NFC')) : packFile;
+  return relative.startsWith('..') ? packFile : relative;
+}
+
+// { } 팝업: 그 사운드의 sounds.json 항목 원문. 팩에 없으면 넣을 곳과 새 항목 틀을 준다.
+ipcMain.handle('pack:get-entry', async (_event, { id } = {}) => {
+  const sound = db.sounds.find((candidate) => candidate.id === id);
+  if (!sound) throw new Error('사운드를 찾지 못했습니다.');
+  const indexed = packIndex.lookup(sound.path);
+  if (indexed) {
+    const read = await readPackFile(indexed.packFile);
+    return {
+      mode: 'edit', entry: packEntryOf(read.json, { index: indexed.index, file: indexed.file }),
+      file: indexed.file, index: indexed.index, packFile: packRelativeLabel(indexed.packFile), exists: true, mtimeMs: read.mtimeMs
+    };
+  }
+  const root = activeVaultRoot();
+  if (!root || !fs.existsSync(root)) throw new Error('볼트가 연결돼 있지 않습니다.');
+  const packFile = nearestPackFile(sound.path, root);
+  const exists = fs.existsSync(packFile);
+  const mtimeMs = exists ? (await fsp.stat(packFile)).mtimeMs : 0;
+  const entry = packTemplateEntry(sound, packFile);
+  return { mode: 'add', entry, file: entry.file, index: -1, packFile: packRelativeLabel(packFile), exists, mtimeMs };
+});
+
+// { } 팝업 저장. 수정은 그 항목만 바꾸고, 추가는 가까운 sounds.json(없으면 볼트 루트에 새로) 끝에 붙인다.
+// 팝업을 연 뒤 다른 곳에서 파일이 바뀌었으면 덮어쓰지 않는다.
+ipcMain.handle('pack:save-entry', async (_event, { id, mode, entry, file, index, mtimeMs } = {}) => {
+  const sound = db.sounds.find((candidate) => candidate.id === id);
+  if (!sound) throw new Error('사운드를 찾지 못했습니다.');
+  if (mode === 'edit') {
+    const indexed = packIndex.lookup(sound.path);
+    if (!indexed) throw new Error('이 사운드는 이제 sounds.json 에 없습니다. 다시 열어 주세요.');
+    const read = await readPackFile(indexed.packFile);
+    const next = replacePackEntry(read.json, { index, file }, entry);
+    await writePackFile(indexed.packFile, next, { originalText: read.text, expectedMtimeMs: mtimeMs });
+    await writeCatalogue(indexed.packFile, next).catch((error) => console.error('catalogue.md failed:', error));
+  } else if (mode === 'add') {
+    const root = activeVaultRoot();
+    if (!root) throw new Error('볼트가 연결돼 있지 않습니다.');
+    const packFile = nearestPackFile(sound.path, root);
+    const expected = packTemplateEntry(sound, packFile).file;
+    if (file !== expected) throw new Error('그 사이 넣을 sounds.json 이 바뀌었습니다. 다시 열어 주세요.');
+    let next;
+    if (fs.existsSync(packFile)) {
+      const read = await readPackFile(packFile);
+      next = addPackEntry(read.json, entry, expected);
+      await writePackFile(packFile, next, { originalText: read.text, expectedMtimeMs: mtimeMs || read.mtimeMs });
+    } else {
+      next = addPackEntry(null, entry, expected);
+      await writePackFile(packFile, next, { originalText: '\n', create: true });
+    }
+    await writeCatalogue(packFile, next).catch((error) => console.error('catalogue.md failed:', error));
+  } else {
+    throw new Error('알 수 없는 저장 방식입니다.');
+  }
+  await refreshPackIndex();
+  return publicSound(sound);
+});
 
 ipcMain.handle('update:status', () => currentUpdateStatus());
 
