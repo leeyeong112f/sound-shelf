@@ -37,6 +37,7 @@ const state = {
   selectedIds: new Set(),
   selectionAnchorId: null,
   inspectorOpen: false,
+  packDraft: { id: null, dirty: false },
   playingId: null,
   followSelectionPlayback: false,
   playRangeEnd: null,
@@ -248,7 +249,7 @@ function filteredSounds() {
     // 파일 이름에서 온 제목은 NFD(자모 분리) 한글일 수 있다. 입력창의 NFC 와 그대로 비교하면
     // "샤킨" 같은 검색이 빈 결과가 된다. 양쪽을 같은 형태로 맞춘다.
     const haystack = [sound.title, sound.fileName, sound.category, sound.categoryPath, sound.notes,
-      ...(sound.embeddedTags || []), ...Object.values(sound.embeddedMetadata || {})]
+      ...(sound.embeddedTags || []), ...Object.values(sound.embeddedMetadata || {}), sound.pack?.searchText]
       .join(' ').normalize('NFKC').toLocaleLowerCase('ko');
     const tags = (sound.tags || []).map(normalizedTagKey);
     const matchesText = textTerms.every((term) => haystack.includes(term));
@@ -508,7 +509,7 @@ function renderVirtualRows() {
       <span class="category-pill" title="${escapeHtml(sound.categoryPath || sound.category || '미분류')}">${escapeHtml(sound.category || '미분류')}</span>
       <span class="dim">${formatDuration(sound.duration)}</span><span class="dim">${escapeHtml((sound.codec || sound.fileName.split('.').pop()).toUpperCase())}</span><span class="dim">${sound.channels || '—'}</span>
       <div class="rating-stars">${ratingMarkup(sound)}</div><div class="tags">${tags || '<span class="dim">—</span>'}</div>
-      <div class="row-actions">${state.pick && !sound.missing ? '<button class="pick-button" data-action="pick" title="이 소리를 Motion Studio 에 넣기">넣기</button>' : ''}<button class="favorite ${sound.favorite ? 'on' : ''}" data-action="favorite" title="즐겨찾기">★</button><button class="more-button" data-action="inspect" title="사운드 정보 수정">⋯</button></div>
+      <div class="row-actions">${state.pick && !sound.missing ? '<button class="pick-button" data-action="pick" title="이 소리를 Motion Studio 에 넣기">넣기</button>' : ''}<button class="json-button ${sound.pack ? 'has-entry' : ''}" data-action="pack-json" title="${sound.pack ? 'sounds.json 항목 보기·수정' : 'sounds.json 에 항목 추가'}">{ }</button><button class="favorite ${sound.favorite ? 'on' : ''}" data-action="favorite" title="즐겨찾기">★</button><button class="more-button" data-action="inspect" title="사운드 정보 수정">⋯</button></div>
     </div>`;
   }).join('');
   list.innerHTML = `<div class="virtual-spacer"><div class="virtual-window">${rows}</div></div>`;
@@ -571,9 +572,367 @@ function renderInspector() {
     ['내장 설명', sound.embeddedMetadata?.description || sound.embeddedMetadata?.comment || '—'],
     ['내장 키워드', (sound.embeddedTags || []).join(', ') || '—']
   ].map(([key, value]) => `<div class="fact"><span>${escapeHtml(key)}</span><b>${escapeHtml(value)}</b></div>`).join('');
+  renderPackInfo(sound);
   const seed = [...sound.id.slice(0, 36)].map((character) => parseInt(character, 16));
   $('#waveBars').innerHTML = seed.map(() => '<i></i>').join('');
   [...$('#waveBars').children].forEach((bar, index) => { bar.style.height = `${15 + seed[index] * 4}%`; });
+}
+
+// 팩 sounds.json 에서 읽은 정보. 값은 팩 파일에서 왔으므로 모두 escapeHtml 을 거친다.
+function renderPackInfo(sound) {
+  const pack = sound.pack;
+  $('#packInfo').classList.toggle('hidden', !pack);
+  if (!pack) return;
+  $('#packInfoSource').textContent = `${pack.packName} · ${pack.packFile}`;
+  const seconds = (value) => (value === null || value === undefined ? '' : `${Number(value).toFixed(3).replace(/\.?0+$/, '')}초`);
+  const rows = [
+    ['카테고리', [pack.category, ...Object.values(pack.variant || {})].filter(Boolean).join(' · ')],
+    ['성격', pack.character],
+    ['맞출 지점', pack.sync ? `${seconds(pack.sync.at)}${pack.sync.meets ? ` · ${pack.sync.meets}` : ''}` : ''],
+    ['맞추는 법', pack.sync?.how],
+    ['레벨', pack.lufs !== null ? `${pack.lufs} LUFS${pack.truePeak !== null ? ` · 피크 ${pack.truePeak} dBTP` : ''}` : ''],
+    ['나레이션 밑', pack.underVoiceoverDb !== null ? `${pack.underVoiceoverDb} dB` : ''],
+    ['BPM · 조성', [pack.bpm, pack.key].filter((value) => value !== null && value !== '').join(' · ')],
+    ['템포 · 에너지', [pack.tempo, pack.energy].filter(Boolean).join(' · ')],
+    ['분위기', (pack.moods || []).join(', ')],
+    ['스타일', [...(pack.styles || []), ...(pack.genres || [])].join(', ')],
+    ['루프', pack.loopable === null ? '' : (pack.loopable ? '가능' : '아님')],
+    ['맞는 길이', pack.fitsSeconds ? `${pack.fitsSeconds[0]}–${pack.fitsSeconds[1]}초` : ''],
+    ['속도 조절', pack.rateRange ? `${pack.rateRange[0]}–${pack.rateRange[1]}배` : ''],
+    ['함께 쓰기', (pack.pairsWith || []).map((pair) => `${pair.category}: ${pair.how}`).join('\n')],
+    ['라이선스', pack.license],
+    ...Object.entries(pack.extra || {}).map(([key, value]) => [key, typeof value === 'string' ? value : JSON.stringify(value)])
+  ].filter(([, value]) => value !== undefined && value !== null && String(value).trim());
+  $('#packFacts').innerHTML = rows
+    .map(([key, value]) => `<div class="fact"><span>${escapeHtml(key)}</span><b>${escapeHtml(String(value))}</b></div>`).join('');
+  // 고치는 중인 같은 사운드면 입력칸을 덮어쓰지 않는다 (목록 갱신이 와도 쓰던 글이 사라지지 않게).
+  if (state.packDraft.id === sound.id && state.packDraft.dirty) return;
+  state.packDraft = { id: sound.id, dirty: false };
+  $('#packDescription').value = pack.description || '';
+  $('#packUseFor').value = (pack.useFor || []).join('\n');
+  $('#packAvoidFor').value = (pack.avoidFor || []).join('\n');
+  $('#packTags').value = (pack.tags || []).join(', ');
+  $('#packSave').disabled = true;
+  $('#packRevert').disabled = true;
+}
+
+function markPackDraftDirty() {
+  const sound = selectedSound();
+  if (!sound?.pack) return;
+  state.packDraft = { id: sound.id, dirty: true };
+  $('#packSave').disabled = false;
+  $('#packRevert').disabled = false;
+}
+
+async function savePackDraft() {
+  const sound = selectedSound();
+  if (!sound?.pack || state.packDraft.id !== sound.id) return;
+  const lines = (value) => value.split('\n').map((line) => line.trim()).filter(Boolean);
+  $('#packSave').disabled = true;
+  try {
+    const updated = await window.soundLibrary.updatePackInfo({
+      id: sound.id,
+      edits: {
+        description: $('#packDescription').value,
+        useFor: lines($('#packUseFor').value),
+        avoidFor: lines($('#packAvoidFor').value),
+        tags: $('#packTags').value.split(',').map((tag) => tag.trim()).filter(Boolean)
+      }
+    });
+    Object.assign(sound, { pack: updated.pack });
+    state.packDraft = { id: sound.id, dirty: false };
+    showToast('sounds.json 에 저장했습니다.', 2500);
+    render();
+  } catch (error) {
+    $('#packSave').disabled = false;
+    showToast(`팩 정보를 저장하지 못했습니다: ${ipcErrorMessage(error)}`, 6000);
+  }
+}
+
+// { } 팝업: 사운드의 sounds.json 항목을 입력칸으로 고친다. 원문 JSON 은 '고급' 탭.
+// 팩에 없는 사운드는 새 항목 틀로 열어 가까운 sounds.json 에 추가한다.
+const packJson = { sound: null, meta: null, original: '', draft: null, tab: 'form', vocab: null, suggested: new Set(), measured: null, busy: false };
+const PACK_CHIP_FIELDS = ['use_for', 'avoid_for', 'aliases', 'tags'];
+
+async function packVocab() {
+  if (!packJson.vocab) packJson.vocab = await window.soundLibrary.getPackVocab();
+  return packJson.vocab;
+}
+
+function setPackStatus(message = '', isError = false) {
+  $('#packJsonStatus').classList.toggle('error', isError);
+  $('#packJsonStatus').textContent = message;
+}
+
+function setPackNote(message = '', isError = false) {
+  $('#pfSuggestNote').classList.toggle('hidden', !message);
+  $('#pfSuggestNote').classList.toggle('error', isError);
+  $('#pfSuggestNote').textContent = message;
+}
+
+function packDirty() {
+  if (packJson.tab === 'raw') return $('#packJsonText').value !== JSON.stringify(packJson.draft, null, 2) || JSON.stringify(packJson.draft) !== packJson.original;
+  return JSON.stringify(packJson.draft) !== packJson.original;
+}
+
+function refreshPackDirty() {
+  if (packJson.tab === 'form') setPackStatus(packDirty() ? '저장하지 않은 변경이 있습니다.' : '');
+  $('#packJsonSave').disabled = packJson.busy;
+}
+
+// 빈 값은 원래 없던 필드를 새로 만들지 않는다 (팩 파일이 쓸데없이 커지지 않게).
+function setDraftField(key, value) {
+  const empty = value === '' || value === null || value === undefined || (Array.isArray(value) && !value.length);
+  const original = JSON.parse(packJson.original);
+  if (empty && !(key in original)) delete packJson.draft[key];
+  else packJson.draft[key] = value;
+  refreshPackDirty();
+}
+
+function renderChipInput(container) {
+  const field = container.dataset.field;
+  const values = Array.isArray(packJson.draft[field]) ? packJson.draft[field] : [];
+  container.innerHTML = values.map((value, index) => `<span class="chip ${packJson.suggested.has(`${field}:${value}`) ? 'suggested' : ''}">${escapeHtml(value)}<button type="button" data-remove="${index}" aria-label="빼기">×</button></span>`).join('')
+    + `<input type="text" placeholder="${escapeHtml(values.length ? '' : container.dataset.placeholder || '')}" />`;
+}
+
+function addChipValues(container, text) {
+  const field = container.dataset.field;
+  const additions = String(text || '').split(/[,\n]/).map((value) => value.trim()).filter(Boolean);
+  if (!additions.length) return false;
+  const values = Array.isArray(packJson.draft[field]) ? [...packJson.draft[field]] : [];
+  for (const value of additions) if (!values.includes(value)) values.push(value);
+  setDraftField(field, values);
+  renderChipInput(container);
+  container.querySelector('input').focus();
+  return true;
+}
+
+function renderSegmented(container, options, value, suggestedKey) {
+  container.innerHTML = options.map((option) => `<button type="button" data-value="${escapeHtml(option.id)}" class="${option.id === value ? 'on' : ''} ${option.id === value && packJson.suggested.has(suggestedKey) ? 'suggested' : ''}">${escapeHtml(option.label)}</button>`).join('');
+}
+
+function packDuration() {
+  return Number(packJson.draft?.duration) || Number(packJson.measured?.analysis?.duration) || Number(packJson.sound?.duration) || 0;
+}
+
+function drawPackWave() {
+  const canvas = $('#pfWave');
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height || !packJson.sound) return;
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = Math.round(rect.width * ratio);
+  canvas.height = Math.round(rect.height * ratio);
+  const context = canvas.getContext('2d');
+  context.scale(ratio, ratio);
+  context.clearRect(0, 0, rect.width, rect.height);
+  const waveform = state.waveforms.get(packJson.sound.id);
+  if (waveform?.left?.length) {
+    const normalized = normalizeWaveform(waveform);
+    const combined = normalized.left.map((left, index) => Math.max(left, normalized.right?.[index] || 0));
+    const peaks = resamplePeaks(combined, Math.max(60, Math.floor(rect.width / 2)));
+    const step = rect.width / peaks.length;
+    context.fillStyle = '#9a9a9a';
+    peaks.forEach((peak, index) => {
+      const height = Math.max(1, peak * rect.height * 0.45);
+      context.fillRect(index * step, rect.height / 2 - height, Math.max(1, step - 0.6), height * 2);
+    });
+  }
+  const duration = packDuration();
+  const marker = (at, color, width) => {
+    if (!duration || at === null || at === undefined || !Number.isFinite(Number(at))) return;
+    const x = Math.min(rect.width - 1, Math.max(0, (Number(at) / duration) * rect.width));
+    context.fillStyle = color;
+    context.fillRect(x - width / 2, 0, width, rect.height);
+  };
+  marker(packJson.measured?.analysis?.peakAt, '#ffffff33', 1);
+  marker(packJson.draft?.sync?.at, '#c9a5ff', 2);
+}
+
+function renderPackForm() {
+  const draft = packJson.draft;
+  const vocab = packJson.vocab || { roles: [], intensities: [] };
+  if (document.activeElement !== $('#pfDescription')) $('#pfDescription').value = draft.description || '';
+  $('#pfDescription').classList.toggle('suggested', packJson.suggested.has('description'));
+  document.querySelectorAll('#packFormPane .chip-input').forEach(renderChipInput);
+  renderSegmented($('#pfRole'), vocab.roles, draft.role || '', 'role');
+  renderSegmented($('#pfIntensity'), vocab.intensities.map((id) => ({ id, label: { soft: '약하게', medium: '보통', hard: '세게' }[id] || id })), draft.intensity || draft.variant?.intensity || '', 'intensity');
+  const at = draft.sync?.at;
+  $('#pfSyncLabel').textContent = at === undefined || at === null ? '아직 안 정함' : `${Number(at).toFixed(3)}초${packJson.suggested.has('sync') ? ' (자동)' : ''}`;
+  $('#pfSyncMeets').value = draft.sync?.meets || 'instant';
+  const m = packJson.measured;
+  $('#pfMeasure').textContent = m
+    ? [`길이 ${m.analysis.duration}초`, `소리 ${m.analysis.audibleStart}–${m.analysis.audibleEnd}초`, `가장 큰 순간 ${m.analysis.peakAt}초`,
+      m.loudness.momentaryMax !== null ? `${m.loudness.momentaryMax} LUFS(400ms)` : '', m.loudness.truePeak !== null ? `피크 ${m.loudness.truePeak} dBTP` : ''].filter(Boolean).join(' · ')
+    : (draft.level?.lufs !== undefined ? `팩에 적힌 값: ${draft.level.lufs} LUFS · 길이 ${draft.duration ?? '—'}초` : '측정 전');
+  requestAnimationFrame(drawPackWave);
+  refreshPackDirty();
+}
+
+// 측정값은 비어 있는 필드만 채운다 — 팩이 이미 적어 둔 레벨·타이밍(예: wyzowl 의 150ms 기준)을 덮지 않는다.
+async function measurePackSound({ fill = true } = {}) {
+  const sound = packJson.sound;
+  try {
+    const measured = await window.soundLibrary.measurePackSound(sound.id);
+    if (packJson.sound !== sound) return;
+    packJson.measured = measured;
+    if (fill) {
+      const draft = packJson.draft;
+      if (draft.duration === undefined) setDraftField('duration', measured.fields.duration);
+      if (draft.level === undefined && measured.fields.level) setDraftField('level', measured.fields.level);
+      if (draft.timing === undefined && measured.fields.timing) setDraftField('timing', measured.fields.timing);
+      if (draft.sync === undefined && measured.sync) { setDraftField('sync', { ...measured.sync }); packJson.suggested.add('sync'); }
+    }
+    renderPackForm();
+  } catch (error) {
+    $('#pfMeasure').textContent = `측정하지 못했습니다: ${ipcErrorMessage(error)}`;
+  }
+}
+
+async function openPackJsonDialog(sound) {
+  try {
+    const [meta] = await Promise.all([window.soundLibrary.getPackEntry(sound.id), packVocab()]);
+    Object.assign(packJson, { sound, meta, original: JSON.stringify(meta.entry), draft: structuredClone(meta.entry), tab: 'form', suggested: new Set(), measured: null, busy: false });
+    $('#packJsonTitle').textContent = meta.mode === 'edit' ? `사운드 정보 · ${sound.title}` : `사운드 정보 추가 · ${sound.title}`;
+    $('#packJsonSubtitle').textContent = meta.mode === 'edit'
+      ? `${meta.packFile} 에 저장됩니다.`
+      : `${meta.packFile} 에 ${meta.exists ? '추가합니다' : '새로 만들어 추가합니다'}. 설명·쓸 곳·피할 곳을 채우면 AI 가 찾고 고르기 쉬워집니다.`;
+    $('#packJsonSave').textContent = meta.mode === 'edit' ? '저장' : 'sounds.json 에 추가';
+    $('#pfSuggest').disabled = !packJson.vocab.claudeAvailable;
+    $('#pfSuggest').title = packJson.vocab.claudeAvailable ? 'claude -p 로 설명·쓸 곳·피할 곳·태그를 제안받습니다 (저장 전 확인)' : 'claude 명령을 찾지 못했습니다';
+    setPackNote('');
+    setPackStatus('');
+    switchPackTab('form', { force: true });
+    $('#packJsonDialog').classList.remove('hidden');
+    renderPackForm();
+    $('#pfDescription').focus();
+    ensureWaveform(sound).then(() => requestAnimationFrame(drawPackWave)).catch(() => {});
+    measurePackSound({ fill: meta.mode === 'add' || packJson.draft.sync === undefined });
+  } catch (error) {
+    showToast(`사운드 정보를 열지 못했습니다: ${ipcErrorMessage(error)}`, 6000);
+  }
+}
+
+function switchPackTab(tab, { force = false } = {}) {
+  if (!force && tab === packJson.tab) return true;
+  if (tab === 'form' && packJson.tab === 'raw' && !force) {
+    try {
+      const value = JSON.parse($('#packJsonText').value);
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('항목은 { } 로 감싼 객체여야 합니다.');
+      packJson.draft = value;
+    } catch (error) {
+      setPackStatus(`JSON 오류라 입력 화면으로 돌아갈 수 없습니다: ${error.message}`, true);
+      return false;
+    }
+  }
+  packJson.tab = tab;
+  document.querySelectorAll('.pack-tab').forEach((button) => button.classList.toggle('on', button.dataset.packTab === tab));
+  $('#packFormPane').classList.toggle('hidden', tab !== 'form');
+  $('#packJsonText').classList.toggle('hidden', tab !== 'raw');
+  $('#packJsonFormat').classList.toggle('hidden', tab !== 'raw');
+  if (tab === 'raw') {
+    $('#packJsonText').value = JSON.stringify(packJson.draft, null, 2);
+    packRawCheck();
+  } else {
+    renderPackForm();
+  }
+  return true;
+}
+
+function packRawCheck() {
+  try {
+    const value = JSON.parse($('#packJsonText').value);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('항목은 { } 로 감싼 객체여야 합니다.');
+    setPackStatus(packDirty() ? '저장하지 않은 변경이 있습니다.' : '');
+    $('#packJsonSave').disabled = packJson.busy;
+    return value;
+  } catch (error) {
+    setPackStatus(`JSON 오류: ${error.message}`, true);
+    $('#packJsonSave').disabled = true;
+    return null;
+  }
+}
+
+function closePackJsonDialog({ force = false } = {}) {
+  if (!force && packJson.sound && packDirty() && !window.confirm('저장하지 않은 변경이 있습니다. 닫을까요?')) return;
+  $('#packJsonDialog').classList.add('hidden');
+  packJson.sound = null;
+  packJson.meta = null;
+}
+
+async function suggestPackEntry() {
+  const sound = packJson.sound;
+  if (!sound || packJson.busy) return;
+  if (packJson.tab === 'raw' && !switchPackTab('form')) return;
+  const model = $('#pfModel').value;
+  packJson.busy = true;
+  $('#pfSuggest').disabled = true;
+  setPackNote(`자동 추천 받는 중… 파형·스펙트로그램과 측정값을 Claude 에게 보여 주고 있습니다 (${model === 'haiku' ? '약 25초' : '약 50초'}).`);
+  try {
+    const { suggestion, measured, seconds } = await window.soundLibrary.suggestPackEntry({ id: sound.id, entry: packJson.draft, model });
+    if (packJson.sound !== sound) return;
+    packJson.measured = measured;
+    const draft = packJson.draft;
+    let filled = 0;
+    if (!String(draft.description || '').trim() && suggestion.description) {
+      setDraftField('description', suggestion.description);
+      $('#pfDescription').value = suggestion.description; // 칸에 커서가 있어도 추천 설명은 보이게
+      packJson.suggested.add('description');
+      filled += 1;
+    }
+    for (const field of PACK_CHIP_FIELDS) {
+      const current = Array.isArray(draft[field]) ? [...draft[field]] : [];
+      const fresh = (suggestion[field] || []).filter((value) => !current.includes(value));
+      if (!fresh.length) continue;
+      fresh.forEach((value) => packJson.suggested.add(`${field}:${value}`));
+      setDraftField(field, [...current, ...fresh]);
+      filled += fresh.length;
+    }
+    if (!draft.role && suggestion.role) { setDraftField('role', suggestion.role); packJson.suggested.add('role'); filled += 1; }
+    if (!draft.intensity && !draft.variant?.intensity && suggestion.intensity) { setDraftField('intensity', suggestion.intensity); packJson.suggested.add('intensity'); filled += 1; }
+    if (!draft.character && suggestion.character) { setDraftField('character', suggestion.character); filled += 1; }
+    if (draft.sync === undefined && measured?.sync) { setDraftField('sync', { ...measured.sync }); packJson.suggested.add('sync'); }
+    const keptDescription = suggestion.description && draft.description !== suggestion.description ? `\n추천 설명(적용 안 함, 이미 설명이 있음): ${suggestion.description}` : '';
+    setPackNote([
+      `추천 ${filled}개를 채웠습니다 (${seconds}초${suggestion.confidence !== null ? `, 확신 ${Math.round(suggestion.confidence * 100)}%` : ''}). 보라색 테두리가 추천으로 채운 값입니다 — 확인하고 틀린 건 × 로 빼세요.`,
+      suggestion.uncertain ? `확신 없는 부분: ${suggestion.uncertain}` : '',
+      keptDescription.trim()
+    ].filter(Boolean).join('\n'));
+    renderPackForm();
+  } catch (error) {
+    setPackNote(`자동 추천을 받지 못했습니다: ${ipcErrorMessage(error)}`, true);
+  } finally {
+    packJson.busy = false;
+    $('#pfSuggest').disabled = !packJson.vocab?.claudeAvailable;
+    refreshPackDirty();
+  }
+}
+
+async function savePackJsonDialog() {
+  if (!packJson.sound || packJson.busy) return;
+  if (packJson.tab === 'raw') {
+    const value = packRawCheck();
+    if (!value) return;
+    packJson.draft = value;
+  } else {
+    const pending = [...document.querySelectorAll('#packFormPane .chip-input input')].filter((input) => input.value.trim());
+    pending.forEach((input) => addChipValues(input.closest('.chip-input'), input.value));
+  }
+  const { sound, meta } = packJson;
+  $('#packJsonSave').disabled = true;
+  try {
+    const updated = await window.soundLibrary.savePackEntry({
+      id: sound.id, mode: meta.mode, entry: packJson.draft, file: meta.file, index: meta.index, mtimeMs: meta.mtimeMs
+    });
+    Object.assign(sound, { pack: updated.pack });
+    state.packDraft = { id: null, dirty: false };
+    closePackJsonDialog({ force: true });
+    showToast(meta.mode === 'edit' ? 'sounds.json 에 저장했습니다.' : 'sounds.json 에 추가했습니다.', 2500);
+    render();
+  } catch (error) {
+    setPackStatus(`저장하지 못했습니다:\n${ipcErrorMessage(error)}`, true);
+    $('#packJsonSave').disabled = false;
+  }
 }
 
 function renderDetailPanel() {
@@ -2077,6 +2436,11 @@ list.addEventListener('click', async (event) => {
     render();
     return;
   }
+  if (action === 'pack-json') {
+    render();
+    openPackJsonDialog(sound);
+    return;
+  }
   if (event.shiftKey && state.selectionAnchorId) {
     const start = state.visibleSounds.findIndex((item) => item.id === state.selectionAnchorId);
     const end = state.visibleSounds.findIndex((item) => item.id === sound.id);
@@ -2921,6 +3285,114 @@ $('#editTitle').addEventListener('input', (event) => updateSelected({ title: eve
 $('#editCategory').addEventListener('input', (event) => updateSelected({ category: event.target.value }));
 $('#editTags').addEventListener('input', (event) => updateSelected({ tags: event.target.value.split(',').map((tag) => tag.trim()).filter(Boolean) }));
 $('#editNotes').addEventListener('input', (event) => updateSelected({ notes: event.target.value }));
+for (const selector of ['#packDescription', '#packUseFor', '#packAvoidFor', '#packTags']) {
+  $(selector).addEventListener('input', markPackDraftDirty);
+}
+$('#packSave').addEventListener('click', savePackDraft);
+$('#packJsonText').addEventListener('input', packRawCheck);
+$('#packJsonFormat').addEventListener('click', () => {
+  const value = packRawCheck();
+  if (!value) return;
+  $('#packJsonText').value = JSON.stringify(value, null, 2);
+  packRawCheck();
+});
+document.querySelectorAll('.pack-tab').forEach((button) => button.addEventListener('click', () => switchPackTab(button.dataset.packTab)));
+$('#pfDescription').addEventListener('input', (event) => {
+  packJson.suggested.delete('description');
+  event.target.classList.remove('suggested');
+  setDraftField('description', event.target.value.trim() ? event.target.value : '');
+});
+$('#packFormPane').addEventListener('click', (event) => {
+  const remove = event.target.closest('[data-remove]');
+  const chips = event.target.closest('.chip-input');
+  if (remove && chips) {
+    const field = chips.dataset.field;
+    const values = [...(packJson.draft[field] || [])];
+    const [removed] = values.splice(Number(remove.dataset.remove), 1);
+    packJson.suggested.delete(`${field}:${removed}`);
+    setDraftField(field, values);
+    renderChipInput(chips);
+    chips.querySelector('input').focus();
+    return;
+  }
+  if (chips && event.target === chips) chips.querySelector('input').focus();
+  const segment = event.target.closest('.segmented button');
+  if (segment) {
+    const key = segment.parentElement.id === 'pfRole' ? 'role' : 'intensity';
+    const value = segment.classList.contains('on') ? '' : segment.dataset.value;
+    packJson.suggested.delete(key);
+    setDraftField(key, value);
+    renderPackForm();
+  }
+});
+$('#packFormPane').addEventListener('keydown', (event) => {
+  const input = event.target.closest('.chip-input input');
+  if (!input) return;
+  if ((event.key === 'Enter' || event.key === ',') && !event.isComposing) {
+    event.preventDefault();
+    if (addChipValues(input.closest('.chip-input'), input.value)) input.value = '';
+  } else if (event.key === 'Backspace' && !input.value) {
+    const chips = input.closest('.chip-input');
+    const values = [...(packJson.draft[chips.dataset.field] || [])];
+    if (!values.length) return;
+    values.pop();
+    setDraftField(chips.dataset.field, values);
+    renderChipInput(chips);
+    chips.querySelector('input').focus();
+  }
+});
+$('#packFormPane').addEventListener('focusout', (event) => {
+  const input = event.target.closest('.chip-input input');
+  if (input && input.value.trim() && addChipValues(input.closest('.chip-input'), input.value)) input.value = '';
+});
+$('#pfWave').addEventListener('click', (event) => {
+  const duration = packDuration();
+  if (!duration) return;
+  const rect = event.currentTarget.getBoundingClientRect();
+  const at = Math.round(Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)) * duration * 1000) / 1000;
+  packJson.suggested.delete('sync');
+  setDraftField('sync', { ...(packJson.draft.sync || {}), at, meets: $('#pfSyncMeets').value });
+  renderPackForm();
+});
+$('#pfSyncMeets').addEventListener('change', (event) => {
+  if (!packJson.draft?.sync) return;
+  setDraftField('sync', { ...packJson.draft.sync, meets: event.target.value });
+});
+$('#pfSyncAuto').addEventListener('click', async () => {
+  if (!packJson.measured) await measurePackSound({ fill: false });
+  if (!packJson.measured?.sync) return;
+  setDraftField('sync', { ...(packJson.draft.sync || {}), ...packJson.measured.sync });
+  packJson.suggested.add('sync');
+  renderPackForm();
+});
+$('#pfSyncClear').addEventListener('click', () => {
+  packJson.suggested.delete('sync');
+  setDraftField('sync', undefined);
+  renderPackForm();
+});
+$('#pfMeasureBtn').addEventListener('click', () => { $('#pfMeasure').textContent = '측정 중…'; measurePackSound({ fill: true }); });
+$('#pfSuggest').addEventListener('click', suggestPackEntry);
+$('#packJsonSave').addEventListener('click', savePackJsonDialog);
+$('#packJsonCancel').addEventListener('click', () => closePackJsonDialog());
+$('#packJsonClose').addEventListener('click', () => closePackJsonDialog());
+$('#packJsonDialog').addEventListener('keydown', (event) => {
+  // 팝업 안 키 입력이 목록 단축키(Space 재생, 숫자 별점 등)로 새지 않게 한다.
+  event.stopPropagation();
+  if (event.key === 'Escape') { event.preventDefault(); closePackJsonDialog(); }
+  if (event.key === 's' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); savePackJsonDialog(); }
+  if (event.key === 'Tab' && event.target.id === 'packJsonText' && !event.shiftKey) {
+    event.preventDefault();
+    const field = event.target;
+    const { selectionStart: start, selectionEnd: end } = field;
+    field.setRangeText('  ', start, end, 'end');
+    packRawCheck();
+  }
+});
+window.addEventListener('resize', () => { if (packJson.sound) drawPackWave(); });
+$('#packRevert').addEventListener('click', () => {
+  state.packDraft = { id: null, dirty: false };
+  render();
+});
 $('#inspectorRating').addEventListener('click', async (event) => {
   const button = event.target.closest('[data-rating]');
   const sound = selectedSound();

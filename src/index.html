@@ -167,6 +167,15 @@
         <label>별점<div id="inspectorRating" class="inspector-rating"></div></label>
         <label>메모<textarea id="editNotes" rows="4"></textarea></label>
         <div class="facts" id="soundFacts"></div>
+        <section id="packInfo" class="pack-info hidden">
+          <div class="pack-info-head"><span>팩 정보</span><small id="packInfoSource"></small></div>
+          <div class="facts" id="packFacts"></div>
+          <label>설명<textarea id="packDescription" rows="2"></textarea></label>
+          <label>쓸 곳 (한 줄에 하나)<textarea id="packUseFor" rows="3"></textarea></label>
+          <label>피할 곳 (한 줄에 하나)<textarea id="packAvoidFor" rows="2"></textarea></label>
+          <label>팩 태그<input id="packTags" placeholder="쉼표로 구분" /></label>
+          <div class="pack-info-actions"><button id="packRevert" class="subtle-button" type="button" disabled>되돌리기</button><button id="packSave" class="primary-button" type="button" disabled>sounds.json 에 저장</button></div>
+        </section>
         <div class="inspector-actions">
           <button id="revealBtn" class="subtle-button">Finder에서 보기</button>
           <button id="moveBtn" class="subtle-button">다른 폴더로 이동…</button>
@@ -180,6 +189,51 @@
         <header class="mp-head"><h2>Motion 프리셋</h2><span id="mpMode" class="mp-mode"></span><button type="button" id="mpClose" class="subtle-button">닫기</button></header>
         <div class="mp-body"><aside id="mpList" class="mp-list"></aside><section id="mpEditor" class="mp-editor"></section></div>
       </div>
+    </div>
+    <div id="packJsonDialog" class="dialog-backdrop hidden">
+      <section class="pack-json-dialog" role="dialog" aria-labelledby="packJsonTitle">
+        <header class="pack-json-head">
+          <div><h2 id="packJsonTitle">사운드 정보 (sounds.json)</h2><p id="packJsonSubtitle"></p></div>
+          <button id="packJsonClose" type="button" aria-label="닫기">×</button>
+        </header>
+        <div class="pack-tabs">
+          <button type="button" class="pack-tab on" data-pack-tab="form">입력</button>
+          <button type="button" class="pack-tab" data-pack-tab="raw">원문 JSON (고급)</button>
+          <span class="pack-json-spacer"></span>
+          <select id="pfModel" title="자동 추천에 쓸 모델"><option value="sonnet">정확하게 (약 50초)</option><option value="haiku">빠르게 (약 25초)</option></select>
+          <button type="button" id="pfSuggest" class="subtle-button">✨ 자동 추천</button>
+        </div>
+        <div id="packFormPane" class="pack-form">
+          <div id="pfSuggestNote" class="pf-note hidden"></div>
+          <label class="pf-field"><span>한 줄 설명 <small>무슨 소리인지 짧게</small></span><textarea id="pfDescription" rows="2" placeholder="예: 짧고 통통 튀는 고음 뽁 소리"></textarea></label>
+          <div class="pf-field"><span>쓸 곳 <small>장면 + 순간. Enter 로 추가</small></span><div class="chip-input" data-field="use_for" data-placeholder="예: 자막이 톡 튀어나올 때"></div></div>
+          <div class="pf-field"><span>피할 곳 <small>이런 데는 쓰지 않기</small></span><div class="chip-input" data-field="avoid_for" data-placeholder="예: 진지한 인터뷰 중"></div></div>
+          <div class="pf-grid">
+            <div class="pf-field"><span>부르는 말 <small>의성어·별명</small></span><div class="chip-input" data-field="aliases" data-placeholder="예: 뽁, 뿅"></div></div>
+            <div class="pf-field"><span>태그</span><div class="chip-input" data-field="tags" data-placeholder="예: pop, 예능"></div></div>
+          </div>
+          <div class="pf-grid">
+            <div class="pf-field"><span>역할</span><div id="pfRole" class="segmented"></div></div>
+            <div class="pf-field"><span>세기</span><div id="pfIntensity" class="segmented"></div></div>
+          </div>
+          <div class="pf-field"><span>맞출 지점 <small>파형을 눌러 소리의 '딱' 순간을 고르세요 — 편집할 때 이 순간을 컷에 맞춥니다</small></span>
+            <div class="pf-wave-wrap"><canvas id="pfWave"></canvas></div>
+            <div class="pf-sync-row"><b id="pfSyncLabel">—</b>
+              <select id="pfSyncMeets" title="이 지점이 무엇인지"><option value="instant">딱 맞는 순간</option><option value="action-start">동작 시작</option><option value="move-peak">움직임 한가운데</option><option value="arrival">도착</option><option value="release">놓는 순간</option></select>
+              <button type="button" id="pfSyncAuto" class="subtle-button">자동</button><button type="button" id="pfSyncClear" class="subtle-button">지우기</button>
+            </div>
+          </div>
+          <div class="pf-field"><span>측정값 <small>자동</small></span><div class="pf-measure-row"><div id="pfMeasure" class="pf-measure">—</div><button type="button" id="pfMeasureBtn" class="subtle-button">다시 측정</button></div></div>
+        </div>
+        <textarea id="packJsonText" class="hidden" spellcheck="false" autocomplete="off"></textarea>
+        <div id="packJsonStatus" class="pack-json-status"></div>
+        <div class="dialog-actions">
+          <button type="button" id="packJsonFormat" class="subtle-button hidden">서식 정리</button>
+          <span class="pack-json-spacer"></span>
+          <button type="button" id="packJsonCancel" class="subtle-button">취소</button>
+          <button type="button" id="packJsonSave" class="primary-button">저장</button>
+        </div>
+      </section>
     </div>
     <div id="inputDialog" class="dialog-backdrop hidden">
       <form id="inputDialogForm" class="input-dialog">
