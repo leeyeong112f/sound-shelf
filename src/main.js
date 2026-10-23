@@ -2492,8 +2492,10 @@ ipcMain.handle('pack:suggest', async (_event, { id, entry, model = 'sonnet' } = 
     const measured = await measureSoundFile(sound.path);
     const wavePng = path.join(workDir, 'waveform.png');
     const spectrumPng = path.join(workDir, 'spectrogram.png');
+    // showwavespic 은 배경이 투명이라 흰 파형이 흰 바탕에 묻혀 Claude 에게 빈 그림으로 보인다 — 검은 바탕에 얹는다.
     await execFileAsync(findMediaTool('ffmpeg'), ['-v', 'error', '-t', '30', '-i', sound.path, '-filter_complex',
-      'aformat=channel_layouts=mono,showwavespic=s=1200x240:colors=white', '-frames:v', '1', wavePng], { timeout: 60000 });
+      'aformat=channel_layouts=mono,showwavespic=s=1200x240:colors=white[wave];color=c=black:s=1200x240[bg];[bg][wave]overlay=format=auto,format=rgb24',
+      '-frames:v', '1', wavePng], { timeout: 60000 });
     await execFileAsync(findMediaTool('ffmpeg'), ['-v', 'error', '-t', '30', '-i', sound.path, '-lavfi',
       'aformat=channel_layouts=mono,showspectrumpic=s=1200x400:legend=1:scale=log:fscale=log', '-frames:v', '1', spectrumPng], { timeout: 60000 });
     const root = activeVaultRoot();
