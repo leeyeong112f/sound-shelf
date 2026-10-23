@@ -39,6 +39,7 @@ const {
 } = require('./pack-metadata');
 const { analyzeEnvelope, measurementToEntryFields, parseEbur128 } = require('./audio-analysis');
 const { buildPrompt: buildSuggestPrompt, extractJsonObject, findClaude, sanitizeSuggestion, suggestArgs } = require('./claude-suggest');
+const { describeCouncil, runCouncil } = require('./suggest-council');
 
 const execFileAsync = promisify(execFile);
 const AUDIO_EXTENSIONS = new Set([
@@ -2478,22 +2479,45 @@ ipcMain.handle('pack:measure', async (_event, { id } = {}) => {
   return measureSoundFile(sound.path);
 });
 
+// claude -p 한 번. 출력 텍스트를 돌려주고, 시간 안에 끝나지 않으면 끈다.
+function askClaude(claude, prompt, model, cwd, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(claude, suggestArgs(prompt, model), { cwd, env: mediaToolEnvironment(), stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(`자동 추천이 ${Math.round(timeoutMs / 60000)}분 안에 끝나지 않았습니다.`)); }, timeoutMs);
+    child.stdout.on('data', (chunk) => { out += chunk; });
+    child.stderr.on('data', (chunk) => { err += chunk; });
+    child.on('error', (error) => { clearTimeout(timer); reject(error); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(out);
+      else reject(new Error(`claude 가 실패했습니다 (${code}): ${(err || out).trim().split('\n').slice(-2).join(' ')}`));
+    });
+  });
+}
+
 // 폼의 '자동 추천': 측정 → 파형·스펙트로그램 그림 → claude -p. 결과는 제안일 뿐 저장하지 않는다.
-let suggestRunning = null;
+// model 이 'council' 이면 여러 모델이 추천·서로 평가한 뒤 의장이 합친다(suggest-council). 단계마다 진행 문구를 보낸다.
+let suggestRunning = false;
 ipcMain.handle('pack:suggest', async (_event, { id, entry, model = 'sonnet' } = {}) => {
   const sound = db.sounds.find((candidate) => candidate.id === id);
   if (!sound || !fs.existsSync(sound.path)) throw new Error('원본 파일을 찾을 수 없습니다.');
   const claude = findClaude();
   if (!claude) throw new Error('claude 명령을 찾지 못했습니다. Claude Code 를 설치하고 로그인해 주세요.');
   if (suggestRunning) throw new Error('다른 자동 추천이 진행 중입니다. 끝난 뒤 다시 눌러 주세요.');
+  suggestRunning = true;
   const started = Date.now();
-  const workDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sound-shelf-suggest-'));
+  let workDir = null;
   try {
+    workDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sound-shelf-suggest-'));
     const measured = await measureSoundFile(sound.path);
     const wavePng = path.join(workDir, 'waveform.png');
     const spectrumPng = path.join(workDir, 'spectrogram.png');
+    // showwavespic 은 배경이 투명이라 흰 파형이 흰 바탕에 묻혀 Claude 에게 빈 그림으로 보인다 — 검은 바탕에 얹는다.
     await execFileAsync(findMediaTool('ffmpeg'), ['-v', 'error', '-t', '30', '-i', sound.path, '-filter_complex',
-      'aformat=channel_layouts=mono,showwavespic=s=1200x240:colors=white', '-frames:v', '1', wavePng], { timeout: 60000 });
+      'aformat=channel_layouts=mono,showwavespic=s=1200x240:colors=white[wave];color=c=black:s=1200x240[bg];[bg][wave]overlay=format=auto,format=rgb24',
+      '-frames:v', '1', wavePng], { timeout: 60000 });
     await execFileAsync(findMediaTool('ffmpeg'), ['-v', 'error', '-t', '30', '-i', sound.path, '-lavfi',
       'aformat=channel_layouts=mono,showspectrumpic=s=1200x400:legend=1:scale=log:fscale=log', '-frames:v', '1', spectrumPng], { timeout: 60000 });
     const root = activeVaultRoot();
@@ -2503,27 +2527,21 @@ ipcMain.handle('pack:suggest', async (_event, { id, entry, model = 'sonnet' } = 
       peak_at: measured.analysis.peakAt, onsets: measured.analysis.onsets.slice(0, 12),
       loudest_moment_lufs: measured.loudness.momentaryMax, true_peak_dbtp: measured.loudness.truePeak, channels: sound.channels
     };
-    const prompt = buildSuggestPrompt({ relativePath, entry, measurement, wavePng, spectrumPng });
-    const run = new Promise((resolve, reject) => {
-      const child = spawn(claude, suggestArgs(prompt, model), { cwd: workDir, env: mediaToolEnvironment(), stdio: ['ignore', 'pipe', 'pipe'] });
-      let out = '';
-      let err = '';
-      const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error('자동 추천이 4분 안에 끝나지 않았습니다.')); }, 240000);
-      child.stdout.on('data', (chunk) => { out += chunk; });
-      child.stderr.on('data', (chunk) => { err += chunk; });
-      child.on('error', (error) => { clearTimeout(timer); reject(error); });
-      child.on('close', (code) => {
-        clearTimeout(timer);
-        if (code === 0) resolve(out);
-        else reject(new Error(`claude 가 실패했습니다 (${code}): ${(err || out).trim().split('\n').slice(-2).join(' ')}`));
-      });
-    });
-    suggestRunning = run;
-    const suggestion = sanitizeSuggestion(extractJsonObject(await run));
-    return { suggestion, measured, model, seconds: Math.round((Date.now() - started) / 1000) };
+    const input = { relativePath, entry, measurement, wavePng, spectrumPng };
+    const seconds = () => Math.round((Date.now() - started) / 1000);
+    if (model === 'council') {
+      const ask = (member, prompt) => askClaude(claude, prompt, member, workDir, 180000);
+      const onProgress = (message) => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('pack:suggest-progress', { id, message });
+      };
+      const { suggestion, council } = await runCouncil({ ask, input, onProgress });
+      return { suggestion, measured, model, council: { ...council, message: describeCouncil(council) }, seconds: seconds() };
+    }
+    const suggestion = sanitizeSuggestion(extractJsonObject(await askClaude(claude, buildSuggestPrompt(input), model, workDir, 240000)));
+    return { suggestion, measured, model, seconds: seconds() };
   } finally {
-    suggestRunning = null;
-    await fsp.rm(workDir, { recursive: true, force: true }).catch(() => {});
+    suggestRunning = false;
+    if (workDir) await fsp.rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
 });
 

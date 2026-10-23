@@ -867,9 +867,10 @@ async function suggestPackEntry() {
   const model = $('#pfModel').value;
   packJson.busy = true;
   $('#pfSuggest').disabled = true;
-  setPackNote(`자동 추천 받는 중… 파형·스펙트로그램과 측정값을 Claude 에게 보여 주고 있습니다 (${model === 'haiku' ? '약 25초' : '약 50초'}).`);
+  const wait = { haiku: '약 25초', council: '약 2~3분 — 모델 셋이 각자 추천하고, 누가 썼는지 가린 채 서로 평가한 뒤 하나로 합칩니다' }[model] || '약 50초';
+  setPackNote(`자동 추천 받는 중… 파형·스펙트로그램과 측정값을 Claude 에게 보여 주고 있습니다 (${wait}).`);
   try {
-    const { suggestion, measured, seconds } = await window.soundLibrary.suggestPackEntry({ id: sound.id, entry: packJson.draft, model });
+    const { suggestion, measured, seconds, council } = await window.soundLibrary.suggestPackEntry({ id: sound.id, entry: packJson.draft, model });
     if (packJson.sound !== sound) return;
     packJson.measured = measured;
     const draft = packJson.draft;
@@ -896,7 +897,8 @@ async function suggestPackEntry() {
     setPackNote([
       `추천 ${filled}개를 채웠습니다 (${seconds}초${suggestion.confidence !== null ? `, 확신 ${Math.round(suggestion.confidence * 100)}%` : ''}). 보라색 테두리가 추천으로 채운 값입니다 — 확인하고 틀린 건 × 로 빼세요.`,
       suggestion.uncertain ? `확신 없는 부분: ${suggestion.uncertain}` : '',
-      keptDescription.trim()
+      keptDescription.trim(),
+      council?.message || ''
     ].filter(Boolean).join('\n'));
     renderPackForm();
   } catch (error) {
@@ -3803,6 +3805,9 @@ window.soundLibrary.onLibraryUpdated((snapshot) => {
   if (snapshot.updateReason === 'remote-sync') showToast('다른 Mac의 변경 사항을 반영했습니다.', 2000);
 });
 window.soundLibrary.onLibraryNotice((message) => showToast(message, 8000, '#noticeToast'));
+window.soundLibrary.onSuggestProgress(({ id, message }) => {
+  if (packJson.busy && packJson.sound?.id === id) setPackNote(message);
+});
 window.soundLibrary.onUpdateStatus((status) => {
   state.updateStatus = status;
   renderUpdateSettings();
