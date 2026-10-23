@@ -17,26 +17,41 @@ function findClaude(env = process.env) {
   return candidates.find((candidate) => fs.existsSync(candidate)) || null;
 }
 
-function buildPrompt({ relativePath, entry, measurement, wavePng, spectrumPng }) {
+// 소리를 판단할 단서. 추천·심사·종합(suggest-council) 프롬프트가 함께 쓴다.
+function clueLines({ relativePath, entry, measurement, wavePng, spectrumPng }) {
   const known = {};
   for (const key of ['name', 'category', 'description', 'use_for', 'avoid_for', 'tags', 'aliases', 'role', 'intensity']) {
     const value = entry?.[key];
     if (Array.isArray(value) ? value.length : value) known[key] = value;
   }
   return [
-    '너는 효과음 라이브러리의 메타데이터를 쓰는 사람이다. 소리를 직접 들을 수 없으니 아래 단서로 판단한다.',
     `- 그림 두 장을 Read 로 열어 볼 것: 파형 ${wavePng} , 스펙트로그램 ${spectrumPng}`,
     `- 파일 경로(폴더 이름도 단서): ${relativePath}`,
     `- 측정값: ${JSON.stringify(measurement)}`,
-    `- 이미 적혀 있는 값(있으면 존중하고 보완): ${JSON.stringify(known)}`,
+    `- 이미 적혀 있는 값(있으면 존중하고 보완): ${JSON.stringify(known)}`
+  ];
+}
+
+function guideLines() {
+  return [
     '관점: 한국 요리·브이로그·예능 숏폼을 편집하는 사람이 "이 소리를 어디에 쓰나"를 찾을 때 도움이 되게.',
     '- use_for / avoid_for 는 "장면 + 순간" 한국어 짧은 구. 예: "자막이 톡 튀어나올 때", "진지한 인터뷰 중"',
     '- aliases 는 사람들이 이 소리를 부르는 한국어 의성어·별명 2~4개. 예: 뽁, 뿅, 띠용, 촤악',
     `- role 은 다음 중 하나: ${ROLES.map((role) => `${role.id}(${role.label})`).join(', ')}`,
     `- intensity 는 ${INTENSITIES.join(' / ')} 중 하나`,
-    '- tags 는 한국어·영어 섞어 4~8개, 너무 일반적인 말(sound, effect) 금지',
+    '- tags 는 한국어·영어 섞어 4~8개, 너무 일반적인 말(sound, effect) 금지'
+  ];
+}
+
+const SUGGESTION_SHAPE = '{"description":"한 문장","use_for":[],"avoid_for":[],"tags":[],"aliases":[],"role":"","intensity":"","character":"음색 2~3단어","confidence":0.0,"uncertain":"확신 없는 부분 한 문장"}';
+
+function buildPrompt(input) {
+  return [
+    '너는 효과음 라이브러리의 메타데이터를 쓰는 사람이다. 소리를 직접 들을 수 없으니 아래 단서로 판단한다.',
+    ...clueLines(input),
+    ...guideLines(),
     '다음 JSON 하나만 출력하라. 설명·코드 펜스 없이:',
-    '{"description":"한 문장","use_for":[],"avoid_for":[],"tags":[],"aliases":[],"role":"","intensity":"","character":"음색 2~3단어","confidence":0.0,"uncertain":"확신 없는 부분 한 문장"}'
+    SUGGESTION_SHAPE
   ].join('\n');
 }
 
@@ -83,4 +98,4 @@ function suggestArgs(prompt, model) {
   return args;
 }
 
-module.exports = { buildPrompt, extractJsonObject, findClaude, sanitizeSuggestion, suggestArgs };
+module.exports = { SUGGESTION_SHAPE, buildPrompt, clueLines, extractJsonObject, findClaude, guideLines, sanitizeSuggestion, suggestArgs };

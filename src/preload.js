@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('soundLibrary', {
   getPackVocab: () => ipcRenderer.invoke('pack:vocab'),
   measurePackSound: (id) => ipcRenderer.invoke('pack:measure', { id }),
   suggestPackEntry: (payload) => ipcRenderer.invoke('pack:suggest', payload),
+  onSuggestProgress: (callback) => ipcRenderer.on('pack:suggest-progress', (_event, payload) => callback(payload)),
   renameSound: (payload) => ipcRenderer.invoke('library:rename', payload),
   updateSoundsBatch: (payload) => ipcRenderer.invoke('library:update-batch', payload),
   setTagsBatch: (payload) => ipcRenderer.invoke('library:set-tags-batch', payload),
